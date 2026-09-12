@@ -609,7 +609,7 @@ DATABASES = {'default': {
     <p>
       ① Nginx 默认 <code>client_max_body_size 1m</code>，讲师上传超过 1 MB 的课程图片/文件会得到 413，需要显式调大；
       ② Daphne 在代理后面要加 <code>--proxy-headers</code>，Nginx 的 <code>/ws/</code> 块补上 <code>X-Forwarded-For</code>、<code>X-Forwarded-Proto</code>，否则拿不到真实 IP 和协议；
-      ③ 没有 <code>LOGGING</code> 配置，生产排错困难；
+      ③ 没有 <code>LOGGING</code> 配置，生产排错困难（见<a href="t03.html#logging">专题 3</a>）；
       ④ 静态文件建议用 <code>STORAGES["staticfiles"]</code> 配置 <code>ManifestStaticFilesStorage</code>，文件名带哈希，可以放心设置长缓存；
       ⑤ 用真实证书后设置 <code>SECURE_HSTS_SECONDS</code>；
       ⑥ 把 <code>manage.py check --deploy --fail-level WARNING</code> 放进 CI。

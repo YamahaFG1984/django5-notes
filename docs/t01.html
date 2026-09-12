@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>专题 1 · 测试 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="T1">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">专题 1 · 专题补充</span>
+<h1>测试：让代码自己证明它是对的</h1>
+<p class="lede">
+  前面 17 章的点评里，“写一个测试”出现了很多次，可配套仓库里<strong>一个测试都没有</strong>，每个应用的 <code>tests.py</code> 都只有一行注释。
+  这一篇从 Django 自带的 <code>TestCase</code> 讲起，再换到社区更常用的 pytest-django + factory_boy，
+  用书里真实的博客和支付代码写测试。其中有两个测试一写出来就会失败，因为它们正好撞上了仓库里的 bug。
+</p>
+
+<div class="goals">
+  <h4>本篇目标</h4>
+  <ul>
+    <li>理解测试数据库、事务回滚，以及“准备 → 执行 → 断言”的结构</li>
+    <li>用测试客户端测试视图：状态码、模板、内容、重定向、邮件</li>
+    <li>用 pytest-django 的 fixture 和参数化写出更短的测试</li>
+    <li>用 factory_boy 造测试数据，告别手写一长串 <code>objects.create()</code></li>
+    <li>用 Mock 隔离 Stripe、Celery 等外部服务；用查询计数防止 N+1 回归</li>
+    <li>统计覆盖率，用 GitHub Actions 在每次推送时自动运行测试</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="why">为什么写测试、写哪些测试</h2>
+
+<p>
+  手动测试是：改完代码，打开浏览器点一遍。它的问题是<strong>不会重复</strong>：改第 10 章的优惠券时，你不会再回去点一遍第 9 章的支付。
+  自动化测试把“点一遍”写成代码，几秒钟内把所有功能重新验证一次。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="测试金字塔：底层是大量快速的单元测试，测试模型方法、表单校验、工具函数；中间是集成测试，用测试客户端走完 URL、视图、模板和数据库；顶层是少量端到端测试，用 Playwright 驱动真实浏览器">
+  <polygon class="bx-a" points="300,30 380,30 420,100 260,100"/>
+  <text class="ttl on-a" x="340" y="72" text-anchor="middle">端到端</text>
+  <polygon class="bx-b" points="258,106 422,106 482,180 198,180"/>
+  <text class="ttl on-b" x="340" y="150" text-anchor="middle">集成测试</text>
+  <polygon class="bx-g" points="196,186 484,186 544,260 136,260"/>
+  <text class="ttl on-g" x="340" y="230" text-anchor="middle">单元测试</text>
+
+  <text class="sm" x="540" y="56">少量 · 慢 · 最接近真实用户</text>
+  <text class="sm" x="540" y="76">Playwright / Selenium 驱动浏览器</text>
+  <text class="sm" x="540" y="134">适量 · 本篇重点</text>
+  <text class="sm" x="540" y="154">测试客户端：URL → 视图 → 模板 → 数据库</text>
+  <text class="sm" x="560" y="214">大量 · 毫秒级</text>
+  <text class="sm" x="560" y="234">模型方法、表单、服务函数</text>
+
+  <path class="ln-d" d="M40 250 V40" marker-end="url(#ar)"/>
+  <text class="sm" x="52" y="48">更慢</text>
+  <text class="sm" x="52" y="66">更贵</text>
+  <text class="sm" x="52" y="244">更快</text>
+  <text class="sm" x="52" y="226">更多</text>
+</svg>
+<figcaption>图 T1-1　测试金字塔。Django 项目里，“用测试客户端请求一个 URL”的集成测试性价比特别高</figcaption>
+</figure>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#9989;</span><h4>一定要测</h4><p>你写的业务规则（只显示已发布文章、优惠券有效期）、权限（未登录、非作者）、表单校验、边界情况（不存在的 ID、空列表）、外部回调（Webhook）。</p></div>
+  <div class="card"><span class="ic">&#128027;</span><h4>每个 bug 一个测试</h4><p>修 bug 前先写一个能复现它的失败测试，修好后它变绿，并且以后永远守着这里。</p></div>
+  <div class="card"><span class="ic">&#128683;</span><h4>不必测</h4><p>Django 和第三方库自己的功能（<code>max_length</code> 是否生效、Admin 页面能否打开），以及函数内部的调用顺序这类实现细节。</p></div>
+</div>
+
+<h2 id="first">第一个测试：Django 的 TestCase</h2>
+
+<div class="code" data-lang="py" data-file="blog/tests.py">
+<pre>
+from django.contrib.auth import get_user_model
+from django.test import TestCase
+
+from .models import Post
+
+
+class PostModelTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):                          # 整个类只执行一次，比 setUp 快
+        cls.author = get_user_model().objects.create_user('ada', password='pw')
+        cls.published = Post.objects.create(
+            title='Hello', slug='hello', author=cls.author, body='...',
+            status=Post.Status.PUBLISHED,
+        )
+        cls.draft = Post.objects.create(              # status 默认就是草稿
+            title='Draft', slug='draft', author=cls.author, body='...',
+        )
+
+    def test_published_manager_excludes_drafts(self):
+        self.assertQuerySetEqual(Post.published.all(), [self.published])
+
+    def test_absolute_url_ends_with_slug(self):
+        self.assertTrue(self.published.get_absolute_url().endswith('/hello/'))
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+python manage.py test blog        # 运行 blog 应用的测试
+python manage.py test --keepdb    # 保留测试数据库，第二次起更快
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="测试运行的生命周期：创建名为 test_ 前缀的独立数据库，执行全部迁移；每个测试开始时开启事务，运行测试，结束时回滚，所以测试之间互不影响；全部完成后销毁测试数据库">
+  <rect class="bx-b" x="16" y="70" width="140" height="70" rx="10"/>
+  <text class="ttl on-b" x="86" y="98" text-anchor="middle">创建数据库</text>
+  <text class="mono sm" x="86" y="120" text-anchor="middle">test_blog</text>
+  <path class="ln" d="M158 105 H190" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="194" y="70" width="120" height="70" rx="10"/>
+  <text class="ttl on-b" x="254" y="98" text-anchor="middle">执行迁移</text>
+  <text class="sm" x="254" y="120" text-anchor="middle">和真库结构一致</text>
+  <path class="ln" d="M316 105 H348" marker-end="url(#ar)"/>
+
+  <rect class="bx-d" x="352" y="20" width="250" height="180" rx="12"/>
+  <text class="sm" x="477" y="40" text-anchor="middle">对每一个测试重复</text>
+  <rect class="bx-a" x="372" y="54" width="210" height="34" rx="6"/>
+  <text class="sm on-a" x="477" y="76" text-anchor="middle">① 开启事务</text>
+  <rect class="bx-g" x="372" y="98" width="210" height="34" rx="6"/>
+  <text class="sm on-g" x="477" y="120" text-anchor="middle">② 运行测试（可以随意写数据）</text>
+  <rect class="bx-r" x="372" y="142" width="210" height="34" rx="6"/>
+  <text class="sm on-r" x="477" y="164" text-anchor="middle">③ 回滚：数据全部消失</text>
+  <path class="ln-d" d="M590 160 C630 160 630 70 590 70" marker-end="url(#ar)"/>
+
+  <path class="ln" d="M604 105 H636" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="640" y="70" width="104" height="70" rx="10"/>
+  <text class="ttl on-b" x="692" y="98" text-anchor="middle">销毁</text>
+  <text class="sm" x="692" y="120" text-anchor="middle">真库不受影响</text>
+</svg>
+<figcaption>图 T1-2　每个测试都从同一个干净状态开始，这就是测试可以按任意顺序运行的原因</figcaption>
+</figure>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 150" role="img" aria-label="每个测试分三段：准备数据，执行被测操作，断言结果">
+  <rect class="bx-b" x="16" y="20" width="232" height="110" rx="12"/>
+  <text class="ttl on-b" x="132" y="46" text-anchor="middle">Arrange 准备</text>
+  <text class="mono sm" x="132" y="76" text-anchor="middle">post = PostFactory(</text>
+  <text class="mono sm" x="132" y="96" text-anchor="middle">    status=DRAFT)</text>
+  <path class="ln" d="M250 75 H270" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="274" y="20" width="220" height="110" rx="12"/>
+  <text class="ttl on-a" x="384" y="46" text-anchor="middle">Act 执行</text>
+  <text class="mono sm" x="384" y="76" text-anchor="middle">r = client.get(</text>
+  <text class="mono sm" x="384" y="96" text-anchor="middle">  post.get_absolute_url())</text>
+  <path class="ln" d="M496 75 H516" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="520" y="20" width="224" height="110" rx="12"/>
+  <text class="ttl on-g" x="632" y="46" text-anchor="middle">Assert 断言</text>
+  <text class="mono sm" x="632" y="76" text-anchor="middle">assert r.status_code</text>
+  <text class="mono sm" x="632" y="96" text-anchor="middle">       == 404</text>
+</svg>
+<figcaption>图 T1-3　一个测试只验证一件事；测试名写清楚“在什么情况下应该怎样”</figcaption>
+</figure>
+
+<h2 id="client">测试视图：测试客户端</h2>
+
+<p>测试客户端像一个不联网的浏览器：请求直接交给 Django 处理，响应对象上还多了 <code>context</code>、<code>templates</code> 等只有测试里才有的信息。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="测试客户端的请求直接进入 Django 的中间件、URL 解析、视图和模板，不经过网络和 Web 服务器；返回的响应带有状态码、内容、上下文和使用的模板">
+  <rect class="bx-a" x="16" y="50" width="150" height="70" rx="10"/>
+  <text class="ttl on-a" x="91" y="78" text-anchor="middle">测试代码</text>
+  <text class="mono sm" x="91" y="100" text-anchor="middle">client.get(url)</text>
+  <path class="ln-a" d="M168 85 H210" marker-end="url(#ar-a)"/>
+  <rect class="bx-d" x="214" y="30" width="330" height="110" rx="12"/>
+  <text class="sm" x="379" y="50" text-anchor="middle">同一个 Django，只是没有网络和服务器</text>
+  <rect class="bx" x="230" y="64" width="70" height="56" rx="6"/><text class="sm" x="265" y="96" text-anchor="middle">中间件</text>
+  <rect class="bx" x="310" y="64" width="60" height="56" rx="6"/><text class="sm" x="340" y="96" text-anchor="middle">URL</text>
+  <rect class="bx" x="380" y="64" width="60" height="56" rx="6"/><text class="sm" x="410" y="96" text-anchor="middle">视图</text>
+  <rect class="bx" x="450" y="64" width="80" height="56" rx="6"/><text class="sm" x="490" y="96" text-anchor="middle">模板/数据库</text>
+  <path class="ln-g" d="M546 85 H588" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="592" y="30" width="152" height="110" rx="10"/>
+  <text class="ttl on-g" x="668" y="54" text-anchor="middle">response</text>
+  <text class="mono sm" x="610" y="76">.status_code</text>
+  <text class="mono sm" x="610" y="94">.text（5.2 新增）</text>
+  <text class="mono sm" x="610" y="112">.context</text>
+  <text class="mono sm" x="610" y="130">.templates</text>
+</svg>
+<figcaption>图 T1-4　测试客户端默认会把视图里抛出的异常直接抛给测试，而不是返回 500，便于看到真正的错误</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="blog/tests.py（续）">
+<pre>
+from django.core import mail
+from django.urls import reverse
+
+
+class PostViewTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        cls.author = get_user_model().objects.create_user('ada', password='pw')
+        cls.post = Post.objects.create(title='Hello', slug='hello', author=cls.author,
+                                       body='...', status=Post.Status.PUBLISHED)
+
+    def test_detail_shows_published_post(self):
+        response = self.client.get(self.post.get_absolute_url())
+        self.assertContains(response, 'Hello')                 # 同时检查状态码 200
+        self.assertTemplateUsed(response, 'blog/post/detail.html')
+
+    def test_detail_hides_draft(self):
+        self.post.status = Post.Status.DRAFT
+        self.post.save()
+        response = self.client.get(self.post.get_absolute_url())
+        self.assertEqual(response.status_code, 404)
+
+    def test_share_sends_one_email(self):
+        url = reverse('blog:post_share', args=[self.post.id])
+        self.client.post(url, {'name': 'Ada', 'email': 'ada@example.com',
+                               'to': 'bob@example.com', 'comments': 'Nice'})
+        self.assertEqual(len(mail.outbox), 1)                   # 测试时邮件进内存，不会真的发出
+        self.assertEqual(mail.outbox[0].to, ['bob@example.com'])
+
+    def test_comment_rejects_get(self):
+        url = reverse('blog:post_comment', args=[self.post.id])
+        self.assertEqual(self.client.get(url).status_code, 405)  # @require_POST
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>断言 / 工具</th><th>用途</th></tr>
+  <tr><td><code>assertContains(r, text)</code> / <code>assertNotContains</code></td><td>状态码为 200 且页面包含（或不包含）某段文字</td></tr>
+  <tr><td><code>assertRedirects(r, url)</code></td><td>响应是重定向并指向 <code>url</code>（检查 PRG 模式）</td></tr>
+  <tr><td><code>assertTemplateUsed(r, name)</code></td><td>渲染时用到了某个模板</td></tr>
+  <tr><td><code>assertFormError(form, field, errors)</code></td><td>表单某字段有指定错误（5.0 起第一个参数是表单）</td></tr>
+  <tr><td><code>assertQuerySetEqual(qs, values)</code></td><td>比较查询集与列表（旧名 <code>assertQuerysetEqual</code> 已在 5.1 移除）</td></tr>
+  <tr><td><code>assertNumQueries(n)</code></td><td>代码块恰好执行 n 条 SQL</td></tr>
+  <tr><td><code>self.client.force_login(user)</code></td><td>跳过登录表单，直接以某用户身份请求</td></tr>
+  <tr><td><code>django.core.mail.outbox</code></td><td>测试期间发出的所有邮件</td></tr>
+</table>
+</div>
+
+<h2 id="pytest">pytest-django：更短的测试</h2>
+
+<p>TestCase 完全够用，但社区里更流行 pytest：测试就是普通函数，断言就是 <code>assert</code>，需要什么就在参数里写上 fixture 的名字。</p>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install pytest-django factory-boy pytest-cov
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file="pytest.ini（放在 manage.py 旁边）">
+<pre>
+[pytest]
+DJANGO_SETTINGS_MODULE = mysite.settings
+python_files = tests.py test_*.py
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>fixture / 标记</th><th>作用</th></tr>
+  <tr><td><code>@pytest.mark.django_db</code></td><td>允许这个测试访问数据库（默认禁止，防止无意中写出慢测试）</td></tr>
+  <tr><td><code>client</code> / <code>admin_client</code></td><td>测试客户端；后者已用超级用户登录</td></tr>
+  <tr><td><code>django_user_model</code></td><td>当前的用户模型，等价于 <code>get_user_model()</code></td></tr>
+  <tr><td><code>mailoutbox</code></td><td>本测试发出的邮件列表</td></tr>
+  <tr><td><code>settings</code></td><td>在单个测试里临时修改设置，结束后自动还原</td></tr>
+  <tr><td><code>django_assert_num_queries</code> / <code>django_assert_max_num_queries</code></td><td>断言 SQL 数量（精确 / 上限）</td></tr>
+  <tr><td><code>django_capture_on_commit_callbacks</code></td><td>捕获并执行 <code>transaction.on_commit</code> 回调</td></tr>
+  <tr><td><code>rf</code></td><td><code>RequestFactory</code>，直接构造请求对象调用视图函数</td></tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 从 tests.py 到 tests/ 包</div>
+  <p>测试一多，就把应用里的 <code>tests.py</code> 换成一个 <code>tests/</code> 目录：<code>__init__.py</code>、<code>factories.py</code>、<code>test_models.py</code>、<code>test_views.py</code>……注意两者不能同时存在，建好目录后要删掉原来的 <code>tests.py</code>。下文的例子都按这种结构组织。</p>
+</div>
+
+<div class="code" data-lang="py" data-file="blog/tests/test_views.py">
+<pre>
+import pytest
+from django.urls import reverse
+
+from blog.models import Post
+from .factories import PostFactory
+
+pytestmark = pytest.mark.django_db             # 本文件所有测试都可以访问数据库
+
+
+def test_detail_hides_draft(client):
+    post = PostFactory(status=Post.Status.DRAFT)       # PostFactory 见下一节
+    assert client.get(post.get_absolute_url()).status_code == 404
+
+
+def test_detail_shows_title(client):
+    post = PostFactory(title='Hello pytest')
+    response = client.get(post.get_absolute_url())
+    assert 'Hello pytest' in response.text      # HttpResponse.text：Django 5.2 新增
+
+
+def test_share_sends_email(client, mailoutbox):
+    post = PostFactory()
+    client.post(reverse('blog:post_share', args=[post.id]),
+                {'name': 'Ada', 'email': 'ada@example.com', 'to': 'bob@example.com'})
+    assert len(mailoutbox) == 1
+    assert post.title in mailoutbox[0].subject
+
+
+@pytest.mark.parametrize('data', [                 # 一个函数，三组输入，三个测试
+    {'name': '', 'email': 'ada@example.com', 'to': 'bob@example.com'},
+    {'name': 'Ada', 'email': 'not-an-email', 'to': 'bob@example.com'},
+    {'name': 'Ada', 'email': 'ada@example.com', 'to': ''},
+])
+def test_share_invalid_form_sends_nothing(client, mailoutbox, data):
+    post = PostFactory()
+    response = client.post(reverse('blog:post_share', args=[post.id]), data)
+    assert response.context['form'].errors
+    assert mailoutbox == []
+
+
+def test_comment_is_saved(client):
+    post = PostFactory()
+    client.post(reverse('blog:post_comment', args=[post.id]),
+                {'name': 'Bob', 'email': 'bob@example.com', 'body': 'Great!'})
+    assert post.comments.count() == 1
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+pytest                 # 运行全部测试
+pytest blog -k share   # 只跑 blog 里名字包含 share 的测试
+pytest -x --lf         # 遇到第一个失败就停；只重跑上次失败的
+pytest --reuse-db      # 复用测试数据库
+</pre>
+</div>
+
+<h2 id="factories">factory_boy：造测试数据</h2>
+
+<p>每个测试都手写 <code>Post.objects.create(title=..., slug=..., author=..., body=...)</code> 又长又脆：模型加一个必填字段，所有测试都要改。工厂把“一个合法对象长什么样”写在一个地方，测试里只写<strong>和本测试有关的</strong>字段。</p>
+
+<div class="code" data-lang="py" data-file="blog/tests/factories.py">
+<pre>
+import factory
+from django.contrib.auth import get_user_model
+from django.utils import timezone
+from django.utils.text import slugify
+
+from blog.models import Comment, Post
+
+
+class UserFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = get_user_model()
+        django_get_or_create = ('username',)
+
+    username = factory.Sequence(lambda n: f'user{n}')          # user0, user1, ...
+    email = factory.LazyAttribute(lambda o: f'{o.username}@example.com')
+    password = factory.django.Password('secret')               # 自动 set_password
+
+
+class PostFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = Post
+
+    title = factory.Sequence(lambda n: f'Post number {n}')
+    slug = factory.LazyAttribute(lambda o: slugify(o.title))
+    author = factory.SubFactory(UserFactory)                    # 自动创建作者
+    body = factory.Faker('paragraph')
+    status = Post.Status.PUBLISHED                              # 大多数测试需要已发布的文章
+    publish = factory.LazyFunction(timezone.now)
+
+    @factory.post_generation
+    def tags(self, create, extracted, **kwargs):               # PostFactory(tags=['django'])
+        if create and extracted:
+            self.tags.add(*extracted)
+
+
+class CommentFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = Comment
+
+    post = factory.SubFactory(PostFactory)
+    name = factory.Faker('name')
+    email = factory.Faker('email')
+    body = factory.Faker('sentence')
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="工厂的常见用法：PostFactory() 保存到数据库；PostFactory.build() 只在内存中创建；create_batch 批量创建；关键字参数覆盖默认值；双下划线设置子工厂的字段">
+  <rect class="bx-a" x="16" y="20" width="220" height="160" rx="12"/>
+  <text class="ttl on-a" x="126" y="46" text-anchor="middle">PostFactory</text>
+  <text class="sm" x="126" y="72" text-anchor="middle">title: Sequence</text>
+  <text class="sm" x="126" y="94" text-anchor="middle">slug: 由 title 计算</text>
+  <text class="sm" x="126" y="116" text-anchor="middle">author: SubFactory(User)</text>
+  <text class="sm" x="126" y="138" text-anchor="middle">status: PUBLISHED</text>
+  <text class="sm" x="126" y="160" text-anchor="middle">tags: post_generation</text>
+  <path class="ln-a" d="M238 100 H290" marker-end="url(#ar-a)"/>
+  <rect class="bx-d" x="294" y="20" width="450" height="160" rx="12"/>
+  <text class="mono sm" x="314" y="48">PostFactory()</text><text class="sm" x="560" y="48">保存到数据库</text>
+  <text class="mono sm" x="314" y="74">PostFactory.build()</text><text class="sm" x="560" y="74">只在内存里，不访问数据库</text>
+  <text class="mono sm" x="314" y="100">PostFactory.create_batch(5)</text><text class="sm" x="560" y="100">一次建 5 篇</text>
+  <text class="mono sm" x="314" y="126">PostFactory(status=DRAFT)</text><text class="sm" x="560" y="126">覆盖默认值</text>
+  <text class="mono sm" x="314" y="152">CommentFactory(post__title='X')</text><text class="sm" x="560" y="152">设置子工厂字段</text>
+</svg>
+<figcaption>图 T1-5　第 12 章用 JSON fixture 装初始数据，那适合“演示数据”；测试数据用工厂，表结构变化时只需改一处</figcaption>
+</figure>
+
+<h2 id="queries">用测试锁住查询数量</h2>
+
+<p>
+  第 3 章点评指出博客列表页有 N+1 查询：模板里每篇文章都要 <code>{{ post.author }}</code> 和 <code>{% for tag in post.tags.all %}</code>，每多一篇文章就多两条 SQL。
+  下面的测试不关心具体是几条 SQL，只要求<strong>查询数不随文章数增长</strong>：
+</p>
+
+<div class="code" data-lang="py" data-file="blog/tests/test_queries.py">
+<pre>
+import pytest
+from django.db import connection
+from django.test.utils import CaptureQueriesContext
+from django.urls import reverse
+
+from .factories import PostFactory
+
+
+def count_queries(client, url):
+    with CaptureQueriesContext(connection) as ctx:
+        client.get(url)
+    return len(ctx.captured_queries)
+
+
+@pytest.mark.django_db
+def test_post_list_has_no_n_plus_one(client):
+    url = reverse('blog:post_list')
+    PostFactory(tags=['django'])
+    one_post = count_queries(client, url)
+    PostFactory.create_batch(2, tags=['django'])      # 列表每页 3 篇，都在第一页
+    three_posts = count_queries(client, url)
+    assert three_posts == one_post                    # 仓库现在的代码：会失败，多出 4 条
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="blog/views.py（修复）">
+<pre>
+def post_list(request, tag_slug=None):
+    post_list = Post.published.select_related('author').prefetch_related('tags')
+    # ...
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 先红后绿</div>
+  <p>先写测试、看它失败（红），再改代码、看它通过（绿）。先看到失败，才能确定测试真的在检查你以为它在检查的东西。</p>
+</div>
+
+<h2 id="mock">隔离外部服务：Mock</h2>
+
+<p>测试里不能真的去调 Stripe、真的发邮件、真的把任务交给 Celery：会慢、会不稳定、会花钱。做法是在<strong>系统边界</strong>把外部服务换成替身。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="Mock 的边界：我们的视图、模型、表单真实运行；Stripe API 用 unittest.mock.patch 替换，Celery 的 delay 替换为 Mock，邮件使用内存后端，数据库使用真实的测试数据库">
+  <rect class="bx-g" x="16" y="30" width="290" height="170" rx="14"/>
+  <text class="ttl on-g" x="161" y="56" text-anchor="middle">真实运行（被测对象）</text>
+  <text class="sm" x="161" y="86" text-anchor="middle">URL、视图、表单、模型</text>
+  <text class="sm" x="161" y="110" text-anchor="middle">模板、会话、中间件</text>
+  <text class="sm" x="161" y="134" text-anchor="middle">测试数据库（真的 SQL）</text>
+  <text class="sm on-g" x="161" y="172" text-anchor="middle">越真实，测试越可信</text>
+
+  <path class="ln-r" d="M340 20 V210" style="stroke-dasharray:6 5"/>
+  <text class="sm on-r" x="340" y="14" text-anchor="middle">系统边界</text>
+
+  <rect class="bx-p" x="380" y="30" width="170" height="44" rx="8"/>
+  <text class="sm on-p" x="465" y="57" text-anchor="middle">Stripe API</text>
+  <rect class="bx-p" x="380" y="88" width="170" height="44" rx="8"/>
+  <text class="sm on-p" x="465" y="115" text-anchor="middle">Celery / RabbitMQ</text>
+  <rect class="bx-p" x="380" y="146" width="170" height="44" rx="8"/>
+  <text class="sm on-p" x="465" y="173" text-anchor="middle">SMTP 邮件服务器</text>
+  <path class="ln-a" d="M552 52 H586" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M552 110 H586" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M552 168 H586" marker-end="url(#ar-a)"/>
+  <text class="mono sm on-a" x="592" y="57">patch(...)</text>
+  <text class="mono sm on-a" x="592" y="115">patch(task.delay)</text>
+  <text class="mono sm on-a" x="592" y="173">locmem 后端</text>
+  <text class="sm" x="560" y="222" text-anchor="middle">替身只记录“被怎样调用了”，测试再检查调用参数</text>
+</svg>
+<figcaption>图 T1-6　只替换你控制不了的东西；数据库不要 Mock，用真实的测试数据库</figcaption>
+</figure>
+
+<p>下面测试第 9 章的支付代码。先准备商店的工厂：</p>
+
+<div class="code" data-lang="py" data-file="orders/tests/factories.py">
+<pre>
+from decimal import Decimal
+
+import factory
+from django.utils.text import slugify
+
+from orders.models import Order, OrderItem
+from shop.models import Category, Product
+
+
+class CategoryFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = Category
+        django_get_or_create = ('slug',)
+
+    name = factory.Sequence(lambda n: f'Category {n}')
+    slug = factory.LazyAttribute(lambda o: slugify(o.name))
+
+
+class ProductFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = Product
+
+    category = factory.SubFactory(CategoryFactory)
+    name = factory.Sequence(lambda n: f'Green tea {n}')
+    slug = factory.LazyAttribute(lambda o: slugify(o.name))
+    price = Decimal('10.00')
+
+
+class OrderFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = Order
+
+    first_name = 'Ada'
+    last_name = 'Lovelace'
+    email = factory.Faker('email')
+    address = '1 Main Street'
+    postal_code = '12345'
+    city = 'London'
+
+
+class OrderItemFactory(factory.django.DjangoModelFactory):
+    class Meta:
+        model = OrderItem
+
+    order = factory.SubFactory(OrderFactory)
+    product = factory.SubFactory(ProductFactory)
+    price = factory.SelfAttribute('product.price')   # 价格快照取商品当前价
+    quantity = 1
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="payment/tests.py（创建 Stripe 结账会话）">
+<pre>
+from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import pytest
+from django.urls import reverse, reverse_lazy
+
+from orders.tests.factories import OrderFactory, OrderItemFactory
+
+
+@pytest.mark.django_db
+def test_payment_process_redirects_to_stripe(client):
+    item = OrderItemFactory(price=Decimal('12.50'), quantity=2)
+    session = client.session                  # 先取出、修改、保存，客户端才会带上
+    session['order_id'] = item.order.id
+    session.save()
+
+    fake = SimpleNamespace(url='https://checkout.stripe.test/c/abc')
+    with patch('stripe.checkout.Session.create', return_value=fake) as create:
+        response = client.post(reverse('payment:process'))
+
+    assert response.status_code == 303
+    assert response['Location'] == fake.url
+    sent = create.call_args.kwargs                         # 检查“我们发给 Stripe 的数据”
+    assert sent['client_reference_id'] == item.order.id
+    assert sent['line_items'][0]['price_data']['unit_amount'] == 1250   # 以分为单位
+    assert sent['line_items'][0]['quantity'] == 2
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="payment/tests.py（Webhook）">
+<pre>
+WEBHOOK = reverse_lazy('payment:stripe-webhook')
+
+
+def paid_event(order_id):
+    session = SimpleNamespace(mode='payment', payment_status='paid',
+                              client_reference_id=str(order_id), payment_intent='pi_123')
+    return SimpleNamespace(id='evt_1', type='checkout.session.completed',
+                           data=SimpleNamespace(object=session))
+
+
+def post_webhook(client, **extra):
+    return client.post(WEBHOOK, data=b'{}', content_type='application/json', **extra)
+
+
+@pytest.mark.django_db
+def test_webhook_marks_order_paid(client):
+    order = OrderFactory()
+    with patch('stripe.Webhook.construct_event', return_value=paid_event(order.id)), \
+         patch('payment.webhooks.payment_completed.delay') as delay:
+        response = post_webhook(client, headers={'Stripe-Signature': 't=1,v1=x'})
+
+    assert response.status_code == 200
+    order.refresh_from_db()
+    assert order.paid and order.stripe_id == 'pi_123'
+    delay.assert_called_once_with(order.id)
+
+
+@pytest.mark.django_db
+def test_webhook_is_idempotent(client):                   # 第 9 章点评：Stripe 会重复投递
+    order = OrderFactory()
+    with patch('stripe.Webhook.construct_event', return_value=paid_event(order.id)), \
+         patch('payment.webhooks.payment_completed.delay') as delay:
+        post_webhook(client, headers={'Stripe-Signature': 't=1,v1=x'})
+        post_webhook(client, headers={'Stripe-Signature': 't=1,v1=x'})
+    delay.assert_called_once()                            # 仓库现在的代码：会失败，发票发了两次
+
+
+def test_webhook_without_signature_is_rejected(client):
+    response = post_webhook(client)                        # 不带 Stripe-Signature 头
+    assert response.status_code == 400                     # 仓库现在的代码：抛出 KeyError
+</pre>
+</div>
+
+<p>最后两个测试一写出来就会失败，它们各自发现了一个 bug：</p>
+
+<div class="code" data-lang="py" data-file="payment/webhooks.py（修复）">
+<pre>
+sig_header = request.META.get('HTTP_STRIPE_SIGNATURE', '')   # 原来是 request.META[...] → KeyError → 500
+# ...
+            order = Order.objects.get(id=session.client_reference_id)
+            if order.paid:                                     # 已处理过：直接确认，不再重复
+                return HttpResponse(status=200)
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 任务在事务提交后才派发时怎么测</div>
+  <p>
+    第 8 章点评建议把 <code>order_created.delay(order.id)</code> 改成 <code>transaction.on_commit(lambda: order_created.delay(order.id))</code>。
+    测试运行在一个最终会回滚的事务里，<code>on_commit</code> 回调默认<strong>永远不会执行</strong>。用 fixture 捕获并执行它们：
+  </p>
+<div class="code" data-lang="py"><pre>
+def test_order_create_queues_email(client, django_capture_on_commit_callbacks):
+    # ... 准备购物车 ...
+    with patch('orders.views.order_created.delay') as delay, \
+         django_capture_on_commit_callbacks(execute=True) as callbacks:
+        client.post(reverse('orders:order_create'), form_data)
+    assert len(callbacks) == 1
+    delay.assert_called_once()
+</pre></div>
+  <p>TestCase 里对应的是 <code>self.captureOnCommitCallbacks(execute=True)</code>。</p>
+</div>
+
+<h2 id="settings">测试专用设置</h2>
+
+<div class="code" data-lang="py" data-file="settings/test.py（按专题 2 拆分设置后）">
+<pre>
+from .base import *  # noqa: F403
+
+PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']   # 造用户快几十倍
+EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'        # 测试运行器本来就会切换，写明更清楚
+CACHES = {'default': {'BACKEND': 'django.core.cache.backends.locmem.LocMemCache'}}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 设置里必须有的环境变量</div>
+  <p>
+    第 9 章起，<code>settings.py</code> 用 <code>decouple.config('STRIPE_SECRET_KEY')</code> 读取 Stripe 密钥，没有值时导入设置就会失败。
+    本机有 <code>.env</code>，CI 里没有，所以要给测试环境提供假值（见下面工作流的 <code>env</code>）。
+    另外，第 3 章的搜索用了 <code>TrigramSimilarity</code>，这类测试只能跑在 PostgreSQL 上；如果 <code>pg_trgm</code> 扩展是在 psql 里手工创建的，测试数据库里不会有它，应该用迁移里的 <code>TrigramExtension()</code> 创建。
+  </p>
+</div>
+
+<h2 id="ci">覆盖率与持续集成</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+pytest --cov --cov-report=term-missing    # 显示每个文件哪些行没被测试执行到
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file="pyproject.toml（覆盖率配置）">
+<pre>
+[tool.coverage.run]
+branch = true                                  # 连 if/else 的每个分支都统计
+omit = ["*/migrations/*", "*/tests/*"]
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 覆盖率是手电筒，不是目标</div>
+  <p>它能照出“哪些代码从来没被执行过”，但 100% 覆盖不代表没有 bug。先保证支付、权限、订单这些关键路径都被覆盖，再逐步提高。</p>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="持续集成流水线：推送或发起 Pull Request 后，GitHub Actions 安装依赖，启动 PostgreSQL 服务，运行 ruff 检查，检查是否有漏掉的迁移，运行 pytest 和覆盖率，全部通过才允许合并">
+  <rect class="bx" x="16" y="55" width="110" height="60" rx="10"/>
+  <text class="ttl" x="71" y="82" text-anchor="middle">git push</text>
+  <text class="sm" x="71" y="102" text-anchor="middle">或 PR</text>
+  <path class="ln" d="M128 85 H150" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="154" y="20" width="460" height="130" rx="12"/>
+  <text class="sm" x="384" y="40" text-anchor="middle">GitHub Actions（+ PostgreSQL 服务容器）</text>
+  <rect class="bx-b" x="170" y="56" width="100" height="70" rx="8"/>
+  <text class="sm on-b" x="220" y="86" text-anchor="middle">安装依赖</text>
+  <text class="mono sm" x="220" y="106" text-anchor="middle">uv sync</text>
+  <rect class="bx-b" x="280" y="56" width="100" height="70" rx="8"/>
+  <text class="sm on-b" x="330" y="86" text-anchor="middle">代码检查</text>
+  <text class="mono sm" x="330" y="106" text-anchor="middle">ruff</text>
+  <rect class="bx-a" x="390" y="56" width="100" height="70" rx="8"/>
+  <text class="sm on-a" x="440" y="86" text-anchor="middle">迁移检查</text>
+  <text class="mono sm" x="440" y="106" text-anchor="middle">--check</text>
+  <rect class="bx-g" x="500" y="56" width="100" height="70" rx="8"/>
+  <text class="sm on-g" x="550" y="86" text-anchor="middle">测试</text>
+  <text class="mono sm" x="550" y="106" text-anchor="middle">pytest --cov</text>
+  <path class="ln" d="M616 85 H638" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="642" y="55" width="102" height="60" rx="10"/>
+  <text class="ttl on-g" x="693" y="82" text-anchor="middle">&#10003; 可合并</text>
+  <text class="sm" x="693" y="102" text-anchor="middle">任一步失败则 &#10007;</text>
+</svg>
+<figcaption>图 T1-7　“迁移检查”能抓住第 5 章那种模型改了却没生成迁移的问题</figcaption>
+</figure>
+
+<div class="code" data-lang="bash" data-file=".github/workflows/ci.yml（按专题 2 的项目骨架）">
+<pre>
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.test
+      DJANGO_SECRET_KEY: ci-only-not-a-secret
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/postgres
+      STRIPE_SECRET_KEY: sk_test_dummy          # 书中项目需要的变量，给假值即可
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --locked
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run python manage.py makemigrations --check --dry-run
+      - run: uv run pytest --cov --cov-report=term-missing
+</pre>
+</div>
+
+<h2 id="review">对照仓库</h2>
+
+<div class="review">
+  <div class="h">&#128269; 配套仓库的测试现状 <small>Chapter01–Chapter17</small></div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 17 章里一个测试都没有 <span class="tag ts">TSD：测试</span></h4>
+    <p>每个应用的 <code>tests.py</code> 都只有 <code>startapp</code> 生成的那行注释。前面各章点评里列出的 42 个“有问题”，几乎每一个都可以写成一个会失败的测试，修好之后它就一直守着那里。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 测试一写就发现：Webhook 缺少签名头时是 500 <span class="src">Chapter09/myshop/payment/webhooks.py:13</span></h4>
+    <p><code>request.META['HTTP_STRIPE_SIGNATURE']</code> 在请求没有这个头时抛出 <code>KeyError</code>。任何人随便 POST 一下这个公开地址，就能制造一条 500 错误和一封报错邮件。改成 <code>.get(..., '')</code> 后，Stripe 库会以签名无效为由拒绝，返回 400。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 逻辑写在视图里，就只能通过 HTTP 来测 <span class="tag ts">TSD：Fat models</span></h4>
+    <p>下单逻辑（建订单、写订单项、清购物车、派发任务）全在 <code>order_create</code> 视图里，想测它就得先在会话里造一个购物车再 POST 表单。把它抽成 <code>create_order_from_cart()</code> 服务函数（见<a href="ch18.html#skeleton">附录</a>）后，可以直接调用函数来测，视图测试只需验证“表单错误时重新显示、成功时重定向”。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 端到端测试</h4>
+    <p>第 6 章的书签小工具、第 13 章的拖拽排序、第 16 章的聊天室都依赖浏览器里的 JavaScript，测试客户端覆盖不到。可以用 <code>StaticLiveServerTestCase</code> 配合 Playwright 写几个端到端测试，只覆盖最关键的流程。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>测试数据库独立于真库，每个测试在事务里运行并回滚，测试之间互不影响。</li>
+  <li>测试客户端能完整走一遍 URL → 视图 → 模板；断言状态码、内容、模板、重定向和邮件。</li>
+  <li>pytest-django 用 fixture 和参数化让测试更短；factory_boy 让测试只写和自己有关的数据。</li>
+  <li>在系统边界 Mock 外部服务；用查询计数防止 N+1 回归；<code>on_commit</code> 回调要显式捕获。</li>
+  <li>CI 在每次推送时跑检查、迁移检查和测试，覆盖率用来发现没有被测到的代码。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>为第 2 章的 <code>post_share</code> 写测试：文章是草稿时应返回 404。</li>
+    <li>运行 <code>test_post_list_has_no_n_plus_one</code>，确认它失败，再加上 <code>select_related</code> / <code>prefetch_related</code> 让它通过。</li>
+    <li>写出本篇的三个 Webhook 测试，按“修复”一节改代码，让它们全部变绿。</li>
+    <li>为第 10 章的优惠券写测试：过期券、未生效券、大小写不同的券码（见第 10 章点评）。</li>
+    <li>在自己的 GitHub 仓库里加上 CI 工作流，故意提交一个失败的测试，看 Actions 变红。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

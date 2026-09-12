@@ -1,0 +1,638 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>专题 3 · 调试与日志 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="T3">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">专题 3 · 专题补充</span>
+<h1>调试与日志：出了错怎么办</h1>
+<p class="lede">
+  初学者最常卡住的地方，往往不是“不会写”，而是“报错了看不懂”。这一篇先教你读懂 Django 的报错页，把最常见的十几种错误整理成速查表，
+  再介绍 <code>breakpoint()</code>、shell、Debug Toolbar 这几件调试工具。最后讲日志：上线之后没有黄色报错页可看，你只能靠日志和错误监控知道哪里坏了。
+</p>
+
+<div class="goals">
+  <h4>本篇目标</h4>
+  <ul>
+    <li>按“复现 → 读错误 → 定位 → 验证 → 写测试 → 修复”的顺序处理 bug</li>
+    <li>读懂 Django 报错页和 traceback，快速找到“你自己的那一行”</li>
+    <li>认识十几种最常见的 Django 错误和它们的典型原因</li>
+    <li>用 <code>breakpoint()</code> 暂停程序、查看变量；用 shell 和 Debug Toolbar 查看 SQL</li>
+    <li>理解 logger、handler、formatter 和日志级别，写出开发与生产两套 <code>LOGGING</code></li>
+    <li>用 Sentry 或 <code>ADMINS</code> 邮件接收线上错误，并避免在日志里泄露敏感信息</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="loop">调试的基本流程</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="调试循环：稳定复现问题，读错误信息，定位到代码行，提出假设，用 breakpoint 或日志验证，先写一个会失败的测试，再修复并确认测试通过">
+  <rect class="bx-b" x="16" y="30" width="110" height="60" rx="10"/><text class="ttl on-b" x="71" y="56" text-anchor="middle">① 复现</text><text class="sm" x="71" y="76" text-anchor="middle">稳定触发</text>
+  <rect class="bx-b" x="142" y="30" width="110" height="60" rx="10"/><text class="ttl on-b" x="197" y="56" text-anchor="middle">② 读错误</text><text class="sm" x="197" y="76" text-anchor="middle">类型 + 信息</text>
+  <rect class="bx-a" x="268" y="30" width="110" height="60" rx="10"/><text class="ttl on-a" x="323" y="56" text-anchor="middle">③ 定位</text><text class="sm" x="323" y="76" text-anchor="middle">你的那一行</text>
+  <rect class="bx-a" x="394" y="30" width="110" height="60" rx="10"/><text class="ttl on-a" x="449" y="56" text-anchor="middle">④ 假设</text><text class="sm" x="449" y="76" text-anchor="middle">为什么会这样</text>
+  <rect class="bx-p" x="520" y="30" width="110" height="60" rx="10"/><text class="ttl on-p" x="575" y="56" text-anchor="middle">⑤ 验证</text><text class="sm" x="575" y="76" text-anchor="middle">断点 / 日志</text>
+  <rect class="bx-g" x="646" y="30" width="98" height="60" rx="10"/><text class="ttl on-g" x="695" y="56" text-anchor="middle">⑥ 测试</text><text class="sm" x="695" y="76" text-anchor="middle">先红</text>
+  <path class="ln" d="M128 60 H138" marker-end="url(#ar)"/>
+  <path class="ln" d="M254 60 H264" marker-end="url(#ar)"/>
+  <path class="ln" d="M380 60 H390" marker-end="url(#ar)"/>
+  <path class="ln" d="M506 60 H516" marker-end="url(#ar)"/>
+  <path class="ln" d="M632 60 H642" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="520" y="130" width="224" height="50" rx="10"/>
+  <text class="ttl on-g" x="632" y="160" text-anchor="middle">⑦ 修复 → 测试变绿</text>
+  <path class="ln-g" d="M695 92 V126" marker-end="url(#ar-g)"/>
+  <path class="ln-r" d="M518 155 H449 V94" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="330" y="150">假设不成立：回到 ④</text>
+</svg>
+<figcaption>图 T3-1　最常见的错误是跳过 ②③ 直接改代码“试试看”。先弄清楚，再动手</figcaption>
+</figure>
+
+<h2 id="traceback">读懂 Django 的报错页</h2>
+
+<p><code>DEBUG = True</code> 时，未处理的异常会显示一个黄色的报错页。以第 4 章点评里的问题为例：一个没有 Profile 的用户打开“编辑资料”页：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 400" role="img" aria-label="Django 报错页的结构：顶部是异常类型和信息，其下的表格给出出错位置和触发它的视图；中间是 traceback，从外到内列出调用栈，框架的帧和你的代码帧颜色不同，每一帧可以展开本地变量；底部是请求信息和设置">
+  <rect class="bx-d" x="16" y="12" width="560" height="376" rx="10"/>
+  <rect class="bx-a" x="16" y="12" width="560" height="96" rx="10"/>
+  <text class="ttl on-a" x="34" y="40">RelatedObjectDoesNotExist at /account/edit/</text>
+  <text class="mono sm" x="34" y="62">User has no profile.</text>
+  <text class="mono sm" x="34" y="84">Exception Location: …/related_descriptors.py, in __get__</text>
+  <text class="mono sm" x="34" y="100">Raised during:      account.views.edit</text>
+
+  <text class="ttl" x="34" y="136">Traceback</text>
+  <rect class="bx" x="34" y="146" width="524" height="28" rx="4"/>
+  <text class="mono sm" x="46" y="165">django/core/handlers/exception.py</text>
+  <rect class="bx" x="34" y="178" width="524" height="28" rx="4"/>
+  <text class="mono sm" x="46" y="197">django/core/handlers/base.py</text>
+  <rect class="bx" x="34" y="210" width="524" height="28" rx="4"/>
+  <text class="mono sm" x="46" y="229">django/contrib/auth/decorators.py</text>
+  <rect class="bx-r" x="34" y="242" width="524" height="46" rx="4"/>
+  <text class="mono sm on-r" x="46" y="261">account/views.py, in edit</text>
+  <text class="mono sm" x="46" y="280">profile_form = ProfileEditForm(instance=request.user.profile, …)</text>
+  <rect class="bx" x="34" y="292" width="524" height="28" rx="4"/>
+  <text class="mono sm" x="46" y="311">django/db/models/fields/related_descriptors.py</text>
+  <text class="sm" x="46" y="340">▸ Local vars    每一帧都能展开当时的局部变量</text>
+  <text class="ttl" x="34" y="372">Request information · Settings</text>
+
+  <path class="ln-a" d="M580 46 H608" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="614" y="42">① 先看这里：</text>
+  <text class="sm" x="614" y="60">什么异常、说了什么</text>
+  <path class="ln-b" d="M580 96 H608" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="614" y="100">② 哪个视图触发的</text>
+  <path class="ln-r" d="M562 264 H608" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="614" y="252">③ 找最后一个</text>
+  <text class="sm on-r" x="614" y="270">“你自己的”帧</text>
+  <text class="sm" x="614" y="288">通常就是问题所在</text>
+  <path class="ln-d" d="M562 336 H608" marker-end="url(#ar)"/>
+  <text class="sm" x="614" y="340">④ 看变量的实际值</text>
+  <path class="ln-d" d="M562 368 H608" marker-end="url(#ar)"/>
+  <text class="sm" x="614" y="372">⑤ 请求参数、设置</text>
+</svg>
+<figcaption>图 T3-2　调用栈从外到内排列，越往下越接近出错点。Django 自己的帧可以先跳过，找到最下面那个属于你项目的文件</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 三个读错误的习惯</div>
+  <ul>
+    <li><strong>把最后一行读完整。</strong>“User has no profile.”已经说明了原因：<code>request.user.profile</code> 这个一对一对象不存在。</li>
+    <li><strong>找“你的”帧。</strong>错误通常在框架内部抛出，但原因在调用它的你的代码里。</li>
+    <li><strong>搜索时去掉你特有的部分。</strong>搜 “RelatedObjectDoesNotExist has no” 而不是带着你的模型名和路径。</li>
+  </ul>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 这个页面只能在开发环境出现</div>
+  <p>报错页会展示源码、局部变量、请求头和（部分打码的）设置。Django 会把名字里含 <code>API</code>、<code>KEY</code>、<code>PASS</code>、<code>SECRET</code>、<code>SIGNATURE</code>、<code>TOKEN</code> 的设置替换成星号，但你的变量里的其他敏感数据不会。线上必须 <code>DEBUG = False</code>。</p>
+</div>
+
+<h2 id="common">常见错误速查</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 266" role="img" aria-label="按请求处理的阶段归类常见错误：启动阶段有 ModuleNotFoundError、ImproperlyConfigured、AppRegistryNotReady；中间件阶段有 DisallowedHost、CSRF 403；URL 阶段有 404 和 NoReverseMatch；视图阶段有 DoesNotExist、RelatedObjectDoesNotExist、FieldError；数据库阶段有 OperationalError、IntegrityError；模板阶段有 TemplateDoesNotExist、TemplateSyntaxError">
+  <rect class="bx-d" x="10" y="20" width="118" height="210" rx="10"/>
+  <text class="ttl" x="69" y="44" text-anchor="middle">启动</text>
+  <text class="mono sm on-r" x="69" y="76" text-anchor="middle">ModuleNotFound</text>
+  <text class="mono sm on-r" x="69" y="100" text-anchor="middle">Improperly-</text>
+  <text class="mono sm on-r" x="69" y="116" text-anchor="middle">Configured</text>
+  <text class="mono sm on-r" x="69" y="140" text-anchor="middle">AppRegistry-</text>
+  <text class="mono sm on-r" x="69" y="156" text-anchor="middle">NotReady</text>
+
+  <rect class="bx-d" x="136" y="20" width="118" height="210" rx="10"/>
+  <text class="ttl" x="195" y="44" text-anchor="middle">中间件</text>
+  <text class="mono sm on-r" x="195" y="76" text-anchor="middle">DisallowedHost</text>
+  <text class="mono sm on-r" x="195" y="100" text-anchor="middle">403 CSRF</text>
+
+  <rect class="bx-d" x="262" y="20" width="118" height="210" rx="10"/>
+  <text class="ttl" x="321" y="44" text-anchor="middle">URL</text>
+  <text class="mono sm on-r" x="321" y="76" text-anchor="middle">404 Page</text>
+  <text class="mono sm on-r" x="321" y="92" text-anchor="middle">not found</text>
+
+  <rect class="bx-d" x="388" y="20" width="118" height="210" rx="10"/>
+  <text class="ttl" x="447" y="44" text-anchor="middle">视图</text>
+  <text class="mono sm on-r" x="447" y="76" text-anchor="middle">DoesNotExist</text>
+  <text class="mono sm on-r" x="447" y="100" text-anchor="middle">RelatedObject-</text>
+  <text class="mono sm on-r" x="447" y="116" text-anchor="middle">DoesNotExist</text>
+  <text class="mono sm on-r" x="447" y="140" text-anchor="middle">FieldError</text>
+  <text class="mono sm on-r" x="447" y="164" text-anchor="middle">Synchronous-</text>
+  <text class="mono sm on-r" x="447" y="180" text-anchor="middle">OnlyOperation</text>
+
+  <rect class="bx-d" x="514" y="20" width="118" height="210" rx="10"/>
+  <text class="ttl" x="573" y="44" text-anchor="middle">数据库</text>
+  <text class="mono sm on-r" x="573" y="76" text-anchor="middle">Operational-</text>
+  <text class="mono sm on-r" x="573" y="92" text-anchor="middle">Error</text>
+  <text class="mono sm on-r" x="573" y="116" text-anchor="middle">IntegrityError</text>
+
+  <rect class="bx-d" x="640" y="20" width="110" height="210" rx="10"/>
+  <text class="ttl" x="695" y="44" text-anchor="middle">模板</text>
+  <text class="mono sm on-r" x="695" y="76" text-anchor="middle">TemplateDoes-</text>
+  <text class="mono sm on-r" x="695" y="92" text-anchor="middle">NotExist</text>
+  <text class="mono sm on-r" x="695" y="116" text-anchor="middle">NoReverse-</text>
+  <text class="mono sm on-r" x="695" y="132" text-anchor="middle">Match</text>
+  <text class="mono sm on-r" x="695" y="156" text-anchor="middle">TemplateSyntax-</text>
+  <text class="mono sm on-r" x="695" y="172" text-anchor="middle">Error</text>
+
+  <path class="ln-b" d="M20 244 H740" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="380" y="262" text-anchor="middle">一个请求依次经过这些阶段 →</text>
+</svg>
+<figcaption>图 T3-3　知道错误出在哪个阶段，就知道该去看哪个文件：设置、中间件、urls.py、views.py、models.py 还是模板</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <tr><th>错误</th><th>典型原因</th><th>怎么处理</th><th>书中</th></tr>
+  <tr><td><code>ModuleNotFoundError: No module named 'django'</code></td><td>虚拟环境没激活，或依赖没装</td><td>激活 <code>.venv</code>，或用 <code>uv run</code></td><td>—</td></tr>
+  <tr><td><code>ImproperlyConfigured: The SECRET_KEY setting must not be empty</code></td><td>设置模块指错，或环境变量缺失</td><td>检查 <code>DJANGO_SETTINGS_MODULE</code> 和 <code>.env</code></td><td><a href="ch17.html#review">17</a></td></tr>
+  <tr><td><code>AppRegistryNotReady: Apps aren't loaded yet</code></td><td>Django 初始化前就导入了模型（独立脚本、<code>asgi.py</code> 导入顺序）</td><td>先 <code>django.setup()</code> / <code>get_asgi_application()</code> 再导入</td><td><a href="ch16.html">16</a></td></tr>
+  <tr><td><code>OperationalError: no such table</code>（PostgreSQL 上是 <code>ProgrammingError: relation … does not exist</code>）</td><td>忘了 <code>makemigrations</code> 或 <code>migrate</code></td><td>运行迁移；<code>showmigrations</code> 查看状态</td><td><a href="ch01.html">1</a></td></tr>
+  <tr><td><code>DisallowedHost</code>（生产环境里是 400）</td><td>访问的域名不在 <code>ALLOWED_HOSTS</code></td><td>把域名加进设置</td><td><a href="ch17.html">17</a></td></tr>
+  <tr><td><code>403 CSRF verification failed</code></td><td>表单缺 <code>{% csrf_token %}</code>；fetch 请求没带 <code>X-CSRFToken</code> 头</td><td>补上令牌；不要用 <code>@csrf_exempt</code> 绕过</td><td><a href="ch06.html">6</a> · <a href="ch13.html#review">13</a></td></tr>
+  <tr><td><code>Page not found (404)</code>，页面列出“Django tried these URL patterns”</td><td>URL 拼错、<code>include</code> 前缀不对、少了末尾斜杠</td><td>对照页面列出的模式逐个检查</td><td><a href="ch01.html">1</a></td></tr>
+  <tr><td><code>NoReverseMatch</code></td><td><code>{% url %}</code> / <code>reverse()</code> 的名字、命名空间或参数个数不对</td><td>核对 <code>app_name</code>、<code>name=</code> 和参数</td><td><a href="ch01.html">1</a></td></tr>
+  <tr><td><code>TemplateDoesNotExist</code></td><td>模板路径写错、应用没加进 <code>INSTALLED_APPS</code></td><td>看报错页的 “Template-loader postmortem”，它列出了找过的每个位置</td><td><a href="ch01.html">1</a></td></tr>
+  <tr><td><code>TemplateSyntaxError: Invalid block tag</code></td><td>用自定义标签前忘了 <code>{% load %}</code></td><td>在模板顶部加 <code>{% load blog_tags %}</code></td><td><a href="ch03.html">3</a></td></tr>
+  <tr><td><code>DoesNotExist</code> / <code>MultipleObjectsReturned</code></td><td><code>.get()</code> 查不到或查到多条</td><td>视图里用 <code>get_object_or_404</code>；可能多条时用 <code>filter().first()</code></td><td><a href="ch14.html#review">14</a></td></tr>
+  <tr><td><code>RelatedObjectDoesNotExist: User has no profile.</code></td><td>一对一关联对象没有创建</td><td>创建用户时一并创建，或用 <code>get_or_create</code></td><td><a href="ch04.html#review">4</a></td></tr>
+  <tr><td><code>FieldError: Cannot resolve keyword</code></td><td>查询里的字段名或双下划线路径拼错</td><td>对照模型字段和 <code>related_name</code></td><td>—</td></tr>
+  <tr><td><code>IntegrityError: UNIQUE constraint failed</code></td><td>违反唯一约束，例如中文标题生成了空 slug</td><td>保存前校验；表单里捕获并提示</td><td><a href="ch06.html#review">6</a></td></tr>
+  <tr><td><code>SynchronousOnlyOperation</code></td><td>在 <code>async def</code> 里调用了同步 ORM</td><td>用 <code>aget()</code> / <code>acreate()</code>，或 <code>sync_to_async</code></td><td><a href="ch16.html">16</a></td></tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 模板里的“静默错误”</div>
+  <p>
+    模板变量写错（<code>{{ post.titel }}</code>）不会报错，只会输出空字符串，这是最难发现的一类问题。
+    调试时可以在 <code>TEMPLATES['OPTIONS']</code> 里临时设置 <code>'string_if_invalid': 'INVALID(%s)'</code>，写错的变量就会显示出来。用完记得删掉，它不适合一直开着。
+  </p>
+</div>
+
+<h2 id="breakpoint">breakpoint()：让程序停下来</h2>
+
+<p>比起到处 <code>print()</code>，更好的办法是让程序停在某一行，然后<strong>交互式地</strong>查看任何变量、执行任何表达式。Python 内置的 <code>breakpoint()</code> 就能做到：</p>
+
+<div class="code" data-lang="py" data-file="cart/views.py（临时加一行）">
+<pre>
+@require_POST
+def cart_add(request, product_id):
+    cart = Cart(request)
+    product = get_object_or_404(Product, id=product_id)
+    form = CartAddProductForm(request.POST)
+    breakpoint()                      # 程序运行到这里暂停，runserver 的终端进入 (Pdb) 提示符
+    if form.is_valid():
+        ...
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file="runserver 所在的终端">
+<pre>
+&gt; /code/cart/views.py(18)cart_add()
+-&gt; if form.is_valid():
+(Pdb) p request.POST
+&lt;QueryDict: {'csrfmiddlewaretoken': ['...'], 'quantity': ['2'], 'override': ['False']}&gt;
+(Pdb) p form.is_valid(), form.errors
+(True, {})
+(Pdb) pp request.session['cart']
+{'3': {'quantity': 1, 'price': '12.50'}}
+(Pdb) c
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>命令</th><th>作用</th><th>命令</th><th>作用</th></tr>
+  <tr><td><code>n</code></td><td>执行下一行（不进入函数）</td><td><code>p 表达式</code> / <code>pp</code></td><td>打印 / 美化打印</td></tr>
+  <tr><td><code>s</code></td><td>进入函数内部</td><td><code>l</code> / <code>ll</code></td><td>显示附近代码 / 整个函数</td></tr>
+  <tr><td><code>c</code></td><td>继续运行，直到下一个断点</td><td><code>w</code></td><td>显示调用栈</td></tr>
+  <tr><td><code>r</code></td><td>运行到当前函数返回</td><td><code>u</code> / <code>d</code></td><td>在调用栈里上移 / 下移一层</td></tr>
+  <tr><td><code>b 文件:行号</code></td><td>再设一个断点</td><td><code>q</code></td><td>退出（请求会以异常结束）</td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 几个实用技巧</div>
+  <ul>
+    <li><code>PYTHONBREAKPOINT=0 python manage.py runserver</code> 会让所有 <code>breakpoint()</code> 失效；装了 ipdb 后用 <code>PYTHONBREAKPOINT=ipdb.set_trace</code> 可以得到带补全和高亮的调试器。</li>
+    <li>Django 跑在 Docker Compose 里时（第 17 章），给服务加上 <code>stdin_open: true</code> 和 <code>tty: true</code>，再 <code>docker attach 容器名</code> 就能进入 Pdb；按 Ctrl-P Ctrl-Q 脱离而不停止容器。</li>
+    <li>测试失败时运行 <code>pytest --pdb</code>，会直接停在失败的那一行。</li>
+    <li><strong>提交前删掉所有 <code>breakpoint()</code>。</strong>ruff 的 <code>T100</code> 规则可以帮你检查。</li>
+  </ul>
+</div>
+
+<p>更喜欢图形界面的话，VS Code 可以直接在行号旁边点出断点：</p>
+
+<div class="code" data-lang="js" data-file=".vscode/launch.json">
+<pre>
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Django",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/manage.py",
+      "args": ["runserver"],
+      "django": true
+    }
+  ]
+}
+</pre>
+</div>
+
+<h2 id="shell">shell：在真实数据上做实验</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+python manage.py shell          # Django 5.2：自动导入所有模型，不用再手写 import
+python manage.py shell -v 2     # 同时列出自动导入了哪些名字
+python manage.py dbshell        # 直接进入数据库的命令行客户端
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="在 shell 里查看 ORM 生成的 SQL">
+<pre>
+&gt;&gt;&gt; qs = Post.published.filter(tags__slug='django')
+&gt;&gt;&gt; print(qs.query)                  # 生成的 SQL（参数没有加引号，只供阅读）
+&gt;&gt;&gt; print(qs.explain())              # 数据库的执行计划：有没有用上索引
+&gt;&gt;&gt; from django.db import connection, reset_queries
+&gt;&gt;&gt; reset_queries(); list(qs); len(connection.queries)   # 执行了几条 SQL（仅 DEBUG=True 时记录）
+</pre>
+</div>
+
+<h2 id="toolbar">Debug Toolbar：看清每个页面做了什么</h2>
+
+<p>第 7 章安装了 Debug Toolbar，但只是简单用了一下。它最有价值的是 <strong>SQL 面板</strong>：会把结构相同的查询标成 “similar”，把完全相同的标成 “duplicated”，这正是 N+1 的特征。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="用 Debug Toolbar 查 N+1：SQL 面板显示 8 条查询，其中 3 条相似的标签查询和 3 条相似的作者查询；展开任意一条可以看到触发它的模板行；在视图中加 select_related 和 prefetch_related 后查询降为 4 条">
+  <rect class="bx-d" x="16" y="16" width="360" height="220" rx="12"/>
+  <text class="ttl" x="196" y="40" text-anchor="middle">SQL 面板：8 queries</text>
+  <text class="mono sm" x="32" y="68">SELECT COUNT(*) FROM blog_post …</text>
+  <text class="mono sm" x="32" y="90">SELECT … FROM blog_post … LIMIT 3</text>
+  <rect class="bx-r" x="26" y="100" width="340" height="30" rx="4"/>
+  <text class="mono sm on-r" x="32" y="120">SELECT … taggit_tag …   3 similar</text>
+  <rect class="bx-r" x="26" y="136" width="340" height="30" rx="4"/>
+  <text class="mono sm on-r" x="32" y="156">SELECT … auth_user …    3 similar</text>
+  <text class="mono sm" x="32" y="190">侧边栏的 3 条统计查询 …</text>
+  <text class="sm" x="32" y="220">展开一条 → 看到它来自模板哪一行</text>
+
+  <path class="ln-a" d="M378 126 H420" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="424" y="60" width="320" height="70" rx="10"/>
+  <text class="sm on-a" x="584" y="84" text-anchor="middle">list.html</text>
+  <text class="mono sm" x="584" y="104" text-anchor="middle">{% for tag in post.tags.all %}</text>
+  <text class="mono sm" x="584" y="122" text-anchor="middle">by {{ post.author }}</text>
+  <path class="ln-g" d="M584 132 V160" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="424" y="164" width="320" height="72" rx="10"/>
+  <text class="mono sm on-g" x="584" y="190" text-anchor="middle">.select_related('author')</text>
+  <text class="mono sm on-g" x="584" y="210" text-anchor="middle">.prefetch_related('tags')</text>
+  <text class="sm" x="584" y="228" text-anchor="middle">相似查询消失，总数不再随文章数增长</text>
+</svg>
+<figcaption>图 T3-4　面板里其他常用的：模板（用了哪些模板和上下文）、缓存（命中率）、信号、History（查看 fetch/AJAX 请求）</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 修好之后别让它再坏</div>
+  <p>用 Debug Toolbar 发现问题，用<a href="t01.html#queries">专题 1 的查询数测试</a>把修复锁住。</p>
+</div>
+
+<h2 id="logging">日志：程序自己写的日记</h2>
+
+<p>
+  断点只在你坐在电脑前时有用。程序在服务器上运行时，你需要它<strong>自己记下发生了什么</strong>。Python 的 <code>logging</code> 模块由三类角色组成：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="日志的结构：代码中的 logger 按模块名形成层级，blog.views 的记录向上传递到 blog 再到根 logger；logger 把达到级别的记录交给 handler，handler 决定输出到控制台、文件、管理员邮件或 Sentry；formatter 决定每条记录的格式">
+  <rect class="bx-b" x="16" y="20" width="220" height="250" rx="12"/>
+  <text class="ttl on-b" x="126" y="46" text-anchor="middle">Logger 记录者</text>
+  <text class="mono sm" x="126" y="72" text-anchor="middle">getLogger(__name__)</text>
+  <rect class="bx" x="46" y="90" width="160" height="30" rx="6"/><text class="mono sm" x="126" y="110" text-anchor="middle">blog.views</text>
+  <rect class="bx" x="46" y="146" width="160" height="30" rx="6"/><text class="mono sm" x="126" y="166" text-anchor="middle">blog</text>
+  <rect class="bx" x="46" y="202" width="160" height="30" rx="6"/><text class="mono sm" x="126" y="222" text-anchor="middle">root</text>
+  <path class="ln-b" d="M126 122 V142" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M126 178 V198" marker-end="url(#ar-b)"/>
+  <text class="sm" x="126" y="256" text-anchor="middle">记录沿层级向上传递</text>
+
+  <path class="ln" d="M238 145 H290" marker-end="url(#ar)"/>
+  <text class="sm" x="264" y="136" text-anchor="middle">级别够</text>
+
+  <rect class="bx-a" x="294" y="20" width="230" height="250" rx="12"/>
+  <text class="ttl on-a" x="409" y="46" text-anchor="middle">Handler 输出目的地</text>
+  <rect class="bx" x="314" y="66" width="190" height="34" rx="6"/><text class="sm" x="409" y="88" text-anchor="middle">StreamHandler → 控制台</text>
+  <rect class="bx" x="314" y="110" width="190" height="34" rx="6"/><text class="sm" x="409" y="132" text-anchor="middle">FileHandler → 文件</text>
+  <rect class="bx" x="314" y="154" width="190" height="34" rx="6"/><text class="sm" x="409" y="176" text-anchor="middle">AdminEmailHandler → 邮件</text>
+  <rect class="bx" x="314" y="198" width="190" height="34" rx="6"/><text class="sm" x="409" y="220" text-anchor="middle">Sentry → 错误监控平台</text>
+  <text class="sm" x="409" y="256" text-anchor="middle">每个 handler 也可以有自己的级别</text>
+
+  <path class="ln" d="M526 145 H578" marker-end="url(#ar)"/>
+
+  <rect class="bx-g" x="582" y="60" width="162" height="170" rx="12"/>
+  <text class="ttl on-g" x="663" y="86" text-anchor="middle">Formatter 格式</text>
+  <text class="mono sm" x="663" y="118" text-anchor="middle">{asctime}</text>
+  <text class="mono sm" x="663" y="138" text-anchor="middle">{levelname}</text>
+  <text class="mono sm" x="663" y="158" text-anchor="middle">{name}</text>
+  <text class="mono sm" x="663" y="178" text-anchor="middle">{message}</text>
+  <text class="sm" x="663" y="210" text-anchor="middle">也可以输出 JSON</text>
+</svg>
+<figcaption>图 T3-5　代码只管“记”（logger），配置决定“记到哪、记成什么样”（handler、formatter）。换输出位置不用改代码</figcaption>
+</figure>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="日志级别从低到高：DEBUG 调试细节，INFO 正常的业务事件，WARNING 异常但已处理，ERROR 某个操作失败，CRITICAL 整个系统出问题；设置级别为 WARNING 时只输出 WARNING 及以上">
+  <rect class="bx-d" x="16" y="30" width="136" height="100" rx="10"/>
+  <text class="ttl" x="84" y="56" text-anchor="middle">DEBUG</text>
+  <text class="sm" x="84" y="80" text-anchor="middle">调试细节</text>
+  <text class="sm" x="84" y="100" text-anchor="middle">SQL、变量值</text>
+  <rect class="bx-b" x="164" y="30" width="136" height="100" rx="10"/>
+  <text class="ttl on-b" x="232" y="56" text-anchor="middle">INFO</text>
+  <text class="sm" x="232" y="80" text-anchor="middle">正常业务事件</text>
+  <text class="sm" x="232" y="100" text-anchor="middle">订单 42 已支付</text>
+  <rect class="bx-a" x="312" y="30" width="136" height="100" rx="10"/>
+  <text class="ttl on-a" x="380" y="56" text-anchor="middle">WARNING</text>
+  <text class="sm" x="380" y="80" text-anchor="middle">不正常但已处理</text>
+  <text class="sm" x="380" y="100" text-anchor="middle">Webhook 签名无效</text>
+  <rect class="bx-r" x="460" y="30" width="136" height="100" rx="10"/>
+  <text class="ttl on-r" x="528" y="56" text-anchor="middle">ERROR</text>
+  <text class="sm" x="528" y="80" text-anchor="middle">一次操作失败</text>
+  <text class="sm" x="528" y="100" text-anchor="middle">调用 Stripe 出错</text>
+  <rect class="bx-p" x="608" y="30" width="136" height="100" rx="10"/>
+  <text class="ttl on-p" x="676" y="56" text-anchor="middle">CRITICAL</text>
+  <text class="sm" x="676" y="80" text-anchor="middle">系统级故障</text>
+  <text class="sm" x="676" y="100" text-anchor="middle">数据库连不上</text>
+  <path class="ln-a" d="M312 152 H744" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="316" y="176">生产环境常用的门槛：WARNING 及以上一定要看到，INFO 视情况保留</text>
+</svg>
+<figcaption>图 T3-6　级别是“过滤器”：logger 或 handler 设为 WARNING，就会丢弃 DEBUG 和 INFO</figcaption>
+</figure>
+
+<h3>在代码里记日志</h3>
+
+<p>以第 9 章的 Webhook 为例。原来的代码在签名错误、订单不存在时直接返回 400 / 404，<strong>什么都没留下</strong>；Stripe 后台显示投递失败，你却无从查起。</p>
+
+<div class="code" data-lang="py" data-file="payment/webhooks.py（加上日志）">
+<pre>
+import logging
+
+logger = logging.getLogger(__name__)          # 名字就是 'payment.webhooks'
+
+
+@csrf_exempt
+def stripe_webhook(request):
+    payload = request.body
+    sig_header = request.META.get('HTTP_STRIPE_SIGNATURE', '')
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, settings.STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError:
+        logger.warning('Stripe webhook: invalid payload')
+        return HttpResponse(status=400)
+    except stripe.error.SignatureVerificationError:
+        logger.warning('Stripe webhook: bad signature from %s', request.META.get('REMOTE_ADDR'))
+        return HttpResponse(status=400)
+
+    if event.type == 'checkout.session.completed':
+        session = event.data.object
+        if session.mode == 'payment' and session.payment_status == 'paid':
+            try:
+                order = Order.objects.get(id=session.client_reference_id)
+            except Order.DoesNotExist:
+                logger.error('Stripe webhook: order %s not found (event %s)',
+                             session.client_reference_id, event.id)
+                return HttpResponse(status=404)
+            # ...
+            logger.info('Order %s paid (payment_intent=%s)', order.id, session.payment_intent)
+    return HttpResponse(status=200)
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="payment/views.py（捕获异常时用 logger.exception）">
+<pre>
+try:
+    session = stripe.checkout.Session.create(**session_data)
+except stripe.error.StripeError:
+    logger.exception('Failed to create Stripe session for order %s', order.id)   # 自动附带完整 traceback
+    messages.error(request, 'Payment service is temporarily unavailable. Please try again.')
+    return redirect('payment:process')
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>要这样做</th><th>原因</th></tr>
+  <tr><td><code>logger = logging.getLogger(__name__)</code>，每个模块一个</td><td>日志里能看到来自哪个模块，也能按模块单独调级别</td></tr>
+  <tr><td><code>logger.info('Order %s paid', order.id)</code>，不要写成 f-string</td><td>级别不够时不会做字符串拼接；Sentry 等工具按“模板”把同类消息归为一组</td></tr>
+  <tr><td>在 <code>except</code> 块里用 <code>logger.exception(...)</code></td><td>等于 ERROR 级别再附上完整 traceback</td></tr>
+  <tr><td>记录 ID（订单号、事件 ID、用户 ID），不记密码、令牌、完整卡号、邮件正文</td><td>能排查问题，又不把日志变成泄露源</td></tr>
+  <tr><td>程序里不用 <code>print()</code>；命令行脚本和管理命令里的输出另说</td><td><code>print</code> 没有级别、没有时间、没法关掉。管理命令用 <code>self.stdout.write</code>（第 17 章就是这么做的）</td></tr>
+  <tr><td>Celery 任务里用 <code>celery.utils.log.get_task_logger(__name__)</code></td><td>日志会带上任务名和任务 ID</td></tr>
+</table>
+</div>
+
+<h3>配置 LOGGING</h3>
+
+<p>不写 <code>LOGGING</code> 时，Django 有一套默认配置：<code>DEBUG=True</code> 时 <code>django</code> 的日志输出到控制台，<code>DEBUG=False</code> 时 <code>django.request</code> 的错误发邮件给 <code>ADMINS</code>。你自己模块的 INFO 日志默认<strong>哪里都不会显示</strong>，所以需要自己配置：</p>
+
+<div class="code" data-lang="py" data-file="settings/local.py（开发）">
+<pre>
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,           # 保留 Django 自带的 logger
+    'formatters': {
+        'simple': {'format': '{levelname} {name}: {message}', 'style': '{'},
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'simple'},
+    },
+    'root': {'handlers': ['console'], 'level': 'DEBUG'},
+    'loggers': {
+        'django': {'handlers': ['console'], 'level': 'INFO', 'propagate': False},
+        # 想看每条 SQL 时取消注释（只在 DEBUG=True 时有输出）
+        # 'django.db.backends': {'handlers': ['console'], 'level': 'DEBUG', 'propagate': False},
+    },
+}
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="settings/production.py（生产）">
+<pre>
+LOGGING = {
+    'version': 1,
+    'disable_existing_loggers': False,
+    'formatters': {
+        'verbose': {'format': '{asctime} {levelname} {name} {process:d} {message}', 'style': '{'},
+    },
+    'filters': {
+        'require_debug_false': {'()': 'django.utils.log.RequireDebugFalse'},
+    },
+    'handlers': {
+        'console': {'class': 'logging.StreamHandler', 'formatter': 'verbose'},   # 容器里输出到 stdout
+        'mail_admins': {
+            'class': 'django.utils.log.AdminEmailHandler',
+            'level': 'ERROR',
+            'filters': ['require_debug_false'],
+        },
+    },
+    'root': {'handlers': ['console'], 'level': 'INFO'},
+    'loggers': {
+        'django': {'handlers': ['console'], 'level': 'WARNING', 'propagate': False},
+        'django.request': {'handlers': ['console', 'mail_admins'], 'level': 'ERROR', 'propagate': False},
+    },
+}
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>Django 内置的 logger</th><th>记录什么</th></tr>
+  <tr><td><code>django.request</code></td><td>4xx 记为 WARNING，5xx 记为 ERROR（附带请求信息）</td></tr>
+  <tr><td><code>django.security.*</code></td><td>安全相关事件，例如 <code>django.security.DisallowedHost</code>、<code>django.security.csrf</code></td></tr>
+  <tr><td><code>django.db.backends</code></td><td>每条 SQL 及耗时（DEBUG 级别，仅在 <code>DEBUG=True</code> 时产生）</td></tr>
+  <tr><td><code>django.server</code></td><td><code>runserver</code> 的访问日志</td></tr>
+  <tr><td><code>django.template</code></td><td>模板渲染中的问题</td></tr>
+</table>
+</div>
+
+<h2 id="production">线上的错误：没有黄色页面之后</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="开发与生产的对比：开发环境 DEBUG 为 True，看黄色报错页、Debug Toolbar、控制台和断点；生产环境 DEBUG 为 False，用户只看到友好的 500 页面，开发者通过日志平台、Sentry 告警和管理员邮件得知错误">
+  <rect class="bx-g" x="16" y="16" width="340" height="218" rx="12"/>
+  <text class="ttl on-g" x="186" y="42" text-anchor="middle">开发：DEBUG = True</text>
+  <text class="sm" x="40" y="76">· 黄色报错页：源码、变量、请求</text>
+  <text class="sm" x="40" y="102">· Debug Toolbar：SQL、模板、缓存</text>
+  <text class="sm" x="40" y="128">· runserver 控制台里的日志</text>
+  <text class="sm" x="40" y="154">· breakpoint() / IDE 断点</text>
+  <text class="sm on-g" x="40" y="196">你就是第一个看到错误的人</text>
+
+  <rect class="bx-r" x="404" y="16" width="340" height="218" rx="12"/>
+  <text class="ttl on-r" x="574" y="42" text-anchor="middle">生产：DEBUG = False</text>
+  <text class="sm" x="428" y="76">· 用户只看到 templates/500.html</text>
+  <text class="sm" x="428" y="102">· 日志 → stdout → 日志平台，可搜索</text>
+  <text class="sm" x="428" y="128">· Sentry：堆栈、请求、用户、次数、告警</text>
+  <text class="sm" x="428" y="154">· ADMINS 邮件（小项目的最低配置）</text>
+  <text class="sm on-r" x="428" y="196">用户比你先看到错误，所以要让系统</text>
+  <text class="sm on-r" x="428" y="216">主动把错误报告给你</text>
+  <path class="ln-a" d="M358 125 H400" marker-end="url(#ar-a)"/>
+</svg>
+<figcaption>图 T3-7　自定义 <code>templates/404.html</code> 和 <code>500.html</code>，给用户一个友好的页面；细节只进日志和监控</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="settings/production.py（Sentry）">
+<pre>
+import sentry_sdk
+
+SENTRY_DSN = env('SENTRY_DSN', default='')
+if SENTRY_DSN:
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        environment=env('SENTRY_ENVIRONMENT', default='production'),
+        traces_sample_rate=0.1,          # 10% 的请求记录性能数据
+        send_default_pii=False,          # 默认不上传用户的个人信息
+    )
+    # 安装了 Django 时，sentry-sdk 会自动启用 Django 集成
+</pre>
+</div>
+
+<h3>不要让错误报告泄露敏感数据</h3>
+
+<p>错误邮件和 Sentry 都会附带请求的 POST 数据和局部变量。第 4 章的注册视图出错时，报告里就会有用户刚输入的明文密码。Django 提供了两个装饰器，把这些值替换成星号：</p>
+
+<div class="code" data-lang="py" data-file="account/views.py">
+<pre>
+from django.views.decorators.debug import sensitive_post_parameters, sensitive_variables
+
+
+@sensitive_post_parameters('password', 'password2')    # 错误报告里隐藏这两个 POST 字段
+def register(request):
+    ...
+
+
+@sensitive_variables('card_number')                    # 隐藏这个局部变量
+def charge(request):
+    card_number = ...
+</pre>
+</div>
+
+<h2 id="review">对照仓库</h2>
+
+<div class="review">
+  <div class="h">&#128269; 配套仓库的调试与日志现状 <small>Chapter01–Chapter17</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 管理命令用 <code>self.stdout.write</code>，API 示例脚本用 <code>print</code></h4>
+    <p>第 17 章的 <code>enroll_reminder</code> 用 <code>self.stdout.write</code> 输出结果，这是管理命令的标准做法（测试里也能捕获）；第 15 章的 <code>enroll_all.py</code> 是一个独立的命令行脚本，用 <code>print</code> 给人看进度也完全合适。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 整个项目没有一行日志</h4>
+    <p>17 章的代码里没有任何 <code>import logging</code>，也没有 <code>LOGGING</code> 设置。支付、Webhook、Celery 任务这些最需要留下记录的地方，失败时只返回一个状态码。至少给 Webhook、支付、邮件任务加上日志（示例见上文）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 生产环境的错误报告实际上发不出去</h4>
+    <p>第 17 章配置了 <code>ADMINS</code>，但 <code>EMAIL_BACKEND</code> 是控制台后端，报错邮件只会打印到容器日志里，没人会收到（见<a href="ch17.html#review">第 17 章点评</a>）。配置真正的邮件服务，或者直接接入 Sentry。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> Debug Toolbar 应只在开发设置里启用</h4>
+    <p>第 7 章起 Debug Toolbar 的应用、中间件和 URL 都写在公共设置里（见<a href="ch07.html#review">第 7 章点评</a>）。按<a href="t02.html#settings">专题 2</a> 的方式只放进 <code>local.py</code>。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>先复现、读错误、定位到“你的那一行”，再提出假设并验证；修复前先写一个失败的测试。</li>
+  <li>报错页从上往下读：异常类型和信息 → 触发的视图 → 最后一个属于你的帧 → 局部变量。</li>
+  <li><code>breakpoint()</code> 让程序停下来交互式检查；shell 和 Debug Toolbar 用来看 SQL。</li>
+  <li>日志由 logger、handler、formatter 组成；每个模块 <code>getLogger(__name__)</code>，用 % 占位符，异常用 <code>logger.exception</code>。</li>
+  <li>线上要 <code>DEBUG = False</code>，靠日志平台、Sentry 或 <code>ADMINS</code> 邮件得知错误；用 <code>sensitive_*</code> 装饰器隐藏敏感数据。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>在第 4 章项目里用 shell 创建一个没有 Profile 的用户，登录后打开编辑页，对照图 T3-2 读一遍报错页。</li>
+    <li>在 <code>cart_add</code> 里放一个 <code>breakpoint()</code>，加入购物车时用 <code>pp request.session['cart']</code> 查看会话内容。</li>
+    <li>打开博客列表页，用 Debug Toolbar 找出相似查询，修好后再看一次。</li>
+    <li>按本篇给 Webhook 加日志，用 <code>stripe listen</code> 转发一个事件，在 runserver 终端里看到 INFO 日志。</li>
+    <li>注册一个免费的 Sentry 账号，在视图里故意 <code>1 / 0</code>，确认错误出现在 Sentry 里。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

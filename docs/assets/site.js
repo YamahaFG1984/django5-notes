@@ -19,23 +19,31 @@
     { n: 12, t: '构建在线学习平台',     d: 'Fixtures、模型继承、自定义字段与内容模型', part: '项目四 · 在线学习平台' },
     { n: 13, t: '内容管理系统',        d: 'CBV + Mixin、权限、Formset、泛型关系与拖拽排序' },
     { n: 14, t: '渲染与缓存内容',       d: '选课、学生注册、缓存框架与 Redis 缓存' },
-    { n: 15, t: '构建 API',            d: 'Django REST framework：序列化器、ViewSet、权限与测试' },
+    { n: 15, t: '构建 API',            d: 'Django REST framework：序列化器、ViewSet、认证、权限与 API 客户端' },
     { n: 16, t: '聊天服务器',          d: 'Channels、WebSocket、异步消费者与 Redis 通道层' },
     { n: 17, t: '上线部署',            d: '多环境配置、Docker、PostgreSQL、uWSGI、Daphne、Nginx' },
-    { n: 18, t: '代码点评总览',        d: 'Django 5.2 最佳实践与 Two Scoops 风格的整体改进清单', part: '附录' }
+    { k: 'T1', f: 't01.html', t: '测试',       d: 'TestCase 与 pytest-django、factory_boy、Mock 外部服务、覆盖率与 CI', part: '专题补充' },
+    { k: 'T2', f: 't02.html', t: '项目起步',   d: 'uv、设置拆分与环境变量、自定义用户模型、ruff 与 pre-commit' },
+    { k: 'T3', f: 't03.html', t: '调试与日志', d: '读懂报错、breakpoint()、shell 与 Debug Toolbar、LOGGING 与 Sentry' },
+    { n: 18, k: 'A', t: '代码点评总览',        d: 'Django 5.2 最佳实践与 Two Scoops 风格的整体改进清单', part: '附录' }
   ];
 
-  var cur = parseInt(document.body.dataset.chapter || '0', 10);
+  // body 的 data-chapter：章节写数字（"1"…"18"），专题写 "T1"…；首页写 "0"
+  var dc = document.body.dataset.chapter || '0';
+  var curIdx = -1;
+  CHAPTERS.forEach(function (c, i) {
+    if (String(c.n) === dc || c.k === dc) curIdx = i;
+  });
 
   /* ---------- 侧边栏 ---------- */
   var side = document.getElementById('sidebar');
   if (side) {
     var html = '<a class="brand" href="index.html"><span class="flame">dj</span>' +
       '<span>Django 5 实战笔记<small>四个项目，从入门到上线</small></span></a>';
-    CHAPTERS.forEach(function (c) {
+    CHAPTERS.forEach(function (c, i) {
       if (c.part) html += '<div class="part">' + c.part + '</div>';
-      html += '<a class="ch' + (c.n === cur ? ' active' : '') + '" href="ch' +
-        pad(c.n) + '.html"><span class="n">' + (c.n === 18 ? 'A' : c.n) + '</span><span>' + c.t + '</span></a>';
+      html += '<a class="ch' + (i === curIdx ? ' active' : '') + '" href="' + fileOf(c) +
+        '"><span class="n">' + (c.k || c.n) + '</span><span>' + c.t + '</span></a>';
     });
     side.innerHTML = html;
     var active = side.querySelector('a.ch.active');
@@ -209,13 +217,13 @@
 
   /* ---------- 上一章 / 下一章 ---------- */
   var pager = document.getElementById('pager');
-  if (pager && cur) {
-    var prev = CHAPTERS.find(function (c) { return c.n === cur - 1; });
-    var next = CHAPTERS.find(function (c) { return c.n === cur + 1; });
+  if (pager && curIdx >= 0) {
+    var prev = CHAPTERS[curIdx - 1];
+    var next = CHAPTERS[curIdx + 1];
     var h = '';
-    h += prev ? '<a class="prev" href="ch' + pad(prev.n) + '.html"><span>&larr; 上一章</span>' + label(prev) + '</a>'
+    h += prev ? '<a class="prev" href="' + fileOf(prev) + '"><span>&larr; 上一篇</span>' + label(prev) + '</a>'
               : '<a class="prev" href="index.html"><span>&larr; 返回</span>课程首页</a>';
-    h += next ? '<a class="next" href="ch' + pad(next.n) + '.html"><span>下一章 &rarr;</span>' + label(next) + '</a>'
+    h += next ? '<a class="next" href="' + fileOf(next) + '"><span>下一篇 &rarr;</span>' + label(next) + '</a>'
               : '<a class="next" href="index.html"><span>完结 &rarr;</span>回到课程首页</a>';
     pager.className = 'pager';
     pager.innerHTML = h;
@@ -226,8 +234,8 @@
   if (grid) {
     var g = '';
     CHAPTERS.forEach(function (c) {
-      g += '<a class="toc-card" href="ch' + pad(c.n) + '.html">' +
-        '<div class="n">' + (c.n === 18 ? '附录' : '第 ' + c.n + ' 章') + '</div>' +
+      g += '<a class="toc-card" href="' + fileOf(c) + '">' +
+        '<div class="n">' + kicker(c) + '</div>' +
         '<div class="t">' + c.t + '</div>' +
         '<div class="d">' + c.d + '</div></a>';
     });
@@ -235,6 +243,8 @@
     grid.innerHTML = g;
   }
 
-  function label(c) { return (c.n === 18 ? '附录 · ' : '第 ' + c.n + ' 章 · ') + c.t; }
+  function fileOf(c) { return c.f || ('ch' + pad(c.n) + '.html'); }
+  function kicker(c) { return c.k === 'A' ? '附录' : c.k ? '专题 ' + c.k.slice(1) : '第 ' + c.n + ' 章'; }
+  function label(c) { return kicker(c) + ' · ' + c.t; }
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
 })();

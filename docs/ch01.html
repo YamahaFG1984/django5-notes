@@ -1303,7 +1303,7 @@ ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='', cast=Csv())
   <div class="item">
     <h4><span class="tag warn">建议改进</span> <code>tests.py</code> 是空的 <span class="tag ts">TSD：测试</span></h4>
     <p>
-      TSD 的原话大意是“没有测试的代码就是坏掉的代码”。至少为模型方法和视图写几个冒烟测试。Django 自带的 <code>TestCase</code> 就够用，
+      TSD 的原话大意是“没有测试的代码就是坏掉的代码”。至少为模型方法和视图写几个冒烟测试（完整教程见<a href="t01.html">专题 1 · 测试</a>）。Django 自带的 <code>TestCase</code> 就够用，
       TSD 推荐进一步用 <code>pytest-django</code> + <code>factory_boy</code>：
     </p>
 <div class="code" data-lang="py" data-file="blog/tests.py"><pre>

@@ -164,12 +164,12 @@
   <li>
     <strong>新项目第一天就建自定义用户模型。</strong>
     哪怕只是 <code>class User(AbstractUser): pass</code>。以后要加字段、改用邮箱登录都不必动迁移；到处用 <code>settings.AUTH_USER_MODEL</code> / <code>get_user_model()</code> 引用它，不要 <code>add_to_class</code> 打补丁。
-    <br><span class="tag ts">TSD：用户模型</span> 见 <a href="ch04.html#review">第 4 章</a>、<a href="ch07.html#review">第 7 章</a>、<a href="ch12.html#review">第 12 章</a>
+    <br><span class="tag ts">TSD：用户模型</span> 见 <a href="ch04.html#review">第 4 章</a>、<a href="ch07.html#review">第 7 章</a>、<a href="ch12.html#review">第 12 章</a>、<a href="t02.html#user">专题 2</a>
   </li>
   <li>
     <strong>机密只来自环境，设置按环境拆分。</strong>
     <code>SECRET_KEY</code>、数据库密码、API 密钥、TLS 私钥都不进版本库；缺失时启动即失败；上线前跑 <code>check --deploy</code>。
-    <br><span class="tag ts">TSD：设置</span> 见 <a href="ch01.html#review">第 1 章</a>、<a href="ch03.html#review">第 3 章</a>、<a href="ch17.html#review">第 17 章</a>
+    <br><span class="tag ts">TSD：设置</span> 见 <a href="ch01.html#review">第 1 章</a>、<a href="ch03.html#review">第 3 章</a>、<a href="ch17.html#review">第 17 章</a>、<a href="t02.html#settings">专题 2</a>
   </li>
   <li>
     <strong>修改数据只用 POST，并且先检查“是谁、能不能”。</strong>
@@ -208,8 +208,8 @@
   </li>
   <li>
     <strong>从第一个模型开始写测试。</strong>
-    pytest-django + factory_boy 造数据；每修一个 bug 先写一个会失败的测试。本书的仓库只有第 15 章有 API 测试，这是最值得补的一块。
-    <br><span class="tag ts">TSD：测试</span> 见 <a href="ch01.html#review">第 1 章</a>、<a href="ch15.html#review">第 15 章</a>
+    pytest-django + factory_boy 造数据；每修一个 bug 先写一个会失败的测试。本书配套仓库的 17 章里一个测试都没有（各应用的 <code>tests.py</code> 都是空的），这是最值得补的一块，见<a href="t01.html">专题 1 · 测试</a>。
+    <br><span class="tag ts">TSD：测试</span> 见 <a href="ch01.html#review">第 1 章</a>、<a href="ch15.html#review">第 15 章</a>、<a href="t01.html">专题 1</a>
   </li>
 </ol>
 
@@ -363,7 +363,7 @@
   <tr><td>模板里不写逻辑，不用 <code>locals()</code></td><td>第 9 章用了 <code>locals()</code></td><td>显式构建 context</td></tr>
   <tr><td>谨慎使用信号</td><td>第 7 章用 <code>m2m_changed</code> 维护计数</td><td>能在模型方法/服务里显式调用就不要用信号</td></tr>
   <tr><td>API 版本化、认证、限流</td><td>未版本化，Basic 认证</td><td>见第 15 章点评</td></tr>
-  <tr><td>测试：每个应用有 tests 包、用工厂造数据</td><td>几乎没有测试（第 15 章 API 测试除外）</td><td>pytest-django + factory_boy + coverage</td></tr>
+  <tr><td>测试：每个应用有 tests 包、用工厂造数据</td><td>没有测试（各应用的 <code>tests.py</code> 都是空的）</td><td>pytest-django + factory_boy + coverage</td></tr>
   <tr><td>挑选维护良好的第三方包</td><td>django-parler、django-braces 等更新变慢</td><td>评估活跃度；能用 Django 内置功能就少一个依赖</td></tr>
 </table>
 </div>

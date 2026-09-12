@@ -1,0 +1,654 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>专题 2 · 项目起步 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="T2">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">专题 2 · 专题补充</span>
+<h1>项目起步：第一天就做对的事</h1>
+<p class="lede">
+  书里的项目从 <code>django-admin startproject</code> 直接开始：一个 <code>settings.py</code>、写死的 <code>SECRET_KEY</code>、默认的 <code>User</code>，
+  到第 17 章才拆分设置。这些做法在教学中很合理，但真实项目里有几件事<strong>越晚做越贵</strong>，最贵的是自定义用户模型：一旦执行过第一次 <code>migrate</code>，再换就很痛苦。
+  这一篇用大约半小时，搭一个以后不用返工的项目骨架。
+</p>
+
+<div class="goals">
+  <h4>本篇目标</h4>
+  <ul>
+    <li>用 uv（或 venv + pip）管理 Python 版本和依赖，锁定版本</li>
+    <li>从第一天起按环境拆分设置，机密放进 <code>.env</code> 和环境变量</li>
+    <li>在第一次 <code>migrate</code> 之前建好自定义用户模型，并知道在各处如何引用它</li>
+    <li>用 <code>TimeStampedModel</code> 抽象基类统一时间戳字段</li>
+    <li>配置 ruff 和 pre-commit，让格式、导入顺序、常见错误在提交前就被拦下</li>
+    <li>用 Docker Compose 只跑数据库和 Redis，Django 仍在本机运行，方便调试</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="why">书中的起步方式与推荐骨架</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="左边是书中第 1 章的项目结构：单一 settings.py、写死的 SECRET_KEY、默认 User、一份 requirements.txt；右边是推荐骨架：config/settings 拆分、users 应用、core 应用、pyproject 与 uv.lock、.env 与 .env.example、pre-commit 配置和开发用 docker-compose">
+  <rect class="bx-d" x="14" y="14" width="330" height="300" rx="12"/>
+  <text class="ttl" x="179" y="40" text-anchor="middle">书中（第 1 章）</text>
+  <text class="mono sm" x="34" y="72">mysite/</text>
+  <text class="mono sm" x="54" y="96">manage.py</text>
+  <text class="mono sm" x="54" y="120">mysite/settings.py</text>
+  <text class="sm on-r" x="210" y="120">SECRET_KEY 写死</text>
+  <text class="mono sm" x="54" y="144">blog/</text>
+  <text class="mono sm" x="54" y="168">requirements.txt</text>
+  <text class="sm" x="210" y="168">开发、生产混在一起</text>
+  <text class="sm on-r" x="34" y="208">· 默认 auth.User</text>
+  <text class="sm on-r" x="34" y="232">· 到第 17 章才拆分设置</text>
+  <text class="sm on-r" x="34" y="256">· 没有测试、没有代码检查</text>
+  <text class="sm" x="34" y="290">教学上清晰，但以后要返工</text>
+
+  <path class="ln-a" d="M350 164 H410" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-g" x="416" y="14" width="330" height="300" rx="12"/>
+  <text class="ttl on-g" x="581" y="40" text-anchor="middle">推荐骨架（本篇）</text>
+  <text class="mono sm" x="436" y="72">mysite/</text>
+  <text class="mono sm" x="456" y="94">config/settings/</text>
+  <text class="mono sm" x="476" y="114">base  local  test  production</text>
+  <text class="mono sm on-b" x="456" y="138">users/</text><text class="sm" x="560" y="138">自定义 User</text>
+  <text class="mono sm on-b" x="456" y="160">core/</text><text class="sm" x="560" y="160">TimeStampedModel</text>
+  <text class="mono sm" x="456" y="182">blog/ …</text><text class="sm" x="560" y="182">业务应用</text>
+  <text class="mono sm" x="456" y="206">pyproject.toml  uv.lock</text>
+  <text class="mono sm" x="456" y="228">.env（不提交） .env.example</text>
+  <text class="mono sm" x="456" y="250">.pre-commit-config.yaml</text>
+  <text class="mono sm" x="456" y="272">docker-compose.yml</text>
+  <text class="sm" x="560" y="296" text-anchor="middle">以后只加功能，不改地基</text>
+</svg>
+<figcaption>图 T2-1　两种起步方式。右边多出来的每一项，前面章节的点评里都出现过“要是一开始就这样就好了”</figcaption>
+</figure>
+
+<h2 id="env">Python 环境与依赖</h2>
+
+<p>
+  <strong>uv</strong> 是一个用 Rust 写的 Python 包与项目管理器：一个命令就能装 Python、建虚拟环境、装依赖，还会生成锁文件 <code>uv.lock</code>，
+  保证你、同事和服务器装的是完全一样的版本。它比 pip 快得多，是近两年社区最常用的新选择。
+</p>
+
+<div class="code" data-lang="bash" data-file="用 uv 起步">
+<pre>
+# 安装 uv（macOS / Linux；Windows 见 uv 官方文档）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+mkdir mysite &amp;&amp; cd mysite
+uv init                                   # 生成 pyproject.toml、.python-version（示例 main.py 可删掉）
+uv add "django~=5.2" django-environ "psycopg[binary]"
+uv add --dev pytest-django factory-boy ruff pre-commit django-debug-toolbar
+
+uv run django-admin startproject config .  # 注意最后的点：manage.py 放在当前目录
+uv run python manage.py runserver         # uv run = 在项目虚拟环境里执行
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="uv 的工作方式：pyproject.toml 声明依赖，uv.lock 锁定精确版本，两者都提交到 git；.venv 是本地虚拟环境，不提交；同事 clone 后运行 uv sync 得到完全相同的环境">
+  <rect class="bx-b" x="16" y="30" width="200" height="72" rx="10"/>
+  <text class="mono sm on-b" x="116" y="56" text-anchor="middle">pyproject.toml</text>
+  <text class="sm" x="116" y="78" text-anchor="middle">声明：django~=5.2</text>
+  <text class="sm" x="116" y="94" text-anchor="middle">（人写的）</text>
+  <path class="ln" d="M218 66 H270" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="274" y="30" width="200" height="72" rx="10"/>
+  <text class="mono sm on-a" x="374" y="56" text-anchor="middle">uv.lock</text>
+  <text class="sm" x="374" y="78" text-anchor="middle">锁定：django==5.2.x</text>
+  <text class="sm" x="374" y="94" text-anchor="middle">（uv 生成的）</text>
+  <path class="ln" d="M476 66 H528" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="532" y="30" width="212" height="72" rx="10"/>
+  <text class="mono sm" x="638" y="56" text-anchor="middle">.venv/</text>
+  <text class="sm" x="638" y="78" text-anchor="middle">实际安装的包</text>
+  <text class="sm" x="638" y="94" text-anchor="middle">（本地，不提交）</text>
+  <text class="sm on-g" x="245" y="134" text-anchor="middle">这两个文件提交到 git</text>
+  <path class="ln-g" d="M116 106 V122 H374 V106"/>
+  <text class="sm" x="638" y="134" text-anchor="middle">同事 clone 后：uv sync</text>
+</svg>
+<figcaption>图 T2-2　声明与锁定分开：<code>pyproject.toml</code> 写“要什么”，<code>uv.lock</code> 记“装了什么”</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 不想用 uv？</div>
+  <p>
+    经典做法完全可行：<code>python -m venv .venv</code>，激活后 <code>python -m pip install ...</code>。
+    按 Two Scoops 的建议把依赖分成 <code>requirements/base.txt</code>、<code>local.txt</code>（<code>-r base.txt</code> 加开发工具）、<code>production.txt</code>，并写上精确版本（<code>pip freeze</code> 的输出）。下文所有 <code>uv run</code> 去掉前缀即可。
+  </p>
+</div>
+
+<h2 id="layout">项目布局：<code>config</code> 与设置包</h2>
+
+<p>
+  <code>startproject config .</code> 让项目配置包叫 <code>config</code>，而不是和项目同名的 <code>mysite/mysite/</code>。一眼就能分清“这是配置”和“这是业务应用”。
+  接着把 <code>settings.py</code> 变成一个包：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+mkdir config/settings
+mv config/settings.py config/settings/base.py
+touch config/settings/__init__.py config/settings/local.py \
+      config/settings/test.py config/settings/production.py
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file="此时的目录">
+<pre>
+mysite/
+├── config/
+│   ├── settings/
+│   │   ├── __init__.py
+│   │   ├── base.py         # 公共设置
+│   │   ├── local.py        # 本机开发
+│   │   ├── test.py         # 跑测试
+│   │   └── production.py   # 线上
+│   ├── urls.py
+│   ├── asgi.py
+│   └── wsgi.py
+├── manage.py
+├── pyproject.toml
+└── uv.lock
+</pre>
+</div>
+
+<h2 id="settings">设置拆分与环境变量</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="设置的加载过程：.env 文件和真正的环境变量通过 django-environ 读入 base.py；local、test、production 继承 base 并覆盖；manage.py 默认 local，pytest 使用 test，wsgi 和 asgi 默认 production">
+  <rect class="bx-r" x="16" y="30" width="170" height="60" rx="10"/>
+  <text class="mono sm on-r" x="101" y="56" text-anchor="middle">.env（本机）</text>
+  <text class="sm" x="101" y="76" text-anchor="middle">git 忽略</text>
+  <rect class="bx-r" x="16" y="110" width="170" height="60" rx="10"/>
+  <text class="sm on-r" x="101" y="136" text-anchor="middle">真正的环境变量</text>
+  <text class="sm" x="101" y="156" text-anchor="middle">服务器 / CI / 容器</text>
+  <path class="ln-r" d="M188 60 L262 92" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M188 140 L262 108" marker-end="url(#ar-r)"/>
+
+  <rect class="bx-b" x="266" y="60" width="180" height="80" rx="12"/>
+  <text class="ttl on-b" x="356" y="86" text-anchor="middle">base.py</text>
+  <text class="mono sm" x="356" y="108" text-anchor="middle">env('DJANGO_SECRET_KEY')</text>
+  <text class="mono sm" x="356" y="126" text-anchor="middle">env.db('DATABASE_URL')</text>
+
+  <rect class="bx-g" x="520" y="14" width="224" height="56" rx="10"/>
+  <text class="mono sm on-g" x="632" y="38" text-anchor="middle">local.py</text>
+  <text class="sm" x="632" y="58" text-anchor="middle">DEBUG、Debug Toolbar、控制台邮件</text>
+  <rect class="bx-p" x="520" y="84" width="224" height="56" rx="10"/>
+  <text class="mono sm on-p" x="632" y="108" text-anchor="middle">test.py</text>
+  <text class="sm" x="632" y="128" text-anchor="middle">快速密码哈希、内存邮件</text>
+  <rect class="bx-a" x="520" y="154" width="224" height="56" rx="10"/>
+  <text class="mono sm on-a" x="632" y="178" text-anchor="middle">production.py</text>
+  <text class="sm" x="632" y="198" text-anchor="middle">HTTPS、安全 Cookie、日志</text>
+  <path class="ln-d" d="M516 42 L450 86" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M516 112 H450" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M516 182 L450 134" marker-end="url(#ar)"/>
+  <text class="sm" x="470" y="60">继承</text>
+
+  <text class="mono sm" x="30" y="236">manage.py  → config.settings.local</text>
+  <text class="mono sm" x="30" y="258">pytest     → config.settings.test</text>
+  <text class="mono sm" x="30" y="280">wsgi / asgi → config.settings.production</text>
+  <text class="sm" x="420" y="258">三个入口各有明确的默认值，任何时候都可以用</text>
+  <text class="sm" x="420" y="278">DJANGO_SETTINGS_MODULE 覆盖</text>
+</svg>
+<figcaption>图 T2-3　代码里只有“读哪个变量”，没有“变量的值”；值来自 <code>.env</code> 或环境</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="config/settings/base.py（节选）">
+<pre>
+from pathlib import Path
+
+import environ
+
+BASE_DIR = Path(__file__).resolve().parent.parent.parent   # 多了一层 settings/
+
+env = environ.Env()
+environ.Env.read_env(BASE_DIR / '.env')      # 文件不存在只会提示，线上直接用真正的环境变量
+
+SECRET_KEY = env('DJANGO_SECRET_KEY')          # 没有设置 → 启动即报错，而不是悄悄用默认值
+DEBUG = env.bool('DJANGO_DEBUG', default=False)
+ALLOWED_HOSTS = env.list('DJANGO_ALLOWED_HOSTS', default=[])
+
+DJANGO_APPS = [
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.sessions',
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+]
+THIRD_PARTY_APPS = []
+LOCAL_APPS = [
+    'users.apps.UsersConfig',
+    'core.apps.CoreConfig',
+]
+INSTALLED_APPS = DJANGO_APPS + THIRD_PARTY_APPS + LOCAL_APPS
+
+DATABASES = {'default': env.db('DATABASE_URL')}   # postgres://user:pass@host:5432/name
+AUTH_USER_MODEL = 'users.User'                    # 第一次 migrate 之前就要写好
+DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="config/settings/local.py">
+<pre>
+from .base import *  # noqa: F403
+
+DEBUG = True
+ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+
+INSTALLED_APPS += ['debug_toolbar']
+MIDDLEWARE.insert(0, 'debug_toolbar.middleware.DebugToolbarMiddleware')
+INTERNAL_IPS = ['127.0.0.1']
+
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'   # 只在本机
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="config/settings/test.py">
+<pre>
+from .base import *  # noqa: F403
+
+PASSWORD_HASHERS = ['django.contrib.auth.hashers.MD5PasswordHasher']   # 测试里造用户快很多
+EMAIL_BACKEND = 'django.core.mail.backends.locmem.EmailBackend'
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="config/settings/production.py">
+<pre>
+from .base import *  # noqa: F403
+
+DEBUG = False
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+SECURE_SSL_REDIRECT = env.bool('DJANGO_SECURE_SSL_REDIRECT', default=True)
+SECURE_HSTS_SECONDS = env.int('DJANGO_SECURE_HSTS_SECONDS', default=60)   # 确认无误后逐步调大
+# 只有当前面的反向代理会设置这个头时才打开（例如 Nginx 配了 X-Forwarded-Proto）
+# SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+# 日志、错误报告见专题 3
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="manage.py / config/wsgi.py / config/asgi.py 各改一行">
+<pre>
+# manage.py
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.local')
+# config/wsgi.py 与 config/asgi.py
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'config.settings.production')
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file=".env.example（提交到 git，给同事照着建 .env）">
+<pre>
+DJANGO_SECRET_KEY=change-me
+DJANGO_DEBUG=True
+DATABASE_URL=postgres://mysite:mysite@localhost:5432/mysite
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+cp .env.example .env
+# 生成一个真正随机的密钥，填进 .env
+uv run python -c "from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())"
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 这正是第 17 章点评里的三个问题</div>
+  <p>
+    <code>SECRET_KEY</code> 写死在代码里、拆分后入口文件的默认设置模块指向空包、调试工具和控制台邮件混进了公共设置
+    —— 见 <a href="ch17.html#review">第 17 章点评</a>。从第一天就按上面的方式写，这三个问题都不会出现。
+  </p>
+</div>
+
+<h2 id="user">自定义用户模型</h2>
+
+<p>Django 官方文档的原话是：新项目<strong>强烈建议</strong>设置自定义用户模型，哪怕默认的 <code>User</code> 已经够用。原因看下图：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="第一天设置 AUTH_USER_MODEL 时，所有外键从一开始就指向 users_user 表，以后加字段只是一次普通迁移；项目中途再换时，admin 日志、博客文章、订单等表的外键都已经指向 auth_user，Django 不能自动迁移，需要手工改写迁移和数据">
+  <rect class="bx-g" x="16" y="16" width="352" height="258" rx="12"/>
+  <text class="ttl on-g" x="192" y="42" text-anchor="middle">第一天就设置</text>
+  <rect class="bx-g" x="122" y="62" width="140" height="44" rx="8"/>
+  <text class="mono sm on-g" x="192" y="89" text-anchor="middle">users_user</text>
+  <rect class="bx-d" x="30" y="150" width="100" height="36" rx="6"/><text class="mono sm" x="80" y="173" text-anchor="middle">admin_log</text>
+  <rect class="bx-d" x="142" y="150" width="100" height="36" rx="6"/><text class="mono sm" x="192" y="173" text-anchor="middle">blog_post</text>
+  <rect class="bx-d" x="254" y="150" width="100" height="36" rx="6"/><text class="mono sm" x="304" y="173" text-anchor="middle">orders_order</text>
+  <path class="ln-g" d="M80 148 L160 110" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M192 148 V110" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M304 148 L226 110" marker-end="url(#ar-g)"/>
+  <text class="sm" x="192" y="216" text-anchor="middle">以后要加 phone、改用邮箱登录……</text>
+  <text class="sm on-g" x="192" y="240" text-anchor="middle">= 一次普通的 makemigrations</text>
+
+  <rect class="bx-r" x="392" y="16" width="352" height="258" rx="12"/>
+  <text class="ttl on-r" x="568" y="42" text-anchor="middle">项目中途再换</text>
+  <rect class="bx-r" x="420" y="62" width="130" height="44" rx="8"/>
+  <text class="mono sm on-r" x="485" y="89" text-anchor="middle">auth_user</text>
+  <rect class="bx-d" x="590" y="62" width="130" height="44" rx="8"/>
+  <text class="mono sm" x="655" y="89" text-anchor="middle">users_user ?</text>
+  <rect class="bx-d" x="406" y="150" width="100" height="36" rx="6"/><text class="mono sm" x="456" y="173" text-anchor="middle">admin_log</text>
+  <rect class="bx-d" x="518" y="150" width="100" height="36" rx="6"/><text class="mono sm" x="568" y="173" text-anchor="middle">blog_post</text>
+  <rect class="bx-d" x="630" y="150" width="100" height="36" rx="6"/><text class="mono sm" x="680" y="173" text-anchor="middle">orders_order</text>
+  <path class="ln-r" d="M456 148 L472 110" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M568 148 L500 110" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M680 148 L540 108" marker-end="url(#ar-r)"/>
+  <text class="sm" x="568" y="216" text-anchor="middle">所有外键、已有迁移、已有数据都指向旧表</text>
+  <text class="sm on-r" x="568" y="240" text-anchor="middle">makemigrations 无法自动处理，只能手工改</text>
+</svg>
+<figcaption>图 T2-4　书里第 7 章用 <code>add_to_class</code> 给 <code>User</code> 打补丁、第 4 章另建 <code>Profile</code>，都是“没有自定义用户模型”带来的绕路</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+uv run python manage.py startapp users
+uv run python manage.py startapp core
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="users/models.py">
+<pre>
+from django.contrib.auth.models import AbstractUser
+
+
+class User(AbstractUser):
+    pass          # 先空着也完全可以，重要的是“有”
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="users/admin.py">
+<pre>
+from django.contrib import admin
+from django.contrib.auth.admin import UserAdmin
+
+from .models import User
+
+admin.site.register(User, UserAdmin)
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="users/forms.py">
+<pre>
+from django.contrib.auth.forms import UserCreationForm
+
+from .models import User
+
+
+class SignUpForm(UserCreationForm):          # 自带两次密码输入和 AUTH_PASSWORD_VALIDATORS 校验
+    class Meta(UserCreationForm.Meta):
+        model = User
+        fields = ('username', 'email')
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+uv run python manage.py makemigrations users
+uv run python manage.py migrate               # 这是整个项目的第一次 migrate
+uv run python manage.py createsuperuser
+</pre>
+</div>
+
+<h3>在各处怎样引用用户模型</h3>
+
+<div class="tw">
+<table>
+  <tr><th>场景</th><th>写法</th><th>不要写</th></tr>
+  <tr><td>模型的外键、多对多</td><td><code>models.ForeignKey(settings.AUTH_USER_MODEL, ...)</code></td><td><code>ForeignKey(User, ...)</code></td></tr>
+  <tr><td>视图、表单、服务函数、管理命令</td><td><code>get_user_model()</code>，或直接用 <code>request.user</code></td><td><code>from django.contrib.auth.models import User</code></td></tr>
+  <tr><td>模型信号的 sender</td><td><code>sender=settings.AUTH_USER_MODEL</code>（字符串会被惰性解析）</td><td><code>sender=User</code></td></tr>
+  <tr><td>注册表单</td><td>继承 <code>UserCreationForm</code>，<code>Meta.model = User</code></td><td>自己写密码字段再 <code>set_password</code></td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 想用邮箱登录？</div>
+  <p>在 <code>User</code> 上加 <code>email = models.EmailField('email address', unique=True)</code>，让数据库保证邮箱唯一，再配合第 5 章的邮箱认证后端（或 django-allauth）。在<strong>第一次 migrate 之前</strong>决定，最省事。</p>
+</div>
+
+<h2 id="core">公共基类：<code>core</code> 应用</h2>
+
+<div class="code" data-lang="py" data-file="core/models.py">
+<pre>
+from django.db import models
+from django.db.models.functions import Now
+
+
+class TimeStampedModel(models.Model):
+    created = models.DateTimeField(db_default=Now(), editable=False)   # Django 5.0+：由数据库生成
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True          # 不建表，只把字段“复制”给子类
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="blog/models.py（以后这样写）">
+<pre>
+from django.conf import settings
+from django.db import models
+
+from core.models import TimeStampedModel
+
+
+class Post(TimeStampedModel):           # 自动拥有 created / updated
+    author = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+                               related_name='blog_posts')
+    title = models.CharField(max_length=250)
+    # ...
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 应用放在哪里</div>
+  <p><a href="ch18.html#skeleton">附录</a>里的骨架把应用放进 <code>apps/</code> 目录，适合应用很多的项目，但需要额外修改每个 <code>apps.py</code> 的 <code>name</code>。小项目像本篇这样放在根目录更简单，两种都符合 Two Scoops 的建议。</p>
+</div>
+
+<h2 id="tooling">代码检查：ruff 与 pre-commit</h2>
+
+<p>
+  <strong>ruff</strong> 一个工具同时做代码检查（lint）和格式化，速度极快。<strong>pre-commit</strong> 在每次 <code>git commit</code> 前自动运行这些检查，不合格就拒绝提交。
+  规则写在配置里，团队不用再争论代码风格。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="代码质量流水线：编辑器保存时 ruff 格式化；git commit 时 pre-commit 运行 ruff、ruff-format、django-upgrade、私钥检测；推送后 CI 再跑一遍相同检查和测试；任何一步失败都会阻止代码进入主分支">
+  <rect class="bx" x="16" y="50" width="150" height="70" rx="10"/>
+  <text class="ttl" x="91" y="78" text-anchor="middle">编辑器</text>
+  <text class="sm" x="91" y="100" text-anchor="middle">保存时 ruff format</text>
+  <path class="ln" d="M168 85 H210" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="214" y="30" width="250" height="110" rx="10"/>
+  <text class="ttl on-a" x="339" y="56" text-anchor="middle">git commit → pre-commit</text>
+  <text class="mono sm" x="234" y="80">ruff --fix     导入顺序、常见 bug</text>
+  <text class="mono sm" x="234" y="100">ruff-format    统一格式</text>
+  <text class="mono sm" x="234" y="120">django-upgrade 旧写法 → 5.2 写法</text>
+  <path class="ln" d="M466 85 H508" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="512" y="30" width="232" height="110" rx="10"/>
+  <text class="ttl on-g" x="628" y="56" text-anchor="middle">push → CI</text>
+  <text class="sm" x="628" y="80" text-anchor="middle">同样的检查再跑一遍</text>
+  <text class="sm" x="628" y="100" text-anchor="middle">+ pytest + 迁移检查</text>
+  <text class="sm" x="628" y="120" text-anchor="middle">见专题 1</text>
+  <text class="sm on-r" x="380" y="162" text-anchor="middle">任何一步失败，代码都进不了主分支</text>
+</svg>
+<figcaption>图 T2-5　问题越早被发现越便宜：保存时 &lt; 提交时 &lt; CI &lt; 线上</figcaption>
+</figure>
+
+<div class="code" data-lang="bash" data-file="pyproject.toml（追加）">
+<pre>
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+extend-exclude = ["*/migrations/*"]
+
+[tool.ruff.lint]
+# E/F: 基础错误  I: 导入排序  B: 常见 bug  UP: 新语法  DJ: Django 专用规则
+select = ["E", "F", "I", "B", "UP", "DJ"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings.test"
+python_files = ["tests.py", "test_*.py"]
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file=".pre-commit-config.yaml">
+<pre>
+# rev 写的是示例版本，运行 pre-commit autoupdate 更新到最新
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: detect-private-key          # 第 17 章提交进仓库的 TLS 私钥会被它拦下
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.12.0
+    hooks:
+      - id: ruff
+        args: [--fix]
+      - id: ruff-format
+  - repo: https://github.com/adamchainz/django-upgrade
+    rev: 1.25.0
+    hooks:
+      - id: django-upgrade
+        args: [--target-version, "5.2"]
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+git init
+uv run pre-commit install            # 装进 .git/hooks，以后每次 commit 自动运行
+uv run pre-commit run --all-files    # 手动对全部文件跑一遍
+uv run ruff check .                  # 单独运行检查
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; DJ 规则能抓到什么</div>
+  <p>例如给 <code>CharField</code> 加 <code>null=True</code>（DJ001，应该用空字符串表示“无”）、模型没有 <code>__str__</code>（DJ008）、ModelForm 用 <code>exclude</code> 或 <code>__all__</code>（DJ006、DJ007）。这些正是 Two Scoops 反复强调的约定。</p>
+</div>
+
+<h2 id="services">开发用的数据库与 Redis</h2>
+
+<p>书里第 3 章起就换成了 PostgreSQL，推荐开发环境也用和线上相同的数据库。用 Docker Compose 只跑“服务”，Django 本身仍在本机运行，这样 <code>breakpoint()</code>、IDE 调试、自动重载都最方便：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="开发环境拓扑：Django 在本机用 uv run 运行，通过 localhost 的 5432 和 6379 端口连接 Docker Compose 里的 PostgreSQL 和 Redis 容器">
+  <rect class="bx-g" x="16" y="40" width="240" height="90" rx="12"/>
+  <text class="ttl on-g" x="136" y="68" text-anchor="middle">本机</text>
+  <text class="mono sm" x="136" y="92" text-anchor="middle">uv run python manage.py</text>
+  <text class="mono sm" x="136" y="112" text-anchor="middle">runserver</text>
+  <rect class="bx-d" x="330" y="20" width="414" height="130" rx="12"/>
+  <text class="ttl" x="537" y="44" text-anchor="middle">docker compose up -d</text>
+  <rect class="bx-b" x="354" y="62" width="170" height="64" rx="10"/>
+  <text class="ttl on-b" x="439" y="88" text-anchor="middle">PostgreSQL</text>
+  <text class="mono sm" x="439" y="110" text-anchor="middle">localhost:5432</text>
+  <rect class="bx-r" x="550" y="62" width="170" height="64" rx="10"/>
+  <text class="ttl on-r" x="635" y="88" text-anchor="middle">Redis</text>
+  <text class="mono sm" x="635" y="110" text-anchor="middle">localhost:6379</text>
+  <path class="ln" d="M258 85 H350" marker-end="url(#ar)"/>
+  <text class="sm" x="304" y="78" text-anchor="middle">DATABASE_URL</text>
+</svg>
+<figcaption>图 T2-6　服务放容器、代码在本机：既和线上一致，又不牺牲调试体验</figcaption>
+</figure>
+
+<div class="code" data-lang="bash" data-file="docker-compose.yml（仅用于开发）">
+<pre>
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: mysite
+      POSTGRES_USER: mysite
+      POSTGRES_PASSWORD: mysite      # 只在本机使用的弱密码，线上绝不能这样
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+  redis:
+    image: redis:7
+    ports: ["6379:6379"]
+
+volumes:
+  pgdata:
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file=".gitignore（至少包含）">
+<pre>
+.venv/
+__pycache__/
+*.py[cod]
+.env
+db.sqlite3
+media/
+staticfiles/
+</pre>
+</div>
+
+<h2 id="checklist">第一天清单</h2>
+
+<ol class="steps">
+  <li><code>uv init</code>，<code>uv add</code> Django 5.2 和必要依赖，开发工具用 <code>--dev</code>。</li>
+  <li><code>django-admin startproject config .</code>，把设置拆成 <code>base / local / test / production</code>，改好三个入口文件的默认值。</li>
+  <li>写 <code>.env.example</code>，复制成 <code>.env</code>，生成随机 <code>SECRET_KEY</code>；<code>.env</code> 加进 <code>.gitignore</code>。</li>
+  <li><code>docker compose up -d</code> 启动 PostgreSQL 和 Redis。</li>
+  <li>建 <code>users</code> 应用和 <code>User(AbstractUser)</code>，设置 <code>AUTH_USER_MODEL</code>，<strong>然后才第一次</strong> <code>migrate</code>。</li>
+  <li>建 <code>core</code> 应用放 <code>TimeStampedModel</code> 等公共代码。</li>
+  <li>配置 ruff、pre-commit，运行 <code>pre-commit install</code>。</li>
+  <li>配置 pytest-django，写第一个测试（见<a href="t01.html">专题 1</a>），确认 <code>uv run pytest</code> 能跑通。</li>
+  <li><code>git commit</code> 第一个版本。之后再 <code>startapp blog</code>，从<a href="ch01.html">第 1 章</a>开始写业务。</li>
+</ol>
+
+<h2 id="compare">对照书中的做法</h2>
+
+<div class="tw">
+<table>
+  <tr><th>主题</th><th>书中</th><th>本篇</th><th>相关点评</th></tr>
+  <tr><td>用户模型</td><td>默认 <code>auth.User</code>，另建 Profile，第 7 章 <code>add_to_class</code></td><td>第一天建 <code>users.User</code></td><td><a href="ch04.html#review">4</a> · <a href="ch07.html#review">7</a> · <a href="ch12.html#review">12</a></td></tr>
+  <tr><td>设置</td><td>单一 settings.py，第 17 章才拆分</td><td>第一天拆分，入口各有默认值</td><td><a href="ch01.html#review">1</a> · <a href="ch17.html#review">17</a></td></tr>
+  <tr><td>机密</td><td><code>SECRET_KEY</code> 写死；第 2 章起邮件和 Stripe 凭据用 decouple</td><td>所有机密都来自环境，缺失即报错</td><td><a href="ch01.html#review">1</a> · <a href="ch03.html#review">3</a> · <a href="ch17.html#review">17</a></td></tr>
+  <tr><td>依赖</td><td>一份 requirements.txt</td><td><code>pyproject.toml</code> + <code>uv.lock</code>，开发依赖分组</td><td><a href="ch17.html#review">17</a></td></tr>
+  <tr><td>代码质量</td><td>无</td><td>ruff + pre-commit + django-upgrade</td><td>—</td></tr>
+  <tr><td>测试</td><td>各应用 <code>tests.py</code> 为空</td><td>pytest-django 从第一天配好</td><td><a href="ch01.html#review">1</a> · <a href="t01.html">专题 1</a></td></tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 用这个骨架跟着书学，需要改什么</div>
+  <p>
+    几乎不用改：书中的模型大多已经用 <code>settings.AUTH_USER_MODEL</code> 引用用户（第 12 章例外，见其点评）。
+    需要留意的只有两处：书中 shell 示例里的 <code>from django.contrib.auth.models import User</code> 换成 <code>get_user_model()</code>；
+    书中的 <code>--settings=mysite.settings</code> 换成 <code>config.settings.local</code>。
+  </p>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>依赖声明（<code>pyproject.toml</code>）与锁定（<code>uv.lock</code>）分开，都提交到 git。</li>
+  <li>设置按环境拆分；代码里只写“读哪个变量”，值来自 <code>.env</code> 或环境；三个入口各有明确的默认设置。</li>
+  <li>自定义用户模型必须在第一次 <code>migrate</code> 之前建好；引用时用 <code>AUTH_USER_MODEL</code> / <code>get_user_model()</code>。</li>
+  <li>ruff + pre-commit 让风格和常见错误在提交前就被处理；django-upgrade 自动把旧写法升级到 5.2。</li>
+  <li>开发时服务放容器、Django 在本机，和线上一致又方便调试。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>按“第一天清单”搭一个空项目，确认删掉 <code>.env</code> 里的 <code>DJANGO_SECRET_KEY</code> 后 <code>runserver</code> 会立即报错。</li>
+    <li>在 <code>User</code> 上加一个 <code>bio</code> 字段，体会“第一天就有自定义用户模型”时这只是一次普通迁移。</li>
+    <li>故意在一个 <code>CharField</code> 上写 <code>null=True</code>，然后 <code>git commit</code>，看 pre-commit 拦下它。</li>
+    <li>在这个骨架上完成第 1 章的博客，并把书中所有 <code>User</code> 的直接导入改成 <code>get_user_model()</code>。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>
