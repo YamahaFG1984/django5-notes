@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>专题 5 · 迁移深入 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="T5">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">专题 5 · 专题补充</span>
+<h1>迁移深入：安全地改数据库</h1>
+<p class="lede">
+  书里的迁移总是两步：<code>makemigrations</code>、<code>migrate</code>。开发时数据库随时可以删掉重建，这样做没问题；
+  可一旦库里有了真实数据，迁移就成了最容易出事故的操作之一。第 11 章的翻译迁移会直接删掉商品名称，第 5 章的模型与迁移对不上，
+  第 12 章的自定义字段在迁移里丢了参数。这一篇讲迁移的原理，以及数据迁移、回滚、冲突和上线不停机的做法。
+</p>
+
+<div class="goals">
+  <h4>本篇目标</h4>
+  <ul>
+    <li>理解迁移文件、依赖图和 <code>django_migrations</code> 表之间的关系</li>
+    <li>熟练使用 <code>showmigrations</code>、<code>sqlmigrate</code>、<code>migrate --plan</code>、<code>makemigrations --check</code> 和回滚</li>
+    <li>写出可逆的数据迁移，知道为什么要用 <code>apps.get_model()</code></li>
+    <li>用“扩展 → 迁移数据 → 收缩”三步安全地重构模型</li>
+    <li>处理多人协作时的迁移冲突，用 <code>squashmigrations</code> 压缩历史</li>
+    <li>知道哪些操作会锁表或让旧代码报错，以及上线不停机的替代写法</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="how">迁移是怎么工作的</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="迁移的流程：修改 models.py 后，makemigrations 对比当前模型和已有迁移推导出的状态，生成新的迁移文件；migrate 按依赖顺序执行尚未执行的迁移，修改数据库结构，并在 django_migrations 表中记录已执行的迁移">
+  <rect class="bx-b" x="16" y="30" width="150" height="70" rx="10"/>
+  <text class="ttl on-b" x="91" y="58" text-anchor="middle">models.py</text>
+  <text class="sm" x="91" y="80" text-anchor="middle">你想要的样子</text>
+  <path class="ln" d="M168 65 H214" marker-end="url(#ar)"/>
+  <text class="mono sm" x="191" y="126" text-anchor="middle">makemigrations</text>
+  <rect class="bx-a" x="218" y="20" width="200" height="90" rx="10"/>
+  <text class="ttl on-a" x="318" y="46" text-anchor="middle">迁移文件</text>
+  <text class="mono sm" x="318" y="70" text-anchor="middle">0003_comment.py</text>
+  <text class="sm" x="318" y="92" text-anchor="middle">operations = [ … ]，提交到 git</text>
+  <path class="ln" d="M420 65 H466" marker-end="url(#ar)"/>
+  <text class="mono sm" x="443" y="126" text-anchor="middle">migrate</text>
+  <rect class="bx-g" x="470" y="20" width="274" height="90" rx="10"/>
+  <text class="ttl on-g" x="607" y="46" text-anchor="middle">数据库</text>
+  <text class="sm" x="607" y="70" text-anchor="middle">CREATE / ALTER TABLE …</text>
+  <text class="mono sm" x="607" y="92" text-anchor="middle">django_migrations 记一行</text>
+
+  <rect class="bx-d" x="16" y="140" width="728" height="84" rx="12"/>
+  <text class="sm" x="380" y="164" text-anchor="middle">makemigrations 不看数据库：它把已有迁移文件“重放”一遍得到状态，再和 models.py 比较差异</text>
+  <text class="sm" x="380" y="188" text-anchor="middle">migrate 只看 django_migrations 表：表里没有记录的迁移才会执行</text>
+  <text class="sm on-r" x="380" y="212" text-anchor="middle">所以迁移文件就是数据库结构的“源代码”，必须提交、不能随意删改已执行过的迁移</text>
+</svg>
+<figcaption>图 T5-1　三样东西要保持一致：models.py、迁移文件、数据库里的 django_migrations 记录</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <tr><th>命令</th><th>作用</th></tr>
+  <tr><td><code>makemigrations blog --name add_comment</code></td><td>生成迁移并起一个有意义的名字</td></tr>
+  <tr><td><code>showmigrations</code></td><td>列出所有迁移，<code>[X]</code> 表示已执行</td></tr>
+  <tr><td><code>sqlmigrate blog 0003</code></td><td>显示这个迁移会执行的 SQL，不真正执行（上线前必看）</td></tr>
+  <tr><td><code>migrate --plan</code></td><td>列出接下来会执行哪些迁移、按什么顺序</td></tr>
+  <tr><td><code>migrate --check</code></td><td>有未执行的迁移时返回非零退出码，适合部署脚本</td></tr>
+  <tr><td><code>makemigrations --check --dry-run</code></td><td>模型改了却没生成迁移时返回非零，放进 CI（<a href="t01.html#ci">专题 1</a>）</td></tr>
+  <tr><td><code>migrate blog 0002</code> / <code>migrate blog zero</code></td><td>回滚到 0002 / 回滚这个应用的全部迁移</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+$ python manage.py showmigrations blog
+blog
+ [X] 0001_initial
+ [X] 0002_alter_post_slug
+ [ ] 0003_comment
+
+$ python manage.py sqlmigrate blog 0003
+BEGIN;
+CREATE TABLE "blog_comment" ( … );
+CREATE INDEX "blog_comment_post_id_…" ON "blog_comment" ("post_id");
+COMMIT;
+</pre>
+</div>
+
+<h2 id="graph">依赖图、冲突与合并</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="迁移依赖图：blog 的 0001 依赖 auth 的迁移，0002 依赖 0001；两位开发者各自从 0002 生成了 0003，出现两个叶子节点，migrate 会报冲突；makemigrations --merge 生成 0004_merge，同时依赖两个 0003">
+  <rect class="bx-d" x="16" y="96" width="120" height="44" rx="8"/><text class="mono sm" x="76" y="123" text-anchor="middle">auth.0012</text>
+  <rect class="bx-b" x="170" y="96" width="110" height="44" rx="8"/><text class="mono sm on-b" x="225" y="123" text-anchor="middle">0001</text>
+  <rect class="bx-b" x="310" y="96" width="110" height="44" rx="8"/><text class="mono sm on-b" x="365" y="123" text-anchor="middle">0002</text>
+  <path class="ln" d="M138 118 H166" marker-end="url(#ar)"/>
+  <path class="ln" d="M282 118 H306" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="460" y="40" width="130" height="44" rx="8"/><text class="mono sm on-a" x="525" y="60" text-anchor="middle">0003_tags</text><text class="sm" x="525" y="76" text-anchor="middle">小王</text>
+  <rect class="bx-p" x="460" y="152" width="130" height="44" rx="8"/><text class="mono sm on-p" x="525" y="172" text-anchor="middle">0003_likes</text><text class="sm" x="525" y="188" text-anchor="middle">小李</text>
+  <path class="ln-a" d="M422 110 L456 70" marker-end="url(#ar-a)"/>
+  <path class="ln-p" d="M422 126 L456 166" marker-end="url(#ar-p)"/>
+  <rect class="bx-g" x="624" y="96" width="120" height="44" rx="8"/><text class="mono sm on-g" x="684" y="123" text-anchor="middle">0004_merge</text>
+  <path class="ln-g" d="M592 64 L620 108" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M592 172 L620 130" marker-end="url(#ar-g)"/>
+  <text class="sm on-r" x="525" y="120" text-anchor="middle">两个叶子 = 冲突</text>
+  <text class="mono sm on-g" x="684" y="164" text-anchor="middle">makemigrations</text>
+  <text class="mono sm on-g" x="684" y="182" text-anchor="middle">--merge</text>
+  <text class="sm" x="76" y="170" text-anchor="middle">dependencies</text>
+  <text class="sm" x="76" y="188" text-anchor="middle">决定执行顺序</text>
+</svg>
+<figcaption>图 T5-2　每个迁移的 <code>dependencies</code> 连成一张图；同一个应用出现两个“叶子”时，Django 拒绝执行，要求你合并</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 合并之前先想一想</div>
+  <p>
+    如果两个分支的迁移互不相干（一个加标签表、一个加点赞字段），<code>makemigrations --merge</code> 生成的空合并迁移就够了。
+    如果它们改了同一张表的同一个字段，就要人工检查执行顺序是否影响结果。另一个常见做法是：合并代码前先 rebase，删掉自己分支里<strong>还没在任何共享环境执行过</strong>的迁移，重新生成。
+  </p>
+</div>
+
+<h2 id="rollback">回滚与“不可逆”</h2>
+
+<p>每个迁移操作都知道怎么“倒着做”：<code>AddField</code> 的反向是删字段，<code>CreateModel</code> 的反向是删表。<code>migrate blog 0002</code> 会按相反顺序撤销 0002 之后的所有迁移。但有两类操作倒不回去：</p>
+
+<ul>
+  <li><strong>删除字段或表</strong>：结构可以恢复，<strong>数据不会回来</strong>。回滚只是再加一个空列。</li>
+  <li><strong>没有写反向函数的 <code>RunPython</code> / <code>RunSQL</code></strong>：Django 会拒绝回滚并报 <code>IrreversibleError</code>。</li>
+</ul>
+
+<div class="box warn">
+  <div class="t">&#9888; 回滚不能代替备份</div>
+  <p>对生产库执行任何删除数据的迁移前，先确认有可用的备份（<a href="t07.html#backup">专题 7</a>）。回滚迁移能恢复“结构”，只有备份能恢复“数据”。</p>
+</div>
+
+<h2 id="data">数据迁移：RunPython</h2>
+
+<p>结构迁移改表，数据迁移改表里的数据：给老数据填新字段、拆分字段、把数据搬到新表。用 <code>makemigrations --empty</code> 生成一个空迁移，再写 <code>RunPython</code>：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+python manage.py makemigrations blog --empty --name backfill_reading_time
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="blog/migrations/0005_backfill_reading_time.py">
+<pre>
+from django.db import migrations
+
+
+def forwards(apps, schema_editor):
+    Post = apps.get_model('blog', 'Post')          # 历史模型：迁移执行到这一步时的样子
+    posts = list(Post.objects.only('id', 'body'))
+    for post in posts:
+        post.reading_time = max(1, len(post.body.split()) // 200)
+    Post.objects.bulk_update(posts, ['reading_time'], batch_size=500)
+
+
+def backwards(apps, schema_editor):
+    Post = apps.get_model('blog', 'Post')
+    Post.objects.update(reading_time=None)
+
+
+class Migration(migrations.Migration):
+    dependencies = [('blog', '0004_post_reading_time')]
+    operations = [migrations.RunPython(forwards, backwards)]
+    # 反向确实什么都不用做时：migrations.RunPython(forwards, migrations.RunPython.noop)
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="为什么用 apps.get_model：直接 import 模型得到的是当前代码里的模型，以后字段改名或删除后，旧迁移在新环境重放时就会出错；apps.get_model 返回迁移执行到这一步时的历史模型，只有字段，没有自定义方法和管理器">
+  <rect class="bx-r" x="16" y="20" width="352" height="160" rx="12"/>
+  <text class="ttl on-r" x="192" y="46" text-anchor="middle">from blog.models import Post</text>
+  <text class="sm" x="192" y="76" text-anchor="middle">拿到的是“今天”的模型</text>
+  <text class="sm" x="192" y="100" text-anchor="middle">半年后 reading_time 改名了……</text>
+  <text class="sm" x="192" y="124" text-anchor="middle">新同事从头 migrate，这个旧迁移就崩了</text>
+  <text class="sm on-r" x="192" y="156" text-anchor="middle">&#10007; 迁移里不要导入模型</text>
+  <rect class="bx-g" x="392" y="20" width="352" height="160" rx="12"/>
+  <text class="ttl on-g" x="568" y="46" text-anchor="middle">apps.get_model('blog', 'Post')</text>
+  <text class="sm" x="568" y="76" text-anchor="middle">拿到的是“迁移执行到这一步时”的模型</text>
+  <text class="sm" x="568" y="100" text-anchor="middle">只有字段，没有自定义方法、属性和管理器</text>
+  <text class="sm" x="568" y="124" text-anchor="middle">任何时候重放都和当初一样</text>
+  <text class="sm on-g" x="568" y="156" text-anchor="middle">&#10003; 需要的逻辑直接写在迁移函数里</text>
+</svg>
+<figcaption>图 T5-3　历史模型没有 <code>save()</code> 的自定义逻辑，也不会触发你写的信号，这通常正是你想要的</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 大表的数据迁移</div>
+  <p>一个迁移默认在一个事务里执行。几百万行的回填会长时间持锁，最好用 <code>.iterator()</code> 分批处理，或者干脆写成管理命令在迁移之外分批执行，迁移本身只改结构。</p>
+</div>
+
+<h2 id="three-steps">三步重构：扩展 → 迁移数据 → 收缩</h2>
+
+<p>第 11 章把商品模型改成可翻译模型时，自动生成的 <code>0002_translations</code> 在<strong>同一个迁移</strong>里做了两件事：建翻译表，并删掉 <code>Product</code> 的 <code>name</code>、<code>slug</code>、<code>description</code> 列。在一个已经有商品的库上执行，所有商品名称就没了。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="上方是书中的一步迁移：建翻译表的同时删除旧列，数据丢失。下方是三步做法：第一步建翻译表但保留旧列；第二步用 RunPython 把旧列的数据复制到翻译表；第三步确认无误后再删除旧列">
+  <rect class="bx-r" x="16" y="16" width="728" height="84" rx="12"/>
+  <text class="ttl on-r" x="30" y="42">书中：0002_translations 一步完成</text>
+  <text class="mono sm" x="30" y="68">CreateModel(ProductTranslation) + RemoveField(product, name / slug / description)</text>
+  <text class="sm on-r" x="30" y="90">翻译表是空的，旧列已经删了 → 已有商品的名称、描述全部丢失</text>
+
+  <rect class="bx-b" x="16" y="124" width="232" height="150" rx="12"/>
+  <text class="ttl on-b" x="132" y="150" text-anchor="middle">① 扩展</text>
+  <text class="sm" x="132" y="176" text-anchor="middle">建翻译表</text>
+  <text class="sm" x="132" y="198" text-anchor="middle">旧列保留在模型里</text>
+  <text class="mono sm" x="132" y="230" text-anchor="middle">0002_add_translations</text>
+  <path class="ln" d="M250 199 H274" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="278" y="124" width="232" height="150" rx="12"/>
+  <text class="ttl on-a" x="394" y="150" text-anchor="middle">② 迁移数据</text>
+  <text class="sm" x="394" y="176" text-anchor="middle">RunPython：旧列 → 翻译表</text>
+  <text class="sm" x="394" y="198" text-anchor="middle">language_code = 默认语言</text>
+  <text class="mono sm" x="394" y="230" text-anchor="middle">0003_copy_translations</text>
+  <path class="ln" d="M512 199 H536" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="540" y="124" width="204" height="150" rx="12"/>
+  <text class="ttl on-g" x="642" y="150" text-anchor="middle">③ 收缩</text>
+  <text class="sm" x="642" y="176" text-anchor="middle">核对数据后</text>
+  <text class="sm" x="642" y="198" text-anchor="middle">再删除旧列</text>
+  <text class="mono sm" x="642" y="230" text-anchor="middle">0004_remove_old</text>
+</svg>
+<figcaption>图 T5-4　django-parler 的文档也是这样建议的。“先加、再搬、后删”适用于一切改名、拆分、换表的重构</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="shop/models.py（第 ① 步：旧字段暂时保留）">
+<pre>
+class Product(TranslatableModel):
+    name = models.CharField(max_length=200)                 # 旧列，第 ③ 步再删
+    slug = models.SlugField(max_length=200)
+    description = models.TextField(blank=True)
+    translations = TranslatedFields(
+        name=models.CharField(max_length=200),
+        slug=models.SlugField(max_length=200),
+        description=models.TextField(blank=True),
+    )
+    # ...
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="shop/migrations/0003_copy_translations.py（第 ② 步）">
+<pre>
+from django.conf import settings
+from django.db import migrations
+
+
+def copy_to_translations(apps, schema_editor):
+    Product = apps.get_model('shop', 'Product')
+    ProductTranslation = apps.get_model('shop', 'ProductTranslation')
+    ProductTranslation.objects.bulk_create([
+        ProductTranslation(
+            master_id=p.pk,
+            language_code=settings.LANGUAGE_CODE,
+            name=p.name, slug=p.slug, description=p.description,
+        )
+        for p in Product.objects.all()          # 历史模型里 name 仍然是普通的列
+    ])
+
+
+def delete_translations(apps, schema_editor):
+    apps.get_model('shop', 'ProductTranslation').objects.all().delete()
+
+
+class Migration(migrations.Migration):
+    dependencies = [('shop', '0002_add_translations')]
+    operations = [migrations.RunPython(copy_to_translations, delete_translations)]
+</pre>
+</div>
+
+<p>第 ③ 步从模型中删掉旧字段，再 <code>makemigrations</code> 生成 <code>RemoveField</code>。<code>Category</code> 同样处理。</p>
+
+<h2 id="custom-field">自定义字段与迁移：deconstruct()</h2>
+
+<p>
+  迁移文件里的字段是靠 <code>deconstruct()</code> “描述”出来的：Django 调用它得到“类路径 + 参数”，写进迁移。
+  第 12 章的 <code>OrderField</code> 在 <code>__init__</code> 里接收 <code>for_fields</code>，却没有实现 <code>deconstruct()</code>，
+  所以生成的迁移里只有 <code>OrderField(blank=True, default=0)</code>：<code>for_fields</code> 丢了。好在这个参数只在运行时使用，模型代码里还有它；
+  可如果某个参数会影响数据库结构，迁移就会和模型不一致。
+</p>
+
+<div class="code" data-lang="py" data-file="courses/fields.py">
+<pre>
+class OrderField(models.PositiveIntegerField):
+    def __init__(self, for_fields=None, *args, **kwargs):
+        self.for_fields = for_fields
+        super().__init__(*args, **kwargs)
+
+    def deconstruct(self):
+        name, path, args, kwargs = super().deconstruct()
+        if self.for_fields is not None:
+            kwargs['for_fields'] = self.for_fields      # 写进迁移，重放时原样还原
+        return name, path, args, kwargs
+</pre>
+</div>
+
+<h2 id="squash">压缩迁移：squashmigrations</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="squashmigrations 把 0001 到 0040 合并成一个带 replaces 的新迁移；已经执行过旧迁移的数据库继续正常工作，新数据库只执行合并后的一个；等所有环境都执行过之后，删除旧迁移文件并去掉 replaces">
+  <rect class="bx-d" x="16" y="40" width="210" height="100" rx="10"/>
+  <text class="mono sm" x="121" y="66" text-anchor="middle">0001_initial</text>
+  <text class="mono sm" x="121" y="86" text-anchor="middle">0002_…</text>
+  <text class="mono sm" x="121" y="106" text-anchor="middle">…</text>
+  <text class="mono sm" x="121" y="126" text-anchor="middle">0040_…</text>
+  <path class="ln" d="M228 90 H270" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="274" y="40" width="236" height="100" rx="10"/>
+  <text class="mono sm on-a" x="392" y="68" text-anchor="middle">0001_squashed_0040</text>
+  <text class="mono sm" x="392" y="92" text-anchor="middle">replaces = [0001 … 0040]</text>
+  <text class="sm" x="392" y="118" text-anchor="middle">新旧数据库都能正确处理</text>
+  <path class="ln" d="M512 90 H554" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="558" y="40" width="186" height="100" rx="10"/>
+  <text class="sm on-g" x="651" y="68" text-anchor="middle">所有环境都执行过后</text>
+  <text class="sm" x="651" y="92" text-anchor="middle">删除 0001–0040</text>
+  <text class="sm" x="651" y="114" text-anchor="middle">去掉 replaces</text>
+</svg>
+<figcaption>图 T5-5　迁移多了会拖慢测试建库。压缩不是必须的，但几十个迁移之后值得做一次</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+python manage.py squashmigrations courses 0001 0040
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 压缩时的注意事项</div>
+  <p>含有 <code>RunPython</code> 的迁移会被原样搬进压缩后的文件，函数要能被导入（不能是 lambda）；压缩结果一定要人工检查，并在一个全新的空库上完整跑一遍 <code>migrate</code> 和测试。</p>
+</div>
+
+<h2 id="zero-downtime">上线不停机：哪些操作危险</h2>
+
+<p>
+  滚动部署时，新旧两个版本的代码会<strong>同时</strong>运行一段时间，而数据库只有一个。部署顺序一般是“先迁移、再换代码”，
+  所以每个迁移都必须让<strong>旧代码</strong>也能继续工作：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="把 title 改名为 headline 的不停机做法，分三次部署：第一次加新列 headline，代码同时写两列并回填旧数据；第二次代码只读写 headline；第三次删除旧列 title。每次部署时新旧代码都能在当时的数据库结构上运行">
+  <rect class="bx-b" x="16" y="30" width="232" height="190" rx="12"/>
+  <text class="ttl on-b" x="132" y="56" text-anchor="middle">部署 ①</text>
+  <text class="sm" x="132" y="84" text-anchor="middle">迁移：加列 headline（可空）</text>
+  <text class="sm" x="132" y="108" text-anchor="middle">代码：同时写 title 和 headline</text>
+  <text class="sm" x="132" y="132" text-anchor="middle">回填：旧行的 headline = title</text>
+  <text class="sm on-g" x="132" y="176" text-anchor="middle">旧代码只认识 title → 仍可用</text>
+  <path class="ln" d="M250 125 H274" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="278" y="30" width="232" height="190" rx="12"/>
+  <text class="ttl on-a" x="394" y="56" text-anchor="middle">部署 ②</text>
+  <text class="sm" x="394" y="84" text-anchor="middle">迁移：无</text>
+  <text class="sm" x="394" y="108" text-anchor="middle">代码：只读写 headline</text>
+  <text class="sm" x="394" y="132" text-anchor="middle">title 不再使用</text>
+  <text class="sm on-g" x="394" y="176" text-anchor="middle">两列都在 → 新旧代码都可用</text>
+  <path class="ln" d="M512 125 H536" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="540" y="30" width="204" height="190" rx="12"/>
+  <text class="ttl on-g" x="642" y="56" text-anchor="middle">部署 ③</text>
+  <text class="sm" x="642" y="84" text-anchor="middle">迁移：删除 title</text>
+  <text class="sm" x="642" y="108" text-anchor="middle">代码：不变</text>
+  <text class="sm on-g" x="642" y="176" text-anchor="middle">已经没有代码用 title</text>
+</svg>
+<figcaption>图 T5-6　直接 <code>RenameField</code> 会让还在运行的旧代码立刻报“列不存在”。先扩展、后收缩，每一步都向后兼容</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <tr><th>操作</th><th>风险</th><th>更安全的做法</th></tr>
+  <tr><td>新增可空字段</td><td>基本安全</td><td>—</td></tr>
+  <tr><td>新增非空字段并给 Python <code>default</code></td><td>Django 加列后会去掉数据库默认值，旧代码插入时不带这一列 → 报错</td><td>用 5.0 的 <code>db_default</code>，默认值留在数据库里</td></tr>
+  <tr><td>删除字段</td><td>旧代码的 SELECT 还带着这一列 → 报错</td><td>先部署不再使用它的代码；列在下一个版本再删（可用 <code>SeparateDatabaseAndState</code> 先只从模型里移除）</td></tr>
+  <tr><td>重命名字段或表</td><td>同上</td><td>按图 T5-6 分三次部署</td></tr>
+  <tr><td>大表加索引</td><td>建索引期间锁住写入</td><td>PostgreSQL 用 <code>AddIndexConcurrently</code></td></tr>
+  <tr><td>修改字段类型</td><td>可能重写整张表并锁表</td><td>新建列、回填、切换、删除旧列</td></tr>
+  <tr><td>新增唯一约束</td><td>已有重复数据时迁移失败</td><td>先写数据迁移清理重复，再加约束</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="py" data-file="blog/migrations/0006_post_publish_idx.py（PostgreSQL）">
+<pre>
+from django.contrib.postgres.operations import AddIndexConcurrently
+from django.db import migrations, models
+
+
+class Migration(migrations.Migration):
+    atomic = False                      # CONCURRENTLY 不能在事务里执行，必须关闭
+
+    dependencies = [('blog', '0005_backfill_reading_time')]
+    operations = [
+        AddIndexConcurrently('post', models.Index(fields=['status', '-publish'], name='blog_post_status_pub_idx')),
+    ]
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="只从模型里移除字段，暂时保留数据库里的列">
+<pre>
+operations = [
+    migrations.SeparateDatabaseAndState(
+        state_operations=[migrations.RemoveField('product', 'legacy_code')],   # Django 认为字段没了
+        database_operations=[],                                               # 数据库什么都不做
+    ),
+]
+</pre>
+</div>
+
+<h2 id="rules">团队约定</h2>
+
+<ol class="steps">
+  <li>迁移文件和对应的模型改动在<strong>同一个提交</strong>里；CI 运行 <code>makemigrations --check</code>。</li>
+  <li><strong>不修改、不删除</strong>已经在任何共享环境（测试服、生产）执行过的迁移；要改就写一个新迁移。</li>
+  <li>生成后读一遍迁移文件，对危险操作运行 <code>sqlmigrate</code> 看 SQL。</li>
+  <li>迁移里不导入模型，用 <code>apps.get_model()</code>；<code>RunPython</code> 尽量写反向函数。</li>
+  <li>结构迁移和大批量数据修改分开；删除数据前先备份。</li>
+  <li>每个迁移都要让上一个版本的代码继续可用。</li>
+</ol>
+
+<div class="box note">
+  <div class="t">&#9432; <code>--fake</code> 什么时候用</div>
+  <p><code>migrate app 0003 --fake</code> 只在 <code>django_migrations</code> 表里记一笔，不执行 SQL。它用于“数据库结构其实已经是这样了”的场景，例如手工修复过数据库，或者接管一个已有的库（<code>--fake-initial</code>）。平时用它跳过报错的迁移，只会让模型、迁移和数据库三者对不上。</p>
+</div>
+
+<h2 id="review">对照仓库</h2>
+
+<div class="review">
+  <div class="h">&#128269; 书中迁移的问题 <small>Chapter05 / 11 / 12</small></div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 翻译迁移一步删除旧列，数据丢失 <span class="src">Chapter11/myshop/shop/migrations/0002_translations.py</span></h4>
+    <p>同一个迁移里 <code>CreateModel(ProductTranslation)</code> 之后紧跟 <code>RemoveField('product', 'name')</code> 等操作，已有商品的名称和描述不会被复制到翻译表。按“扩展 → 迁移数据 → 收缩”拆成三个迁移，见图 T5-4。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 模型与迁移不一致 <span class="src">Chapter05/bookmarks/account</span></h4>
+    <p>第 5 章点评指出，<code>Profile.photo</code> 在迁移里和模型里的定义对不上。在 CI 里跑 <code>makemigrations --check</code> 就能在提交时发现这类问题。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 自定义字段缺少 deconstruct() <span class="src">Chapter12/educa/courses/fields.py</span></h4>
+    <p><code>OrderField</code> 的 <code>for_fields</code> 没有写进迁移。实现 <code>deconstruct()</code> 后重新 <code>makemigrations</code>，会生成一个只改字段参数、不改数据库的迁移。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 书中的练习方式与真实项目的差别</h4>
+    <p>书里遇到迁移问题时，常见做法是删掉数据库重新来过，学习时这完全没问题。真实项目里数据库永远不能删，所以本篇的每一个技巧，都是在“数据必须保留”这个前提下才需要的。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>迁移文件是数据库结构的源代码：<code>makemigrations</code> 对比模型与迁移，<code>migrate</code> 对比迁移与 <code>django_migrations</code> 表。</li>
+  <li>用 <code>showmigrations</code>、<code>sqlmigrate</code>、<code>--plan</code>、<code>--check</code> 看清楚再执行；回滚恢复不了被删除的数据。</li>
+  <li>数据迁移用 <code>RunPython</code> + <code>apps.get_model()</code>，写好反向函数，大表分批。</li>
+  <li>重构模型用“扩展 → 迁移数据 → 收缩”；多人冲突用 <code>--merge</code>；历史太长用 <code>squashmigrations</code>。</li>
+  <li>不停机上线的核心是：每个迁移都让旧代码继续可用。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>对第 1 章博客的每个迁移运行 <code>sqlmigrate</code>，把 SQL 和模型定义对照着读一遍。</li>
+    <li>在第 10 章的商店里先创建几个商品，再按书中步骤做第 11 章的翻译迁移，确认商品名称丢失；然后按三步法重做一遍。</li>
+    <li>给 <code>OrderField</code> 加上 <code>deconstruct()</code>，运行 <code>makemigrations</code> 看生成了什么。</li>
+    <li>在两个 git 分支里分别给 <code>Post</code> 加不同字段并生成迁移，合并后体验冲突与 <code>--merge</code>。</li>
+    <li>写一个把 <code>Post.body</code> 字数换算成阅读时间的数据迁移，并验证 <code>migrate blog 0004</code> 能正确回滚。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

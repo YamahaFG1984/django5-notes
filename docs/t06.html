@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>专题 6 · 权限与安全 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="T6">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">专题 6 · 专题补充</span>
+<h1>权限与安全</h1>
+<p class="lede">
+  前面 17 章点评里的“有问题”，将近一半是安全问题：XSS、CSRF、越权访问、SSRF、被滥用的接口。它们分散在各章，看起来各不相同，
+  其实可以归到几条原则下面。这一篇先把 Django 的权限系统讲完整（第 13 章只用到了一部分），再把全书的安全问题汇总成一张地图，
+  最后补上书里没讲的几道防线：安全响应头、CSP、限速和依赖审计。
+</p>
+
+<div class="goals">
+  <h4>本篇目标</h4>
+  <ul>
+    <li>分清认证（你是谁）和授权（你能做什么）</li>
+    <li>理解 Django 的权限模型：权限、组、<code>has_perm</code>，以及在视图和模板里检查权限</li>
+    <li>区分模型级权限与对象级权限，用查询过滤或 django-rules 实现“只能改自己的”</li>
+    <li>用 5.1 的 <code>LoginRequiredMiddleware</code> 把“默认公开”改成“默认需要登录”</li>
+    <li>把全书的安全问题归类，知道每一类的标准防御</li>
+    <li>配置安全响应头、CSP、限速、更强的密码哈希和依赖漏洞检查</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="authn-authz">认证与授权</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="一个请求先经过认证，AuthenticationMiddleware 根据会话把用户放进 request.user；然后是授权：是否登录、是否有模型级权限、是否是这个对象的所有者；三关都通过才执行操作">
+  <rect class="bx" x="16" y="80" width="100" height="60" rx="10"/>
+  <text class="ttl" x="66" y="115" text-anchor="middle">请求</text>
+  <path class="ln" d="M118 110 H146" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="150" y="40" width="170" height="140" rx="12"/>
+  <text class="ttl on-b" x="235" y="66" text-anchor="middle">认证 · 你是谁</text>
+  <text class="sm" x="235" y="96" text-anchor="middle">会话 / Token / 社交登录</text>
+  <text class="mono sm" x="235" y="126" text-anchor="middle">request.user</text>
+  <text class="sm" x="235" y="156" text-anchor="middle">第 4、5 章</text>
+  <path class="ln" d="M322 110 H350" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="354" y="20" width="390" height="180" rx="12"/>
+  <text class="ttl on-a" x="549" y="46" text-anchor="middle">授权 · 你能做什么</text>
+  <rect class="bx" x="372" y="62" width="110" height="80" rx="8"/>
+  <text class="sm" x="427" y="88" text-anchor="middle">① 登录了吗</text>
+  <text class="sm" x="427" y="112" text-anchor="middle">is_authenticated</text>
+  <rect class="bx" x="494" y="62" width="110" height="80" rx="8"/>
+  <text class="sm" x="549" y="88" text-anchor="middle">② 能改课程吗</text>
+  <text class="mono sm" x="549" y="112" text-anchor="middle">has_perm(…)</text>
+  <rect class="bx" x="616" y="62" width="112" height="80" rx="8"/>
+  <text class="sm" x="672" y="88" text-anchor="middle">③ 能改这门吗</text>
+  <text class="mono sm" x="672" y="112" text-anchor="middle">owner == user</text>
+  <text class="sm" x="427" y="168" text-anchor="middle">否 → 跳转登录</text>
+  <text class="sm" x="549" y="168" text-anchor="middle">否 → 403</text>
+  <text class="sm" x="672" y="168" text-anchor="middle">否 → 404</text>
+</svg>
+<figcaption>图 T6-1　第 13 章的课程管理视图正好三关都有：LoginRequiredMixin、PermissionRequiredMixin 和只查自己课程的 OwnerMixin</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么“不是你的”返回 404 而不是 403</div>
+  <p>403 等于告诉对方“这个 ID 存在，只是你不能看”。把 owner 条件写进查询（<code>get_object_or_404(Course, pk=pk, owner=request.user)</code>），别人的对象直接查不到，返回 404，既简单又不泄露信息。</p>
+</div>
+
+<h2 id="permissions">Django 的权限模型</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="Django 权限模型：用户和组是多对多关系，组和权限是多对多关系，用户也可以直接拥有权限；每个模型自动生成 add、change、delete、view 四个权限；超级用户跳过所有检查">
+  <rect class="bx-b" x="16" y="90" width="150" height="70" rx="12"/>
+  <text class="ttl on-b" x="91" y="118" text-anchor="middle">User</text>
+  <text class="mono sm" x="91" y="140" text-anchor="middle">is_superuser</text>
+  <rect class="bx-g" x="290" y="20" width="170" height="70" rx="12"/>
+  <text class="ttl on-g" x="375" y="48" text-anchor="middle">Group</text>
+  <text class="sm" x="375" y="70" text-anchor="middle">如 Instructors（讲师）</text>
+  <rect class="bx-a" x="560" y="90" width="184" height="70" rx="12"/>
+  <text class="ttl on-a" x="652" y="118" text-anchor="middle">Permission</text>
+  <text class="mono sm" x="652" y="140" text-anchor="middle">courses.add_course</text>
+  <path class="ln" d="M168 110 L286 62" marker-end="url(#ar)"/>
+  <text class="sm" x="200" y="74">groups（多对多）</text>
+  <path class="ln" d="M462 62 L556 110" marker-end="url(#ar)"/>
+  <text class="sm" x="490" y="74">permissions</text>
+  <path class="ln-d" d="M168 140 H556" marker-end="url(#ar)"/>
+  <text class="sm" x="362" y="134" text-anchor="middle">user_permissions（直接授予，少用）</text>
+
+  <rect class="bx-d" x="16" y="186" width="728" height="50" rx="10"/>
+  <text class="sm" x="380" y="208" text-anchor="middle">每个模型自动生成 4 个权限：add_&lt;模型&gt; · change_&lt;模型&gt; · delete_&lt;模型&gt; · view_&lt;模型&gt;</text>
+  <text class="sm" x="380" y="228" text-anchor="middle">检查时写成 “应用名.codename”，例如 courses.change_course；超级用户对任何权限都返回 True</text>
+</svg>
+<figcaption>图 T6-2　实践中把权限授予组，再把用户加进组。换岗位只需改组，不用逐个改权限</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <tr><th>在哪里检查</th><th>写法</th></tr>
+  <tr><td>函数视图</td><td><code>@permission_required('courses.add_course', raise_exception=True)</code></td></tr>
+  <tr><td>类视图</td><td><code>PermissionRequiredMixin</code> + <code>permission_required = 'courses.add_course'</code></td></tr>
+  <tr><td>任意代码</td><td><code>request.user.has_perm('courses.add_course')</code></td></tr>
+  <tr><td>模板</td><td><code>{% if perms.courses.add_course %}…{% endif %}</code></td></tr>
+  <tr><td>DRF</td><td><code>permission_classes = [DjangoModelPermissions]</code> 或自定义 <code>BasePermission</code></td></tr>
+  <tr><td>自定义权限</td><td><code>Meta.permissions = [('publish_course', 'Can publish course')]</code></td></tr>
+</table>
+</div>
+
+<p>书中第 13 章是在 Admin 里手工创建“Instructors”组的。换一台机器、一个新环境就要再点一遍。更好的办法是写一个可重复执行的管理命令，部署时和 <code>migrate</code> 一起运行：</p>
+
+<div class="code" data-lang="py" data-file="courses/management/commands/setup_groups.py">
+<pre>
+from django.contrib.auth.models import Group, Permission
+from django.core.management.base import BaseCommand
+
+INSTRUCTOR_PERMS = [
+    'add_course', 'change_course', 'delete_course', 'view_course',
+    'add_module', 'change_module', 'delete_module', 'view_module',
+    'add_content', 'change_content', 'delete_content',
+]
+
+
+class Command(BaseCommand):
+    help = 'Create or update the Instructors group and its permissions'
+
+    def handle(self, *args, **options):
+        group, _ = Group.objects.get_or_create(name='Instructors')
+        perms = Permission.objects.filter(content_type__app_label='courses',
+                                          codename__in=INSTRUCTOR_PERMS)
+        group.permissions.set(perms)           # set：多余的去掉，缺的补上，可以反复执行
+        self.stdout.write(self.style.SUCCESS(f'Instructors: {perms.count()} permissions'))
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么不写成数据迁移</div>
+  <p>模型的权限记录是在 <code>migrate</code> 结束后的 <code>post_migrate</code> 信号里才创建的。在全新的数据库上，数据迁移执行时这些权限还不存在。用管理命令在 <code>migrate</code> 之后执行，就没有这个问题。</p>
+</div>
+
+<h2 id="object-level">对象级权限：“只能改自己的”</h2>
+
+<p><code>has_perm('courses.change_course')</code> 回答的是“能不能改课程”，而真正的问题往往是“能不能改<strong>这门</strong>课程”。Django 自带的 <code>ModelBackend</code> 只做模型级检查，对象级有两种做法：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="对象级权限的两种做法：一是把所有者条件写进查询，别人的对象查不到，适合规则简单的情况；二是用 django-rules 把规则写成谓词，通过 has_perm(权限, 对象) 统一检查，适合规则多、多处复用的情况">
+  <rect class="bx-g" x="16" y="20" width="352" height="190" rx="12"/>
+  <text class="ttl on-g" x="192" y="46" text-anchor="middle">① 把条件写进查询（书中做法）</text>
+  <text class="mono sm" x="192" y="80" text-anchor="middle">qs.filter(owner=request.user)</text>
+  <text class="mono sm" x="192" y="102" text-anchor="middle">get_object_or_404(…, owner=user)</text>
+  <text class="sm" x="192" y="136" text-anchor="middle">简单、查询少、天然返回 404</text>
+  <text class="sm" x="192" y="160" text-anchor="middle">规则一复杂（讲师或助教、已发布才可见）</text>
+  <text class="sm" x="192" y="180" text-anchor="middle">就会散落在各个视图里</text>
+  <rect class="bx-a" x="392" y="20" width="352" height="190" rx="12"/>
+  <text class="ttl on-a" x="568" y="46" text-anchor="middle">② django-rules：规则集中定义</text>
+  <text class="mono sm" x="568" y="80" text-anchor="middle">is_instructor &amp; is_course_owner</text>
+  <text class="mono sm" x="568" y="102" text-anchor="middle">user.has_perm('courses.change_course', course)</text>
+  <text class="sm" x="568" y="136" text-anchor="middle">视图、模板、API、Admin 用同一套规则</text>
+  <text class="sm" x="568" y="160" text-anchor="middle">规则是普通 Python 函数，容易测试</text>
+  <text class="sm" x="568" y="180" text-anchor="middle">列表页仍然要自己过滤查询</text>
+</svg>
+<figcaption>图 T6-3　两种做法可以同时用：列表页靠查询过滤，编辑/删除某个对象时用 rules 判断</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="courses/rules.py">
+<pre>
+import rules
+
+
+@rules.predicate
+def is_course_owner(user, course):
+    return course is not None and course.owner_id == user.id
+
+
+is_instructor = rules.is_group_member('Instructors')
+
+rules.add_perm('courses.change_course', is_instructor &amp; is_course_owner)
+rules.add_perm('courses.delete_course', is_instructor &amp; is_course_owner)
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="settings 与视图">
+<pre>
+INSTALLED_APPS += ['rules.apps.AutodiscoverRulesConfig']    # 自动导入每个应用的 rules.py
+AUTHENTICATION_BACKENDS = [
+    'rules.permissions.ObjectPermissionBackend',             # 负责对象级检查
+    'django.contrib.auth.backends.ModelBackend',
+]
+
+# courses/views.py
+from rules.contrib.views import PermissionRequiredMixin
+
+
+class CourseUpdateView(LoginRequiredMixin, PermissionRequiredMixin, UpdateView):
+    model = Course
+    fields = ['subject', 'title', 'slug', 'overview']
+    permission_required = 'courses.change_course'   # 自动用 get_object() 作为检查对象
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="模板里">
+<pre>
+{% load rules %}
+{% has_perm 'courses.change_course' request.user course as can_edit %}
+{% if can_edit %}&lt;a href="{% url 'course_edit' course.pk %}"&gt;Edit&lt;/a&gt;{% endif %}
+</pre>
+</div>
+
+<h2 id="login-required">默认需要登录：LoginRequiredMiddleware</h2>
+
+<p>第 13 章的点评里，模块和内容相关的几个视图忘了加 <code>LoginRequiredMixin</code>。“每个视图都记得加”靠的是人，迟早会漏。Django 5.1 提供了反过来的做法：<strong>默认所有页面都要登录</strong>，公开页面单独标出来。</p>
+
+<div class="code" data-lang="py" data-file="settings.py 与公开页面">
+<pre>
+MIDDLEWARE = [
+    # ...
+    'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'django.contrib.auth.middleware.LoginRequiredMiddleware',    # 必须在 AuthenticationMiddleware 之后
+    # ...
+]
+LOGIN_URL = 'login'
+
+# 公开的函数视图
+from django.contrib.auth.decorators import login_not_required
+
+@login_not_required
+def course_detail(request, slug): ...
+
+# 公开的类视图：在 urls.py 里包一层
+path('', login_not_required(CourseListView.as_view()), name='course_list'),
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 它只管“登录”，不管“权限”</div>
+  <p>内置的 <code>LoginView</code> 等认证视图已经标记为公开。中间件只保证“登录了”，<strong>模型级和对象级权限仍然要在视图里检查</strong>；它也不作用于 Channels 的 WebSocket（第 16 章的消费者要自己检查）。</p>
+</div>
+
+<h2 id="map">全书安全问题地图</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="用户输入进入系统后的五个危险出口：输出到 HTML 导致 XSS；替用户发请求导致 SSRF；执行写操作但没验证来源导致 CSRF；访问对象没验证归属导致越权；接口没有频率限制导致滥用。每个出口旁标出书中出现的章节">
+  <rect class="bx-b" x="300" y="112" width="160" height="66" rx="14"/>
+  <text class="ttl on-b" x="380" y="140" text-anchor="middle">不可信输入</text>
+  <text class="sm" x="380" y="162" text-anchor="middle">表单 · URL · JSON · 文件</text>
+
+  <rect class="bx-r" x="16" y="16" width="220" height="70" rx="10"/>
+  <text class="ttl on-r" x="126" y="42" text-anchor="middle">XSS：输出到页面</text>
+  <text class="sm" x="126" y="66" text-anchor="middle">第 3、5、16 章</text>
+  <rect class="bx-r" x="524" y="16" width="220" height="70" rx="10"/>
+  <text class="ttl on-r" x="634" y="42" text-anchor="middle">SSRF：替用户发请求</text>
+  <text class="sm" x="634" y="66" text-anchor="middle">第 6 章</text>
+  <rect class="bx-r" x="16" y="204" width="220" height="70" rx="10"/>
+  <text class="ttl on-r" x="126" y="230" text-anchor="middle">CSRF：伪造的写操作</text>
+  <text class="sm" x="126" y="254" text-anchor="middle">第 1、13 章</text>
+  <rect class="bx-r" x="524" y="204" width="220" height="70" rx="10"/>
+  <text class="ttl on-r" x="634" y="230" text-anchor="middle">越权：别人的对象</text>
+  <text class="sm" x="634" y="254" text-anchor="middle">第 13、15、16 章</text>
+  <rect class="bx-a" x="290" y="222" width="180" height="56" rx="10"/>
+  <text class="ttl on-a" x="380" y="246" text-anchor="middle">滥用：无限次调用</text>
+  <text class="sm" x="380" y="266" text-anchor="middle">第 2、10 章</text>
+
+  <path class="ln-r" d="M300 128 L238 76" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M460 128 L522 76" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M300 164 L238 214" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M460 164 L522 214" marker-end="url(#ar-r)"/>
+  <path class="ln-a" d="M380 180 V218" marker-end="url(#ar-a)"/>
+</svg>
+<figcaption>图 T6-4　几乎所有 Web 安全问题，都是“不可信输入”在某个出口被信任了</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <tr><th>问题</th><th>书中出现的地方</th><th>标准防御</th></tr>
+  <tr><td><strong>XSS</strong></td><td>Markdown 过滤器 <code>mark_safe</code>（<a href="ch03.html#review">3</a>）、<code>{{ message|safe }}</code>（<a href="ch05.html#review">5</a>）、聊天消息 <code>innerHTML</code>（<a href="ch16.html#review">16</a>）</td><td>模板自动转义不要关；渲染 Markdown 后用 nh3 清洗；前端用 <code>textContent</code>；数据用 <code>json_script</code> 传给 JS；再加 CSP 兜底</td></tr>
+  <tr><td><strong>CSRF</strong></td><td>GET 请求修改数据（<a href="ch01.html#review">1</a>）、排序接口 <code>CsrfExemptMixin</code>、GET 登出（<a href="ch13.html#review">13</a>）</td><td>写操作只用 POST；保留 CSRF 中间件；fetch 请求带 <code>X-CSRFToken</code> 头，不要豁免</td></tr>
+  <tr><td><strong>越权（IDOR）</strong></td><td>模块视图缺登录保护（<a href="ch13.html#review">13</a>）、WebSocket 不检查选课（<a href="ch16.html#review">16</a>）</td><td>默认需要登录；owner 条件写进查询；对象级权限；每个入口（视图、API、WebSocket）都检查</td></tr>
+  <tr><td><strong>SSRF</strong></td><td>按用户给的 URL 下载图片（<a href="ch06.html#review">6</a>）</td><td>只允许 http/https；拒绝内网地址；设置超时和大小上限；不跟随重定向；校验内容类型</td></tr>
+  <tr><td><strong>滥用</strong></td><td>任何人可用的发信表单（<a href="ch02.html#review">2</a>）、券码可被枚举（<a href="ch10.html#review">10</a>）</td><td>要求登录；按 IP / 用户限速；登录失败锁定（django-axes）</td></tr>
+  <tr><td><strong>文件上传</strong></td><td>头像、课程文件无大小和类型限制（<a href="ch04.html#review">4</a>、<a href="ch12.html#review">12</a>）</td><td>限制大小与扩展名、校验真实类型；媒体文件放独立域名或对象存储</td></tr>
+  <tr><td><strong>机密泄露</strong></td><td>写死的 <code>SECRET_KEY</code>、提交进仓库的私钥（<a href="ch01.html#review">1</a>、<a href="ch17.html#review">17</a>）</td><td>环境变量（<a href="t02.html#settings">专题 2</a>）、pre-commit 的 <code>detect-private-key</code></td></tr>
+</table>
+</div>
+
+<h3>第 6 章的 SSRF：更安全的下载函数</h3>
+
+<p>书中的 <code>ImageCreateForm.save()</code> 直接 <code>requests.get(image_url)</code>：没有超时、不限大小，URL 也可以指向服务器内网（例如云服务器的元数据地址 <code>169.254.169.254</code>）。</p>
+
+<div class="code" data-lang="py" data-file="images/utils.py">
+<pre>
+import ipaddress
+import socket
+from urllib.parse import urlsplit
+
+import requests
+from django.core.exceptions import ValidationError
+
+MAX_BYTES = 5 * 1024 * 1024
+
+
+def fetch_image(url):
+    parts = urlsplit(url)
+    if parts.scheme not in ('http', 'https') or not parts.hostname:
+        raise ValidationError('Only http(s) URLs are allowed.')
+
+    port = parts.port or (443 if parts.scheme == 'https' else 80)
+    for *_, sockaddr in socket.getaddrinfo(parts.hostname, port):
+        if not ipaddress.ip_address(sockaddr[0]).is_global:      # 内网、回环、链路本地一律拒绝
+            raise ValidationError('This address is not allowed.')
+
+    with requests.get(url, timeout=5, stream=True, allow_redirects=False) as response:
+        response.raise_for_status()
+        if not response.headers.get('Content-Type', '').startswith('image/'):
+            raise ValidationError('The URL does not point to an image.')
+        data = bytearray()
+        for chunk in response.iter_content(64 * 1024):
+            data.extend(chunk)
+            if len(data) &gt; MAX_BYTES:
+                raise ValidationError('Image is too large.')
+    return bytes(data)
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 还有一个缝隙</div>
+  <p>先解析域名再请求，两次解析之间 DNS 结果可能被换掉（DNS rebinding）。要求更高的系统会让所有出站请求走一个专门的出站代理，由代理统一拦截内网地址。对学习项目来说，上面的写法已经挡住了绝大多数问题。</p>
+</div>
+
+<h2 id="headers">安全响应头与 CSP</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="Django 响应中与安全有关的头：X-Content-Type-Options nosniff、Referrer-Policy same-origin、Cross-Origin-Opener-Policy same-origin、X-Frame-Options DENY 默认就有；Strict-Transport-Security 需要设置 SECURE_HSTS_SECONDS；Content-Security-Policy 需要 django-csp 或 Django 6.0">
+  <rect class="bx-d" x="16" y="16" width="728" height="228" rx="12"/>
+  <text class="ttl" x="36" y="42">HTTP/1.1 200 OK</text>
+  <rect class="bx-g" x="36" y="56" width="440" height="26" rx="4"/><text class="mono sm" x="46" y="74">X-Content-Type-Options: nosniff</text>
+  <rect class="bx-g" x="36" y="86" width="440" height="26" rx="4"/><text class="mono sm" x="46" y="104">Referrer-Policy: same-origin</text>
+  <rect class="bx-g" x="36" y="116" width="440" height="26" rx="4"/><text class="mono sm" x="46" y="134">Cross-Origin-Opener-Policy: same-origin</text>
+  <rect class="bx-g" x="36" y="146" width="440" height="26" rx="4"/><text class="mono sm" x="46" y="164">X-Frame-Options: DENY</text>
+  <rect class="bx-a" x="36" y="176" width="440" height="26" rx="4"/><text class="mono sm" x="46" y="194">Strict-Transport-Security: max-age=…</text>
+  <rect class="bx-r" x="36" y="206" width="440" height="26" rx="4"/><text class="mono sm" x="46" y="224">Content-Security-Policy: default-src 'self' …</text>
+  <text class="sm on-g" x="496" y="114">Django 默认开启</text>
+  <text class="sm" x="496" y="134">SecurityMiddleware 与</text>
+  <text class="sm" x="496" y="152">XFrameOptionsMiddleware</text>
+  <text class="sm on-a" x="496" y="194">设置 SECURE_HSTS_SECONDS</text>
+  <text class="sm on-r" x="496" y="224">5.2 需要 django-csp；6.0 起内置</text>
+</svg>
+<figcaption>图 T6-5　<code>check --deploy</code> 会提醒 HSTS 等设置，但不会提醒 CSP</figcaption>
+</figure>
+
+<p>
+  <strong>CSP（内容安全策略）</strong>告诉浏览器“这个页面只允许执行来自哪里的脚本”。即使攻击者成功注入了 <code>&lt;script&gt;</code>，浏览器也会拒绝执行。
+  它是 XSS 的最后一道防线。书中的模板有不少内联脚本（例如 <code>{% block domready %}</code>），所以要用 <strong>nonce</strong>：服务器每次响应生成一个随机值，只有带着这个值的 <code>&lt;script&gt;</code> 才能执行。
+</p>
+
+<div class="code" data-lang="py" data-file="settings/production.py（django-csp 4.x）">
+<pre>
+from csp.constants import NONCE, NONE, SELF
+
+MIDDLEWARE += ['csp.middleware.CSPMiddleware']
+
+CONTENT_SECURITY_POLICY = {
+    'DIRECTIVES': {
+        'default-src': [SELF],
+        'script-src': [SELF, NONCE],                   # 内联脚本必须带 nonce
+        'style-src': [SELF],
+        'img-src': [SELF, 'data:'],
+        'frame-src': ['https://www.youtube.com'],      # 第 12 章嵌入的视频
+        'frame-ancestors': [NONE],
+        'object-src': [NONE],
+    },
+}
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="base.html">
+<pre>
+&lt;script nonce="{{ request.csp_nonce }}"&gt;
+  document.addEventListener('DOMContentLoaded', (event) =&gt; {
+    {% block domready %}{% endblock %}
+  })
+&lt;/script&gt;
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 先观察，再拦截</div>
+  <p>先用 <code>CONTENT_SECURITY_POLICY_REPORT_ONLY</code> 上线：浏览器只报告违规、不拦截。看一段时间的报告，把合法的来源（CDN、视频、Stripe）都加进白名单，再切换成真正生效的策略。Django 6.0 起内置了 CSP 支持（<code>SECURE_CSP</code> 设置加 <code>ContentSecurityPolicyMiddleware</code>），思路完全相同。</p>
+</div>
+
+<div class="code" data-lang="py" data-file="其他值得打开的设置">
+<pre>
+SECURE_HSTS_SECONDS = 60 * 60 * 24 * 365     # 确认 HTTPS 稳定后再设成一年
+SECURE_HSTS_INCLUDE_SUBDOMAINS = True
+SESSION_COOKIE_SECURE = True
+CSRF_COOKIE_SECURE = True
+
+# 更强的密码哈希（先 pip install "django[argon2]"）；旧密码在用户下次登录时自动升级
+PASSWORD_HASHERS = [
+    'django.contrib.auth.hashers.Argon2PasswordHasher',
+    'django.contrib.auth.hashers.PBKDF2PasswordHasher',
+]
+</pre>
+</div>
+
+<h2 id="rate-limit">限速：别让接口被无限调用</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="限速的原理：以 IP 或用户为键，在共享缓存 Redis 里记录一个时间窗口内的请求次数，超过上限返回 429；多个服务器进程共享同一个计数">
+  <rect class="bx" x="16" y="50" width="130" height="60" rx="10"/>
+  <text class="ttl" x="81" y="76" text-anchor="middle">请求</text>
+  <text class="sm" x="81" y="96" text-anchor="middle">IP / 用户</text>
+  <path class="ln" d="M148 80 H190" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="194" y="30" width="250" height="100" rx="12"/>
+  <text class="ttl on-a" x="319" y="56" text-anchor="middle">计数器（Redis）</text>
+  <text class="mono sm" x="319" y="82" text-anchor="middle">rl:coupon:203.0.113.7 = 9</text>
+  <text class="sm" x="319" y="106" text-anchor="middle">每分钟最多 10 次</text>
+  <path class="ln-g" d="M446 60 H530" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="488" y="52" text-anchor="middle">未超限</text>
+  <rect class="bx-g" x="534" y="34" width="210" height="44" rx="8"/>
+  <text class="sm on-g" x="639" y="61" text-anchor="middle">正常处理</text>
+  <path class="ln-r" d="M446 104 H530" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="488" y="124" text-anchor="middle">超限</text>
+  <rect class="bx-r" x="534" y="84" width="210" height="44" rx="8"/>
+  <text class="sm on-r" x="639" y="111" text-anchor="middle">429 Too Many Requests</text>
+</svg>
+<figcaption>图 T6-6　计数必须放在所有进程共享的缓存里；本地内存缓存在多进程部署下每个进程各算各的</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <tr><th>场景</th><th>工具</th><th>例子</th></tr>
+  <tr><td>普通视图</td><td>django-ratelimit</td><td><code>@ratelimit(key='ip', rate='10/m', method='POST', block=True)</code>，用在第 10 章的 <code>coupon_apply</code>；超限默认返回 403，可用 <code>RATELIMIT_VIEW</code> 改成 429</td></tr>
+  <tr><td>DRF 接口</td><td>内置节流</td><td><code>DEFAULT_THROTTLE_CLASSES</code> + <code>DEFAULT_THROTTLE_RATES = {'anon': '100/hour', 'user': '1000/hour'}</code></td></tr>
+  <tr><td>登录</td><td>django-axes</td><td>连续失败 N 次后锁定账号或 IP</td></tr>
+  <tr><td>整站兜底</td><td>反向代理 / CDN</td><td>Nginx 的 <code>limit_req</code>、Cloudflare 规则</td></tr>
+</table>
+</div>
+
+<h2 id="more">其他防线</h2>
+
+<ul>
+  <li><strong>Admin</strong>：Two Scoops 建议把 <code>admin/</code> 改成不容易猜到的路径，给管理员开启两步验证（django-otp、django-allauth 的 MFA），必要时在反向代理上按 IP 限制访问。</li>
+  <li><strong>依赖漏洞</strong>：定期运行 <code>pip-audit</code>，或打开 GitHub 的 Dependabot，第三方包出现已知漏洞时会收到提醒。</li>
+  <li><strong>错误信息</strong>：线上 <code>DEBUG = False</code>；错误报告里用 <code>sensitive_post_parameters</code> 隐藏密码（<a href="t03.html#production">专题 3</a>）。</li>
+  <li><strong>最小权限</strong>：数据库账号只给应用需要的权限；Celery、Web 进程用非 root 用户运行（<a href="t07.html#docker">专题 7</a>）。</li>
+</ul>
+
+<h2 id="review">对照仓库</h2>
+
+<div class="review">
+  <div class="h">&#128269; 书中的权限与安全 <small>Chapter06 / 10 / 13 / 15 / 16</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 课程管理视图的三层检查 <span class="src">Chapter13/educa/courses/views.py</span></h4>
+    <p><code>OwnerCourseMixin</code> 同时继承 <code>LoginRequiredMixin</code>、<code>PermissionRequiredMixin</code>，并用 <code>OwnerMixin</code> 在查询里过滤 <code>owner</code>：登录、模型级权限、对象归属三关都有。<code>CourseModuleUpdateView</code> 用 <code>get_object_or_404(Course, id=pk, owner=request.user)</code> 也是同样的思路，只是漏了登录检查。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 服务器替用户下载任意 URL <span class="src">Chapter06/bookmarks/images/forms.py:34</span></h4>
+    <p><code>requests.get(image_url)</code> 没有超时、没有大小限制，也不检查目标地址；扩展名检查只看 URL 字符串的结尾。改用上文的 <code>fetch_image()</code>。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 排序接口豁免了 CSRF <span class="src">Chapter13/educa/courses/views.py:166</span></h4>
+    <p><code>ModuleOrderView</code> 和 <code>ContentOrderView</code> 继承 <code>CsrfExemptMixin</code>，任何网站都能让已登录的讲师在不知情时提交排序请求。去掉豁免，让前端 fetch 带上 <code>X-CSRFToken</code> 头。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> API 的对象级权限只在详情接口生效 <span class="src">Chapter15/educa/courses/api/permissions.py</span></h4>
+    <p><code>IsEnrolled</code> 只实现了 <code>has_object_permission</code>。DRF 只在 <code>get_object()</code> 时调用它，列表接口不会逐个检查。需要“只能看到自己选的课”的列表时，要在 <code>get_queryset()</code> 里按用户过滤。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 没有任何限速和 CSP</h4>
+    <p>第 2 章的分享邮件、第 10 章的券码、登录表单都可以被无限次调用；全站也没有 CSP。按本篇的做法加上 django-ratelimit 和 django-csp，先用 report-only 模式观察。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>认证解决“你是谁”，授权解决“你能做什么”；授权分登录、模型级权限、对象级权限三层。</li>
+  <li>权限授予组，用户加入组；用管理命令创建组，避免手工在 Admin 里点。</li>
+  <li>对象级权限：简单时把 owner 条件写进查询，规则多时用 django-rules 集中定义。</li>
+  <li>5.1 的 <code>LoginRequiredMiddleware</code> 让“忘了加登录保护”不再可能，但权限仍要自己检查。</li>
+  <li>安全问题大多是“不可信输入被信任了”：转义输出、校验来源、检查归属、限制外连、限制频率，再用安全头和 CSP 兜底。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>写 <code>setup_groups</code> 管理命令，在全新数据库上运行 <code>migrate</code> 后执行它，确认讲师组权限正确。</li>
+    <li>给第 13 章项目开启 <code>LoginRequiredMiddleware</code>，找出所有需要公开的页面并标记。</li>
+    <li>用 django-rules 实现“只有课程所有者能编辑”，并为它写两个测试（所有者 / 其他讲师）。</li>
+    <li>把第 6 章的下载改用 <code>fetch_image()</code>，测试 <code>http://127.0.0.1/</code> 和 <code>file:///etc/passwd</code> 都会被拒绝。</li>
+    <li>给第 10 章的 <code>coupon_apply</code> 加每分钟 10 次的限速，用测试客户端连续请求验证第 11 次被拒绝（默认 403）。注意测试环境要配置 Redis 这类共享缓存，或者使用 locmem 缓存。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

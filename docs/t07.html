@@ -1,0 +1,489 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>专题 7 · 部署补充 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="T7">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">专题 7 · 专题补充</span>
+<h1>部署补充：更简单、可重复的上线</h1>
+<p class="lede">
+  第 17 章搭了一套完整的自建环境：Nginx + uWSGI + Daphne，静态文件和媒体文件都放在服务器磁盘上，迁移和收集静态文件靠手工执行。
+  它很好地展示了各个组件的分工，但维护起来零件多、步骤多。这一篇介绍今天更常见的做法：用 Gunicorn 统一运行、WhiteNoise 发送静态文件、
+  对象存储保存用户上传，再加上健康检查、可重复构建的镜像和自动化部署流程。
+</p>
+
+<div class="goals">
+  <h4>本篇目标</h4>
+  <ul>
+    <li>对比第 17 章的方案与一种更精简的方案，理解各自的取舍</li>
+    <li>用 Gunicorn（+ Uvicorn worker）运行 WSGI 或 ASGI 应用，合理设置进程数</li>
+    <li>用 WhiteNoise 发送静态文件，用 django-storages 把媒体文件放到对象存储</li>
+    <li>写健康检查端点，并避开 <code>ALLOWED_HOSTS</code> 和 HTTPS 重定向的坑</li>
+    <li>写一个可重复构建的生产 Dockerfile，理解“构建 → 迁移 → 发布”的顺序</li>
+    <li>用 GitHub Actions 自动构建镜像并部署；准备好 Celery 进程、备份和回滚方案</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="compare">两种架构</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="左边是第 17 章的架构：Nginx 负责 TLS、静态和媒体文件，HTTP 转给 uWSGI，WebSocket 转给 Daphne，媒体文件在服务器磁盘上。右边是精简架构：负载均衡或反向代理负责 TLS，Gunicorn 使用 Uvicorn worker 同时处理 HTTP 和 WebSocket，WhiteNoise 发送静态文件，媒体文件在对象存储里">
+  <rect class="bx-d" x="14" y="14" width="356" height="292" rx="12"/>
+  <text class="ttl" x="192" y="40" text-anchor="middle">第 17 章</text>
+  <rect class="bx-p" x="40" y="56" width="304" height="48" rx="8"/>
+  <text class="sm on-p" x="192" y="78" text-anchor="middle">Nginx：TLS · /static/ · /media/</text>
+  <text class="sm" x="192" y="96" text-anchor="middle">按路径转发</text>
+  <rect class="bx-b" x="40" y="130" width="140" height="50" rx="8"/>
+  <text class="sm on-b" x="110" y="152" text-anchor="middle">uWSGI</text>
+  <text class="sm" x="110" y="170" text-anchor="middle">HTTP（WSGI）</text>
+  <rect class="bx-a" x="204" y="130" width="140" height="50" rx="8"/>
+  <text class="sm on-a" x="274" y="152" text-anchor="middle">Daphne</text>
+  <text class="sm" x="274" y="170" text-anchor="middle">/ws/（ASGI）</text>
+  <path class="ln-d" d="M150 106 L120 128" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M234 106 L264 128" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="40" y="204" width="304" height="40" rx="8"/>
+  <text class="sm" x="192" y="229" text-anchor="middle">服务器磁盘：static/ 与 media/</text>
+  <text class="sm on-r" x="192" y="270" text-anchor="middle">两套应用服务器 · 媒体在单机磁盘</text>
+  <text class="sm on-r" x="192" y="290" text-anchor="middle">collectstatic、migrate 手工执行</text>
+
+  <rect class="bx-g" x="390" y="14" width="356" height="292" rx="12"/>
+  <text class="ttl on-g" x="568" y="40" text-anchor="middle">精简方案</text>
+  <rect class="bx-p" x="416" y="56" width="304" height="48" rx="8"/>
+  <text class="sm on-p" x="568" y="78" text-anchor="middle">负载均衡 / Caddy / Nginx / PaaS</text>
+  <text class="sm" x="568" y="96" text-anchor="middle">只负责 TLS 和转发</text>
+  <rect class="bx-b" x="416" y="130" width="304" height="50" rx="8"/>
+  <text class="sm on-b" x="568" y="152" text-anchor="middle">Gunicorn + UvicornWorker（ASGI）</text>
+  <text class="sm" x="568" y="170" text-anchor="middle">HTTP 与 WebSocket · WhiteNoise 发静态文件</text>
+  <path class="ln-d" d="M568 106 V126" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="416" y="204" width="304" height="40" rx="8"/>
+  <text class="sm on-a" x="568" y="229" text-anchor="middle">对象存储（S3 / R2 / MinIO）：media</text>
+  <text class="sm on-g" x="568" y="270" text-anchor="middle">一种应用进程 · 可以随意加机器</text>
+  <text class="sm on-g" x="568" y="290" text-anchor="middle">构建、迁移、发布由流水线完成</text>
+</svg>
+<figcaption>图 T7-1　两种方案都能用。精简方案的关键是：应用进程“无状态”，任何一台机器挂了、多开几台，都不影响数据</figcaption>
+</figure>
+
+<h2 id="gunicorn">Gunicorn：应用服务器</h2>
+
+<p>
+  Gunicorn 是 Python 社区最常用的应用服务器：一个主进程管理多个 worker 进程，worker 挂了自动重启。
+  默认 worker 运行 WSGI；换成 <code>uvicorn_worker.UvicornWorker</code> 就能运行 ASGI，同时处理 HTTP 和第 16 章的 WebSocket。
+  第 17 章用的 uWSGI 目前处于维护模式，新项目一般不再选它。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="Gunicorn 进程模型：一个主进程监听端口并管理多个 worker 进程，每个 worker 独立处理请求；worker 数常用 CPU 核数乘 2 加 1 作为起点；超时的 worker 会被主进程杀掉重启">
+  <rect class="bx-a" x="16" y="60" width="180" height="80" rx="12"/>
+  <text class="ttl on-a" x="106" y="92" text-anchor="middle">Gunicorn 主进程</text>
+  <text class="sm" x="106" y="116" text-anchor="middle">监听 :8000 · 管理 worker</text>
+  <rect class="bx-b" x="260" y="16" width="200" height="44" rx="8"/><text class="sm on-b" x="360" y="43" text-anchor="middle">worker 1</text>
+  <rect class="bx-b" x="260" y="78" width="200" height="44" rx="8"/><text class="sm on-b" x="360" y="105" text-anchor="middle">worker 2</text>
+  <rect class="bx-b" x="260" y="140" width="200" height="44" rx="8"/><text class="sm on-b" x="360" y="167" text-anchor="middle">worker 3</text>
+  <path class="ln" d="M198 90 L256 40" marker-end="url(#ar)"/>
+  <path class="ln" d="M198 100 H256" marker-end="url(#ar)"/>
+  <path class="ln" d="M198 110 L256 160" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="500" y="30" width="244" height="140" rx="12"/>
+  <text class="sm" x="622" y="58" text-anchor="middle">worker 数的起点：</text>
+  <text class="mono sm" x="622" y="82" text-anchor="middle">2 × CPU 核数 + 1</text>
+  <text class="sm" x="622" y="112" text-anchor="middle">再按内存和压测结果调整</text>
+  <text class="sm" x="622" y="138" text-anchor="middle">超时的 worker 会被杀掉重启</text>
+</svg>
+<figcaption>图 T7-2　容器里 CPU 核数常常看不准，推荐用环境变量 <code>WEB_CONCURRENCY</code> 明确指定</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="gunicorn.conf.py">
+<pre>
+import os
+
+bind = '0.0.0.0:8000'
+workers = int(os.environ.get('WEB_CONCURRENCY', 3))
+worker_class = 'uvicorn_worker.UvicornWorker'     # 运行 ASGI（含 Channels）；纯 WSGI 项目删掉这一行
+timeout = 30
+accesslog = '-'                                    # 访问日志输出到 stdout
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install gunicorn uvicorn-worker
+gunicorn config.asgi:application -c gunicorn.conf.py     # ASGI
+gunicorn config.wsgi:application -c gunicorn.conf.py     # 或者 WSGI
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 反向代理后面要告诉 Django“原本是 HTTPS”</div>
+  <p>TLS 在代理上终结后，Django 收到的是 HTTP。代理要设置 <code>X-Forwarded-Proto</code> 头，Django 里配置 <code>SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')</code>，否则 <code>SECURE_SSL_REDIRECT</code> 会陷入无限重定向。<strong>只有</strong>当代理一定会覆盖这个头时才能这样设置，否则客户端可以伪造它。</p>
+</div>
+
+<h2 id="static-media">静态文件与媒体文件</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="静态文件是代码的一部分，构建镜像时 collectstatic 生成带哈希的文件名，由 WhiteNoise 直接发送并设置长期缓存；媒体文件是用户上传的数据，通过 django-storages 保存到对象存储，页面里得到带签名的链接或 CDN 地址">
+  <rect class="bx-b" x="16" y="16" width="352" height="218" rx="12"/>
+  <text class="ttl on-b" x="192" y="42" text-anchor="middle">静态文件：代码的一部分</text>
+  <text class="sm" x="192" y="70" text-anchor="middle">CSS、JS、图标 · 随版本变化</text>
+  <rect class="bx" x="40" y="88" width="304" height="34" rx="6"/>
+  <text class="mono sm" x="192" y="110" text-anchor="middle">构建镜像时 collectstatic</text>
+  <rect class="bx" x="40" y="130" width="304" height="34" rx="6"/>
+  <text class="mono sm" x="192" y="152" text-anchor="middle">base.3f9a1c.css（文件名带哈希）</text>
+  <rect class="bx" x="40" y="172" width="304" height="34" rx="6"/>
+  <text class="mono sm" x="192" y="194" text-anchor="middle">WhiteNoise：压缩 + 一年缓存</text>
+  <text class="sm" x="192" y="224" text-anchor="middle">内容变了文件名就变，缓存永不过期也没问题</text>
+
+  <rect class="bx-a" x="392" y="16" width="352" height="218" rx="12"/>
+  <text class="ttl on-a" x="568" y="42" text-anchor="middle">媒体文件：用户的数据</text>
+  <text class="sm" x="568" y="70" text-anchor="middle">头像、商品图、课程文件 · 随时新增</text>
+  <rect class="bx" x="416" y="88" width="304" height="34" rx="6"/>
+  <text class="mono sm" x="568" y="110" text-anchor="middle">ImageField.save() → STORAGES['default']</text>
+  <rect class="bx" x="416" y="130" width="304" height="34" rx="6"/>
+  <text class="mono sm" x="568" y="152" text-anchor="middle">django-storages → S3 / R2 / MinIO</text>
+  <rect class="bx" x="416" y="172" width="304" height="34" rx="6"/>
+  <text class="mono sm" x="568" y="194" text-anchor="middle">{{ obj.image.url }} → 签名链接 / CDN</text>
+  <text class="sm" x="568" y="224" text-anchor="middle">应用服务器不存文件，随时可以替换</text>
+</svg>
+<figcaption>图 T7-3　两类文件的生命周期完全不同：静态文件跟着代码版本走，媒体文件必须比任何一台服务器活得更久</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="settings/production.py（WhiteNoise + 对象存储）">
+<pre>
+MIDDLEWARE = [
+    'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',      # 紧跟在 SecurityMiddleware 之后
+    # ...
+]
+
+STORAGES = {
+    'default': {                                       # 媒体文件
+        'BACKEND': 'storages.backends.s3.S3Storage',
+        'OPTIONS': {
+            'bucket_name': env('AWS_STORAGE_BUCKET_NAME'),
+            'region_name': env('AWS_S3_REGION_NAME', default=None),
+            'endpoint_url': env('AWS_S3_ENDPOINT_URL', default=None),   # Cloudflare R2、MinIO 等需要
+            'file_overwrite': False,                   # 同名文件不覆盖，自动改名
+            'querystring_auth': True,                  # 生成带过期时间的签名链接
+        },
+    },
+    'staticfiles': {                                   # 静态文件
+        'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage',
+    },
+}
+# AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY 由 boto3 直接从环境变量读取
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 媒体文件为什么最好放在别的域名</div>
+  <p>用户上传的文件如果和网站同源，一个伪装成图片的 HTML 或 SVG 文件就可能在你的域名下执行脚本。对象存储自带独立域名，这类风险自然就没有了（<a href="t06.html#map">专题 6</a>）。</p>
+</div>
+
+<h2 id="health">健康检查</h2>
+
+<p>负载均衡器、容器平台会定期访问一个地址，确认进程还活着；不健康的实例会被摘掉流量或重启。健康检查有两个常见的坑：</p>
+
+<ul>
+  <li>探测请求通常直接用 IP 访问，<code>Host</code> 不在 <code>ALLOWED_HOSTS</code> 里，Django 返回 400；</li>
+  <li>探测走的是 HTTP，<code>SECURE_SSL_REDIRECT</code> 把它 301 到 HTTPS，探测判定失败。</li>
+</ul>
+
+<p>第 17 章点评里，子域名中间件还会把 IP 访问变成 404。最省事的做法是在中间件列表<strong>最前面</strong>直接回答健康检查，在所有这些检查之前返回：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="健康检查中间件位于中间件列表最前面：路径是 healthz 时直接返回 ok，不经过 HTTPS 重定向、主机校验和子域名中间件；readyz 额外检查数据库连接，失败返回 503">
+  <rect class="bx" x="16" y="60" width="120" height="50" rx="10"/>
+  <text class="sm" x="76" y="82" text-anchor="middle">探测请求</text>
+  <text class="mono sm" x="76" y="100" text-anchor="middle">GET /healthz/</text>
+  <path class="ln" d="M138 85 H176" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="180" y="40" width="200" height="90" rx="10"/>
+  <text class="ttl on-g" x="280" y="66" text-anchor="middle">HealthCheckMiddleware</text>
+  <text class="sm" x="280" y="90" text-anchor="middle">/healthz/ → 200 ok</text>
+  <text class="sm" x="280" y="112" text-anchor="middle">/readyz/ → 查数据库，失败 503</text>
+  <path class="ln-d" d="M382 85 H420" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="424" y="40" width="320" height="90" rx="10"/>
+  <text class="sm" x="584" y="64" text-anchor="middle">其他请求才继续往下走</text>
+  <text class="mono sm" x="584" y="88" text-anchor="middle">SecurityMiddleware（HTTPS 重定向）</text>
+  <text class="mono sm" x="584" y="108" text-anchor="middle">CommonMiddleware（ALLOWED_HOSTS）…</text>
+</svg>
+<figcaption>图 T7-4　“活着”（liveness）只证明进程能响应；“就绪”（readiness）还要确认依赖的数据库可用</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="core/middleware.py">
+<pre>
+from django.db import connection
+from django.http import HttpResponse
+
+
+class HealthCheckMiddleware:
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        if request.path == '/healthz/':
+            return HttpResponse('ok')
+        if request.path == '/readyz/':
+            try:
+                connection.ensure_connection()
+            except Exception:
+                return HttpResponse('database unavailable', status=503)
+            return HttpResponse('ok')
+        return self.get_response(request)
+
+# settings: MIDDLEWARE = ['core.middleware.HealthCheckMiddleware', 'django.middleware.security.SecurityMiddleware', ...]
+</pre>
+</div>
+
+<h2 id="docker">可重复构建的生产镜像</h2>
+
+<p>第 17 章点评指出，生产环境把源码目录挂载进容器、以 root 运行、没有 <code>.dockerignore</code>。下面是一个按<a href="t02.html">专题 2</a> 项目骨架写的生产 Dockerfile：</p>
+
+<div class="code" data-lang="bash" data-file="Dockerfile">
+<pre>
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy \
+    PATH="/app/.venv/bin:$PATH"
+
+# 正式使用时把 latest 换成固定版本（Dockerfile 只支持整行注释，不能写在指令后面）
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+WORKDIR /app
+
+# 先只复制依赖声明：依赖不变时这一层直接用缓存
+COPY pyproject.toml uv.lock ./
+RUN uv sync --locked --no-dev
+
+COPY . .
+
+# 构建时收集静态文件；这里的密钥和数据库只是为了让设置能加载
+RUN DJANGO_SETTINGS_MODULE=config.settings.production \
+    DJANGO_SECRET_KEY=build-only DATABASE_URL=sqlite://:memory: \
+    python manage.py collectstatic --noinput
+
+# 不以 root 运行
+RUN useradd --create-home app
+USER app
+
+EXPOSE 8000
+CMD ["gunicorn", "config.asgi:application", "-c", "gunicorn.conf.py"]
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file=".dockerignore">
+<pre>
+.git
+.venv
+.env*
+**/__pycache__
+db.sqlite3
+media/
+data/
+*.key
+</pre>
+</div>
+
+<h2 id="release">发布流程：构建 → 迁移 → 切换</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="发布流程：推送到 main 后 CI 运行测试，通过后构建镜像并用提交哈希作为标签推送到镜像仓库；部署时先用新镜像执行 migrate，再滚动替换 web 和 worker 进程，健康检查通过后完成；出问题时切回上一个镜像标签">
+  <rect class="bx" x="16" y="30" width="100" height="60" rx="10"/>
+  <text class="sm" x="66" y="56" text-anchor="middle">push</text>
+  <text class="sm" x="66" y="76" text-anchor="middle">main</text>
+  <path class="ln" d="M118 60 H136" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="140" y="30" width="110" height="60" rx="10"/>
+  <text class="sm on-b" x="195" y="56" text-anchor="middle">测试</text>
+  <text class="sm" x="195" y="76" text-anchor="middle">专题 1 的 CI</text>
+  <path class="ln" d="M252 60 H270" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="274" y="30" width="130" height="60" rx="10"/>
+  <text class="sm on-b" x="339" y="56" text-anchor="middle">构建镜像</text>
+  <text class="mono sm" x="339" y="76" text-anchor="middle">:&lt;commit-sha&gt;</text>
+  <path class="ln" d="M406 60 H424" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="428" y="30" width="130" height="60" rx="10"/>
+  <text class="sm on-a" x="493" y="56" text-anchor="middle">① migrate</text>
+  <text class="sm" x="493" y="76" text-anchor="middle">新镜像、旧进程</text>
+  <path class="ln" d="M560 60 H578" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="582" y="30" width="162" height="60" rx="10"/>
+  <text class="sm on-g" x="663" y="56" text-anchor="middle">② 滚动替换进程</text>
+  <text class="sm" x="663" y="76" text-anchor="middle">健康检查通过即完成</text>
+
+  <rect class="bx-d" x="16" y="120" width="728" height="70" rx="12"/>
+  <text class="sm" x="380" y="146" text-anchor="middle">① 和 ② 之间，旧代码运行在新的数据库结构上 → 迁移必须向后兼容（<tspan class="mono">专题 5</tspan>）</text>
+  <text class="sm on-r" x="380" y="172" text-anchor="middle">回滚 = 把镜像标签改回上一个提交；所以不要在同一次发布里删除旧代码还在用的列</text>
+</svg>
+<figcaption>图 T7-5　每一步都自动完成、可以重复执行，这比第 17 章“exec 进容器手工 migrate、collectstatic”可靠得多</figcaption>
+</figure>
+
+<div class="code" data-lang="bash" data-file=".github/workflows/deploy.yml（示例：单台服务器 + Docker Compose）">
+<pre>
+name: Deploy
+on:
+  workflow_run:
+    workflows: [CI]                 # 专题 1 的测试工作流成功后才部署
+    types: [completed]
+    branches: [main]
+
+jobs:
+  build:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          push: true
+          tags: ghcr.io/your-name/mysite:${{ github.event.workflow_run.head_sha }}   # 镜像名必须全小写
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: deploy
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            cd /srv/mysite
+            export IMAGE_TAG=${{ github.event.workflow_run.head_sha }}
+            docker compose pull
+            docker compose run --rm web python manage.py migrate --noinput
+            docker compose run --rm web python manage.py setup_groups
+            docker compose up -d
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file="/srv/mysite/docker-compose.yml（服务器上）">
+<pre>
+services:
+  web:
+    image: ghcr.io/your-name/mysite:${IMAGE_TAG}
+    env_file: .env.production
+    ports: ["127.0.0.1:8000:8000"]        # 只对本机的反向代理开放
+    restart: unless-stopped
+  worker:
+    image: ghcr.io/your-name/mysite:${IMAGE_TAG}
+    env_file: .env.production
+    command: celery -A config worker -l info --concurrency 2
+    restart: unless-stopped
+  beat:
+    image: ghcr.io/your-name/mysite:${IMAGE_TAG}
+    env_file: .env.production
+    command: celery -A config beat -l info    # 定时任务调度器：全局只能运行一个
+    restart: unless-stopped
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 不想自己管服务器？</div>
+  <p>Render、Fly.io、Railway 这类平台（PaaS）替你做了 TLS、负载均衡、滚动发布和健康检查，通常只需要声明三类进程：<strong>web</strong>（Gunicorn）、<strong>worker</strong>（Celery）和 <strong>release</strong>（每次发布前运行的 <code>migrate</code>）。数据库和 Redis 也可以用平台托管的。小团队的第一个项目，这往往是成本最低的选择。</p>
+</div>
+
+<h2 id="backup">备份与回滚</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+# 每天备份（cron 或平台的定时任务），保存到另一台机器或对象存储
+pg_dump --format=custom "$DATABASE_URL" &gt; "backup-$(date +%F).dump"
+
+# 恢复到一个新库，定期演练一次
+pg_restore --no-owner --dbname "$RESTORE_DATABASE_URL" backup-2026-09-13.dump
+</pre>
+</div>
+
+<ul>
+  <li><strong>没有演练过恢复的备份，等于没有备份。</strong>托管数据库一般提供时间点恢复（PITR），也要确认怎么用。</li>
+  <li>媒体文件在对象存储里，打开版本控制或定期同步到另一个桶。</li>
+  <li>代码回滚靠镜像标签；数据回滚靠备份。这就是为什么删除数据的迁移要格外小心（<a href="t05.html#rollback">专题 5</a>）。</li>
+</ul>
+
+<h2 id="checklist">上线清单</h2>
+
+<ol class="steps">
+  <li><code>python manage.py check --deploy</code> 没有警告；<code>DEBUG = False</code>；所有机密来自环境变量。</li>
+  <li>本次发布的迁移都向后兼容，已经用 <code>sqlmigrate</code> 看过危险操作的 SQL。</li>
+  <li>镜像在 CI 中构建，静态文件在构建时收集，容器以非 root 用户运行。</li>
+  <li>媒体文件在对象存储中；上传大小限制在代理和 Django 两处都配置好。</li>
+  <li><code>/healthz/</code> 和 <code>/readyz/</code> 可用，平台或负载均衡已配置健康检查。</li>
+  <li>日志输出到 stdout，错误能到达 Sentry 或管理员邮箱（<a href="t03.html#production">专题 3</a>）。</li>
+  <li>Celery worker 和 beat 已部署，beat 只有一个实例。</li>
+  <li>数据库每日备份，恢复流程演练过；知道如何把镜像切回上一个版本。</li>
+</ol>
+
+<h2 id="review">对照仓库</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 17 章部署方案的再审视 <small>Chapter17/</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 组件分工讲得很清楚</h4>
+    <p>第 17 章把 TLS、静态文件、WSGI、ASGI 各自交给谁处理讲得非常清楚，理解了这套分工，再看任何平台的部署文档都不会陌生。本篇的精简方案只是把其中几项交给了现成的工具或平台。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 媒体文件存在单台服务器的磁盘上</h4>
+    <p>讲师上传的课程文件保存在挂载的 <code>media/</code> 目录里。一旦要加第二台服务器、换机器，或者磁盘损坏，文件就会不同步或丢失。改用 django-storages 保存到对象存储。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 两套应用服务器、手工发布步骤</h4>
+    <p>uWSGI 与 Daphne 各自一套配置；<code>migrate</code>、<code>collectstatic</code> 靠 <code>docker compose exec</code> 手工执行。用 Gunicorn + Uvicorn worker 统一成一种进程，把发布步骤写进流水线，每次都一样。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 没有健康检查，也没有 Celery 进程</h4>
+    <p>Compose 文件里没有健康检查，容器“启动了但不能用”时不会被发现；第 8 章起依赖的 Celery worker 也没有出现在生产环境里，下单确认邮件、支付发票都不会被发送。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 什么时候需要 Kubernetes</h4>
+    <p>多数项目在一台服务器或一个 PaaS 上就能跑很久。只有需要在多台机器间自动调度大量服务时，Kubernetes 的复杂度才值得。本篇的做法（无状态进程、健康检查、镜像标签、向后兼容的迁移）换到 Kubernetes 上完全适用。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>Gunicorn 管理多个 worker；配合 Uvicorn worker 可以用一种进程同时处理 HTTP 和 WebSocket。</li>
+  <li>静态文件在构建时收集、由 WhiteNoise 发送；媒体文件放对象存储，应用进程保持无状态。</li>
+  <li>健康检查中间件放在最前面，避开主机校验和 HTTPS 重定向。</li>
+  <li>镜像在 CI 中构建、带提交哈希标签；发布顺序是“迁移 → 替换进程”，迁移必须向后兼容。</li>
+  <li>备份要演练恢复；代码回滚靠镜像标签，数据回滚靠备份。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>把第 17 章项目改用 <code>gunicorn educa.asgi:application -k uvicorn_worker.UvicornWorker</code> 运行，确认课程页面和聊天室都能工作。</li>
+    <li>接入 WhiteNoise，关掉 Nginx 的 <code>/static/</code> 规则，检查 CSS 文件名是否带了哈希、响应头里是否有长期缓存。</li>
+    <li>用 Docker 启动一个 MinIO，把媒体文件存储切换过去，上传一个课程图片验证。</li>
+    <li>加入健康检查中间件，用 <code>curl http://127.0.0.1:8000/healthz/</code>（注意是 IP）验证返回 200。</li>
+    <li>用 <code>pg_dump</code> 备份第 17 章的数据库，再恢复到一个新库，确认数据完整。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

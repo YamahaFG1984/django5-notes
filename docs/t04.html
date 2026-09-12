@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>专题 4 · ORM 进阶与并发 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="T4">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">专题 4 · 专题补充</span>
+<h1>ORM 进阶与并发</h1>
+<p class="lede">
+  书里用到的 ORM 大多是 <code>filter()</code>、<code>get()</code> 和偶尔一个 <code>annotate(Count(...))</code>。这足够做出功能，但前面各章点评里有一大类问题都出在这里：
+  统计把不该算的也算进去、查询数随数据量增长、两个请求同时修改同一行时数据出错。
+  这一篇系统地讲“让数据库替你算”的几种工具，以及并发下保证数据正确的办法。
+</p>
+
+<div class="goals">
+  <h4>本篇目标</h4>
+  <ul>
+    <li>理解 QuerySet 的惰性：什么时候才真正执行 SQL</li>
+    <li>分清 <code>select_related</code>、<code>prefetch_related</code> 与 <code>Prefetch</code> 对象</li>
+    <li>掌握 <code>aggregate</code> 与 <code>annotate</code>，以及“多个 Count 结果翻倍”的陷阱</li>
+    <li>用 <code>F</code>、<code>Q</code>、<code>Case/When</code>、<code>Subquery</code>、<code>Exists</code>、窗口函数把计算交给数据库</li>
+    <li>理解“丢失更新”和竞态条件，用 <code>F()</code>、条件更新、<code>select_for_update</code>、唯一约束和事务解决</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="lazy">QuerySet 是“查询计划”，不是结果</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="QuerySet 的惰性：filter、exclude、order_by 只是在拼装查询，不访问数据库；遍历、list、len、bool、切片取单个元素、打印时才执行 SQL；执行后结果缓存在这个 QuerySet 对象上">
+  <rect class="bx-b" x="16" y="30" width="420" height="80" rx="12"/>
+  <text class="ttl on-b" x="226" y="56" text-anchor="middle">拼装查询：不访问数据库</text>
+  <text class="mono sm" x="226" y="84" text-anchor="middle">qs = Post.published.filter(…).order_by(…)</text>
+  <path class="ln" d="M438 70 H480" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="484" y="20" width="260" height="130" rx="12"/>
+  <text class="ttl on-a" x="614" y="44" text-anchor="middle">这些操作才执行 SQL</text>
+  <text class="mono sm" x="504" y="70">for p in qs:   list(qs)</text>
+  <text class="mono sm" x="504" y="92">len(qs)   bool(qs)   qs[0]</text>
+  <text class="mono sm" x="504" y="114">模板里 {% for %}  print(qs)</text>
+  <text class="sm" x="504" y="138">执行后结果缓存在 qs 上</text>
+  <rect class="bx-g" x="16" y="140" width="420" height="64" rx="12"/>
+  <text class="sm on-g" x="226" y="166" text-anchor="middle">只要数量或是否存在，用 qs.count() / qs.exists()</text>
+  <text class="sm" x="226" y="188" text-anchor="middle">它们执行 COUNT / EXISTS，不把整行数据取回来</text>
+</svg>
+<figcaption>图 T4-1　惰性让你可以放心地一步步拼条件；代价是“哪一行代码触发了 SQL”不那么直观，要借助 Debug Toolbar（<a href="t03.html#toolbar">专题 3</a>）</figcaption>
+</figure>
+
+<h2 id="relations">关联查询：JOIN 还是分两次查</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="select_related 用 JOIN 在一条 SQL 里取回外键和一对一关联的对象；prefetch_related 先查主表，再用 IN 查询一次取回所有关联对象，在 Python 里拼接，适用于多对多和反向外键；Prefetch 对象可以给预取加过滤条件">
+  <rect class="bx-b" x="16" y="16" width="232" height="218" rx="12"/>
+  <text class="ttl on-b" x="132" y="42" text-anchor="middle">select_related</text>
+  <text class="sm" x="132" y="66" text-anchor="middle">外键、一对一（“指向一个”）</text>
+  <rect class="bx" x="40" y="84" width="184" height="54" rx="6"/>
+  <text class="mono sm" x="132" y="106" text-anchor="middle">post JOIN auth_user</text>
+  <text class="sm" x="132" y="126" text-anchor="middle">1 条 SQL</text>
+  <text class="mono sm" x="132" y="170" text-anchor="middle">select_related('author')</text>
+  <text class="sm" x="132" y="200" text-anchor="middle">文章列表显示作者</text>
+
+  <rect class="bx-g" x="264" y="16" width="232" height="218" rx="12"/>
+  <text class="ttl on-g" x="380" y="42" text-anchor="middle">prefetch_related</text>
+  <text class="sm" x="380" y="66" text-anchor="middle">多对多、反向外键（“一对多”）</text>
+  <rect class="bx" x="288" y="84" width="184" height="26" rx="6"/>
+  <text class="mono sm" x="380" y="102" text-anchor="middle">① SELECT … FROM post</text>
+  <rect class="bx" x="288" y="116" width="184" height="26" rx="6"/>
+  <text class="mono sm" x="380" y="134" text-anchor="middle">② … WHERE post_id IN (…)</text>
+  <text class="mono sm" x="380" y="170" text-anchor="middle">prefetch_related('tags')</text>
+  <text class="sm" x="380" y="200" text-anchor="middle">2 条 SQL，与文章数无关</text>
+
+  <rect class="bx-a" x="512" y="16" width="232" height="218" rx="12"/>
+  <text class="ttl on-a" x="628" y="42" text-anchor="middle">Prefetch 对象</text>
+  <text class="sm" x="628" y="66" text-anchor="middle">预取时加条件、排序</text>
+  <text class="mono sm" x="628" y="100" text-anchor="middle">Prefetch('comments',</text>
+  <text class="mono sm" x="628" y="120" text-anchor="middle">  queryset=Comment.objects</text>
+  <text class="mono sm" x="628" y="140" text-anchor="middle">    .filter(active=True),</text>
+  <text class="mono sm" x="628" y="160" text-anchor="middle">  to_attr='active_comments')</text>
+  <text class="sm" x="628" y="200" text-anchor="middle">只预取已审核的评论</text>
+</svg>
+<figcaption>图 T4-2　规则很简单：对象“指向一个”用 select_related，“拥有多个”用 prefetch_related</figcaption>
+</figure>
+
+<div class="box warn">
+  <div class="t">&#9888; 预取之后别再 filter</div>
+  <p><code>post.comments.all()</code> 会用上预取的结果，但 <code>post.comments.filter(active=True)</code> 是一个新查询，预取白做了。需要过滤就用 <code>Prefetch(..., queryset=...)</code> 在预取时过滤。</p>
+</div>
+
+<h2 id="aggregate">聚合：aggregate 与 annotate</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="aggregate 对整个查询集算出一个汇总字典；annotate 给每一行加一个计算出来的新字段，结果仍然是查询集，可以继续过滤和排序">
+  <rect class="bx-b" x="16" y="20" width="352" height="170" rx="12"/>
+  <text class="ttl on-b" x="192" y="46" text-anchor="middle">aggregate：整体算一个数</text>
+  <text class="mono sm" x="192" y="78" text-anchor="middle">Post.published.aggregate(</text>
+  <text class="mono sm" x="192" y="98" text-anchor="middle">  total=Count('id'), latest=Max('publish'))</text>
+  <text class="sm" x="192" y="132" text-anchor="middle">返回字典</text>
+  <text class="mono sm" x="192" y="156" text-anchor="middle">{'total': 42, 'latest': datetime(…)}</text>
+
+  <rect class="bx-g" x="392" y="20" width="352" height="170" rx="12"/>
+  <text class="ttl on-g" x="568" y="46" text-anchor="middle">annotate：每行加一个字段</text>
+  <text class="mono sm" x="568" y="78" text-anchor="middle">Post.published.annotate(</text>
+  <text class="mono sm" x="568" y="98" text-anchor="middle">  total_comments=Count('comments'))</text>
+  <text class="sm" x="568" y="132" text-anchor="middle">返回查询集，每个对象多一个属性</text>
+  <text class="mono sm" x="568" y="156" text-anchor="middle">.filter(total_comments__gt=0)</text>
+  <text class="mono sm" x="568" y="176" text-anchor="middle">.order_by('-total_comments')</text>
+</svg>
+<figcaption>图 T4-3　annotate 之后还能继续 filter / order_by，这就是第 3 章“最多评论的文章”的写法</figcaption>
+</figure>
+
+<h3>带条件的聚合：修第 3 章的统计 bug</h3>
+
+<p>第 3 章的 <code>get_most_commented_posts</code> 用 <code>Count('comments')</code>，把已屏蔽（<code>active=False</code>）的评论也算了进去。聚合函数可以带 <code>filter</code>：</p>
+
+<div class="code" data-lang="py" data-file="blog/templatetags/blog_tags.py">
+<pre>
+from django.db.models import Count, Q
+
+
+@register.simple_tag
+def get_most_commented_posts(count=5):
+    return (
+        Post.published
+        .annotate(total_comments=Count('comments', filter=Q(comments__active=True)))
+        .filter(total_comments__gt=0)
+        .order_by('-total_comments')[:count]
+    )
+</pre>
+</div>
+
+<h3>陷阱：两个 Count 同时出现，数字会翻倍</h3>
+
+<p>第 14 章的课程列表用了 <code>annotate(total_modules=Count('modules'))</code>，单独一个没问题。可如果再加一个学生数，结果就错了：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="一门课程有 3 个模块和 4 个学生；同时 JOIN 模块表和学生表时，每个模块与每个学生组合，得到 12 行；于是模块数和学生数都被算成 12；加 distinct=True 或改用子查询可以得到正确的 3 和 4">
+  <rect class="bx-b" x="16" y="30" width="150" height="60" rx="10"/>
+  <text class="ttl on-b" x="91" y="56" text-anchor="middle">课程 Django</text>
+  <text class="sm" x="91" y="76" text-anchor="middle">3 个模块 · 4 个学生</text>
+  <path class="ln" d="M168 60 H210" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="214" y="16" width="250" height="218" rx="12"/>
+  <text class="sm" x="339" y="36" text-anchor="middle">JOIN modules × JOIN students</text>
+  <g>
+    <rect class="bx-r" x="232" y="48" width="64" height="24" rx="4"/><rect class="bx-r" x="302" y="48" width="64" height="24" rx="4"/><rect class="bx-r" x="372" y="48" width="64" height="24" rx="4"/>
+    <rect class="bx-r" x="232" y="78" width="64" height="24" rx="4"/><rect class="bx-r" x="302" y="78" width="64" height="24" rx="4"/><rect class="bx-r" x="372" y="78" width="64" height="24" rx="4"/>
+    <rect class="bx-r" x="232" y="108" width="64" height="24" rx="4"/><rect class="bx-r" x="302" y="108" width="64" height="24" rx="4"/><rect class="bx-r" x="372" y="108" width="64" height="24" rx="4"/>
+    <rect class="bx-r" x="232" y="138" width="64" height="24" rx="4"/><rect class="bx-r" x="302" y="138" width="64" height="24" rx="4"/><rect class="bx-r" x="372" y="138" width="64" height="24" rx="4"/>
+  </g>
+  <text class="mono sm" x="264" y="186" text-anchor="middle">M1</text><text class="mono sm" x="334" y="186" text-anchor="middle">M2</text><text class="mono sm" x="404" y="186" text-anchor="middle">M3</text>
+  <text class="sm on-r" x="339" y="214" text-anchor="middle">3 × 4 = 12 行</text>
+  <path class="ln" d="M466 90 H508" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="512" y="30" width="232" height="70" rx="10"/>
+  <text class="mono sm on-r" x="628" y="56" text-anchor="middle">Count('modules')  = 12</text>
+  <text class="mono sm on-r" x="628" y="80" text-anchor="middle">Count('students') = 12</text>
+  <rect class="bx-g" x="512" y="130" width="232" height="90" rx="10"/>
+  <text class="mono sm on-g" x="628" y="156" text-anchor="middle">Count(…, distinct=True)</text>
+  <text class="sm" x="628" y="178" text-anchor="middle">或者用子查询分别计数</text>
+  <text class="mono sm on-g" x="628" y="204" text-anchor="middle">3 和 4 ✓</text>
+</svg>
+<figcaption>图 T4-4　多个“一对多”关联同时 JOIN 会产生笛卡尔积。Count 可以加 distinct，但 Sum、Avg 不行，要用子查询</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="courses/views.py">
+<pre>
+from django.db.models import Count, OuterRef, Subquery
+from django.db.models.functions import Coalesce
+
+# 简单做法：Count 加 distinct=True
+courses = Course.objects.annotate(
+    total_modules=Count('modules', distinct=True),
+    total_students=Count('students', distinct=True),
+)
+
+# 通用做法：每个统计各自一个子查询，互不干扰（Sum / Avg 也适用）
+module_count = (
+    Module.objects.filter(course=OuterRef('pk'))
+    .values('course')
+    .annotate(c=Count('pk'))
+    .values('c')
+)
+courses = Course.objects.annotate(total_modules=Coalesce(Subquery(module_count), 0))
+</pre>
+</div>
+
+<h2 id="expressions">F、Q 与条件表达式</h2>
+
+<div class="tw">
+<table>
+  <tr><th>工具</th><th>作用</th><th>例子</th></tr>
+  <tr><td><code>F('字段')</code></td><td>在 SQL 里引用字段的值，而不是先读进 Python</td><td><code>Product.objects.update(price=F('price') * Decimal('1.1'))</code></td></tr>
+  <tr><td><code>F</code> 比较字段</td><td>同一行的两个字段互相比较</td><td><code>Coupon.objects.filter(valid_to__lt=F('valid_from'))</code>（找出数据录错的券）</td></tr>
+  <tr><td><code>Q</code></td><td>组合 OR、NOT 条件</td><td><code>Post.objects.filter(Q(title__icontains=q) | Q(body__icontains=q))</code></td></tr>
+  <tr><td><code>Case / When</code></td><td>SQL 里的 if / else</td><td>见下方优惠券状态的例子</td></tr>
+  <tr><td><code>Coalesce</code></td><td>取第一个非空值</td><td><code>Coalesce(Subquery(...), 0)</code></td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="py" data-file="coupons/admin.py 或查询中：一次算出每张券的状态">
+<pre>
+from django.db.models import Case, CharField, Q, Value, When
+from django.utils import timezone
+
+now = timezone.now()
+coupons = Coupon.objects.annotate(
+    state=Case(
+        When(active=False, then=Value('disabled')),
+        When(valid_to__lt=now, then=Value('expired')),
+        When(valid_from__gt=now, then=Value('not started')),
+        default=Value('valid'),
+        output_field=CharField(),
+    )
+)
+coupons.filter(state='valid')          # 注解出来的字段也能用来过滤
+</pre>
+</div>
+
+<h2 id="subquery">子查询：Subquery、OuterRef 与 Exists</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="相关子查询：外层查询的每一行，通过 OuterRef 把自己的主键传给内层查询，内层查询返回一个值作为新字段，例如每篇文章最近一条评论的时间；Exists 返回真或假">
+  <rect class="bx-b" x="16" y="30" width="300" height="140" rx="12"/>
+  <text class="ttl on-b" x="166" y="56" text-anchor="middle">外层：每一篇文章</text>
+  <text class="mono sm" x="166" y="86" text-anchor="middle">post 1 → last_comment_at = …</text>
+  <text class="mono sm" x="166" y="110" text-anchor="middle">post 2 → last_comment_at = …</text>
+  <text class="mono sm" x="166" y="134" text-anchor="middle">post 3 → last_comment_at = NULL</text>
+  <path class="ln-a" d="M318 80 H440" marker-end="url(#ar-a)"/>
+  <text class="mono sm on-a" x="379" y="72" text-anchor="middle">OuterRef('pk')</text>
+  <path class="ln-g" d="M440 130 H318" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="379" y="150" text-anchor="middle">返回一个值</text>
+  <rect class="bx-a" x="444" y="30" width="300" height="140" rx="12"/>
+  <text class="ttl on-a" x="594" y="56" text-anchor="middle">内层：这篇文章的评论</text>
+  <text class="mono sm" x="594" y="86" text-anchor="middle">WHERE post_id = 外层.id</text>
+  <text class="mono sm" x="594" y="108" text-anchor="middle">AND active</text>
+  <text class="mono sm" x="594" y="130" text-anchor="middle">ORDER BY created DESC LIMIT 1</text>
+</svg>
+<figcaption>图 T4-5　整件事仍然是一条 SQL，数据库对每一行执行内层查询（并且会优化）</figcaption>
+</figure>
+
+<div class="code" data-lang="py">
+<pre>
+from django.db.models import Exists, OuterRef, Subquery
+
+# 每篇文章最近一条已审核评论的时间
+latest = (
+    Comment.objects.filter(post=OuterRef('pk'), active=True)
+    .order_by('-created')
+    .values('created')[:1]
+)
+posts = Post.published.annotate(last_comment_at=Subquery(latest))
+
+# 课程列表里标出“我已选修”：一条 SQL 搞定，不用在模板里逐个查
+enrolled = Course.students.through.objects.filter(course=OuterRef('pk'), user=request.user)
+courses = Course.objects.annotate(is_enrolled=Exists(enrolled))
+
+# Exists 也能直接当过滤条件：有已审核评论的文章
+Post.published.filter(Exists(Comment.objects.filter(post=OuterRef('pk'), active=True)))
+</pre>
+</div>
+
+<h2 id="window">窗口函数：分组排名</h2>
+
+<p>“每个分类里最便宜的 3 件商品”这类需求，用普通的 GROUP BY 做不出来。窗口函数在不合并行的前提下，给每一行算一个“在自己分组里的名次”：</p>
+
+<div class="code" data-lang="py">
+<pre>
+from django.db.models import F, Window
+from django.db.models.functions import RowNumber
+
+products = Product.objects.filter(available=True).annotate(
+    rank_in_category=Window(
+        RowNumber(),
+        partition_by=F('category'),          # 按分类分组
+        order_by=F('price').asc(),           # 组内按价格排序
+    )
+).filter(rank_in_category__lte=3)            # Django 4.2 起可以直接过滤窗口函数的结果
+</pre>
+</div>
+
+<h2 id="performance">少取数据、批量操作、看执行计划</h2>
+
+<div class="tw">
+<table>
+  <tr><th>场景</th><th>写法</th><th>说明</th></tr>
+  <tr><td>只需要几个字段</td><td><code>.only('id', 'title')</code> / <code>.values_list('id', flat=True)</code></td><td>少传数据；访问没取的字段会再查一次</td></tr>
+  <tr><td>遍历几十万行</td><td><code>.iterator(chunk_size=2000)</code></td><td>分批取，不把全部结果缓存在内存里</td></tr>
+  <tr><td>批量插入 / 更新</td><td><code>bulk_create(objs)</code> / <code>bulk_update(objs, ['price'])</code></td><td>一条 SQL 代替 N 条；不会调用 <code>save()</code> 和信号</td></tr>
+  <tr><td>批量改一个字段</td><td><code>qs.update(active=False)</code></td><td>直接一条 UPDATE，不先取出对象</td></tr>
+  <tr><td>按 ID 取一批对象</td><td><code>Image.objects.in_bulk(ids)</code></td><td>返回 <code>{id: 对象}</code> 字典，第 7 章排行榜可以用它代替手动排序</td></tr>
+  <tr><td>不存在就创建</td><td><code>update_or_create(..., defaults=..., create_defaults=...)</code></td><td>5.0 起可以分别指定“更新时”和“创建时”的值</td></tr>
+  <tr><td>SQL 为什么慢</td><td><code>print(qs.explain())</code></td><td>看是否用上索引；PostgreSQL 可以 <code>explain(analyze=True)</code></td></tr>
+  <tr><td>常用过滤条件</td><td><code>Meta.indexes = [Index(fields=[...], condition=Q(...))]</code></td><td>带 <code>condition</code> 的是部分索引，只索引满足条件的行</td></tr>
+</table>
+</div>
+
+<h2 id="concurrency">并发：两个请求同时改一行</h2>
+
+<p>开发时只有你一个人点，很多问题永远不会出现。上线后，两个请求可能在同一毫秒修改同一条数据：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="丢失更新：请求 A 和请求 B 同时读到点赞数 10，各自在 Python 里加一后写回 11，最终结果是 11 而不是 12；改用 F 表达式后，数据库执行 total_likes = total_likes + 1，两次更新依次生效得到 12">
+  <text class="ttl" x="200" y="24" text-anchor="middle">读到 Python 里改，再写回</text>
+  <line class="ln-d" x1="100" y1="40" x2="100" y2="240"/>
+  <line class="ln-d" x1="300" y1="40" x2="300" y2="240"/>
+  <text class="sm on-b" x="100" y="52" text-anchor="middle">请求 A</text>
+  <text class="sm on-a" x="300" y="52" text-anchor="middle">请求 B</text>
+  <rect class="bx-b" x="30" y="66" width="140" height="28" rx="6"/><text class="mono sm" x="100" y="85" text-anchor="middle">读到 10</text>
+  <rect class="bx-a" x="230" y="96" width="140" height="28" rx="6"/><text class="mono sm" x="300" y="115" text-anchor="middle">读到 10</text>
+  <rect class="bx-b" x="30" y="136" width="140" height="28" rx="6"/><text class="mono sm" x="100" y="155" text-anchor="middle">写回 11</text>
+  <rect class="bx-a" x="230" y="166" width="140" height="28" rx="6"/><text class="mono sm" x="300" y="185" text-anchor="middle">写回 11</text>
+  <rect class="bx-r" x="110" y="208" width="180" height="30" rx="6"/><text class="sm on-r" x="200" y="228" text-anchor="middle">结果 11：丢了一次</text>
+
+  <rect class="bx-g" x="420" y="40" width="324" height="198" rx="12"/>
+  <text class="ttl on-g" x="582" y="66" text-anchor="middle">让数据库做加法</text>
+  <text class="mono sm" x="582" y="98" text-anchor="middle">Image.objects.filter(pk=pk)</text>
+  <text class="mono sm" x="582" y="118" text-anchor="middle">  .update(total_likes=F('total_likes') + 1)</text>
+  <text class="mono sm" x="582" y="152" text-anchor="middle">UPDATE … SET total_likes = total_likes + 1</text>
+  <text class="sm" x="582" y="186" text-anchor="middle">数据库对同一行的更新依次执行</text>
+  <text class="sm on-g" x="582" y="212" text-anchor="middle">结果 12 ✓</text>
+</svg>
+<figcaption>图 T4-6　“读 → 在 Python 里改 → 写回”在并发下都不安全；能写成一条 UPDATE 的，就写成一条 UPDATE</figcaption>
+</figure>
+
+<h3>四种工具，按场景选</h3>
+
+<div class="tw">
+<table>
+  <tr><th>工具</th><th>适用场景</th><th>原理</th></tr>
+  <tr><td><code>F()</code> 表达式更新</td><td>计数器、库存加减</td><td>计算在数据库里完成，不经过 Python</td></tr>
+  <tr><td>条件更新</td><td>“库存够才扣”“未支付才标记已支付”</td><td><code>filter(条件).update(...)</code> 返回受影响行数，0 表示条件不满足</td></tr>
+  <tr><td><code>select_for_update()</code></td><td>先读、再判断、再写的复杂逻辑</td><td>在事务里给读到的行加锁，别的事务要等你提交</td></tr>
+  <tr><td>唯一约束 + 捕获 <code>IntegrityError</code></td><td>不允许重复（序号、关注关系、每人一票）</td><td>让数据库做最终裁判，冲突时重试或提示</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="py" data-file="条件更新：不加锁也不会超卖（假设 Product 有 stock 字段）">
+<pre>
+from django.db.models import F
+
+updated = Product.objects.filter(pk=product_id, stock__gte=qty).update(stock=F('stock') - qty)
+if updated == 0:
+    raise OutOfStock()        # 库存不足，或者被别人抢先买走了
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="select_for_update：必须在事务里">
+<pre>
+from django.db import transaction
+
+with transaction.atomic():
+    order = Order.objects.select_for_update().get(pk=order_id)   # 加锁，直到事务结束
+    if order.paid:
+        return                                                    # 已经处理过，幂等
+    order.paid = True
+    order.stripe_id = payment_intent
+    order.save(update_fields=['paid', 'stripe_id'])
+    transaction.on_commit(lambda: payment_completed.delay(order.id))
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; SQLite 上看不出效果</div>
+  <p>SQLite 不支持 <code>SELECT … FOR UPDATE</code>，Django 会直接忽略 <code>select_for_update()</code>（SQLite 本身会锁整个数据库）。并发相关的代码和测试要在 PostgreSQL 上验证，这也是书里第 3 章起换成 PostgreSQL 的原因之一。</p>
+</div>
+
+<h3>实例：第 12 章的 OrderField 竞态</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="两个讲师同时给同一门课添加模块：两个请求都查到当前最大序号 3，都把新模块的序号设为 4，结果两个模块序号相同；加上 course 和 order 的唯一约束后，第二个插入会失败，捕获后重试即可">
+  <line class="ln-d" x1="110" y1="30" x2="110" y2="210"/>
+  <line class="ln-d" x1="310" y1="30" x2="310" y2="210"/>
+  <text class="sm on-b" x="110" y="24" text-anchor="middle">请求 A：添加模块</text>
+  <text class="sm on-a" x="310" y="24" text-anchor="middle">请求 B：添加模块</text>
+  <rect class="bx-b" x="30" y="46" width="160" height="30" rx="6"/><text class="mono sm" x="110" y="66" text-anchor="middle">latest → order 3</text>
+  <rect class="bx-a" x="230" y="80" width="160" height="30" rx="6"/><text class="mono sm" x="310" y="100" text-anchor="middle">latest → order 3</text>
+  <rect class="bx-b" x="30" y="120" width="160" height="30" rx="6"/><text class="mono sm" x="110" y="140" text-anchor="middle">INSERT order=4</text>
+  <rect class="bx-a" x="230" y="154" width="160" height="30" rx="6"/><text class="mono sm" x="310" y="174" text-anchor="middle">INSERT order=4</text>
+  <text class="sm on-r" x="210" y="222" text-anchor="middle">两个模块都是第 4 个，排序不确定</text>
+
+  <rect class="bx-g" x="440" y="40" width="304" height="170" rx="12"/>
+  <text class="ttl on-g" x="592" y="66" text-anchor="middle">修复</text>
+  <text class="sm" x="592" y="94" text-anchor="middle">① Meta 里加唯一约束</text>
+  <text class="mono sm" x="592" y="114" text-anchor="middle">UniqueConstraint(['course', 'order'])</text>
+  <text class="sm" x="592" y="144" text-anchor="middle">② 第二个 INSERT 抛 IntegrityError</text>
+  <text class="sm" x="592" y="168" text-anchor="middle">③ 捕获后重新计算序号再试一次</text>
+  <text class="sm on-g" x="592" y="194" text-anchor="middle">数据库保证永远不会重复</text>
+</svg>
+<figcaption>图 T4-7　“先查最大值再加一”是最常见的竞态写法，自增序号、订单编号、排行名次都要小心</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="courses/models.py（加约束）与创建时的重试">
+<pre>
+from django.db import IntegrityError, models, transaction
+
+
+class Module(models.Model):
+    course = models.ForeignKey(Course, related_name='modules', on_delete=models.CASCADE)
+    order = OrderField(blank=True, for_fields=['course'])
+    # ...
+
+    class Meta:
+        ordering = ['order']
+        constraints = [
+            models.UniqueConstraint(fields=['course', 'order'], name='unique_module_order'),
+        ]
+
+
+def add_module(course, **fields):
+    for attempt in range(3):
+        try:
+            with transaction.atomic():               # 失败只回滚这一次尝试
+                return Module.objects.create(course=course, **fields)
+        except IntegrityError:
+            if attempt == 2:
+                raise
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 另一种思路：锁住“父”行</div>
+  <p>在事务里先 <code>Course.objects.select_for_update().get(pk=course.pk)</code>，再计算最大序号并插入。同一门课的并发添加会排队执行，不同课程之间互不影响。约束仍然建议加上，它是最后一道防线。</p>
+</div>
+
+<h3>事务的范围</h3>
+
+<ul>
+  <li><code>transaction.atomic()</code> 里的所有写入要么全部成功，要么全部回滚；嵌套使用时内层会变成保存点（savepoint）。</li>
+  <li>事务里<strong>不要</strong>调用外部服务（发邮件、调 Stripe、发 Celery 任务）：事务可能回滚，外部动作却撤不回来。用 <code>transaction.on_commit()</code> 在提交后再做（第 8 章点评）。</li>
+  <li>事务要短：持锁期间别的请求在等，别在事务里做耗时计算或网络请求。</li>
+  <li>设置 <code>ATOMIC_REQUESTS = True</code> 可以让每个请求自动包在一个事务里。Two Scoops 认为它对小项目是省心的默认值，但会让每个请求都持有事务，流量大时要权衡。</li>
+</ul>
+
+<h2 id="review">对照仓库</h2>
+
+<div class="review">
+  <div class="h">&#128269; 书中代码的查询与并发问题 <small>Chapter03 / 07 / 08 / 12 / 13 / 14</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 排序接口用一条带权限条件的 UPDATE <span class="src">Chapter13/educa/courses/views.py:166</span></h4>
+    <p><code>Module.objects.filter(id=id, course__owner=request.user).update(order=order)</code>：不先取对象，直接更新；owner 条件写在查询里，别人的模块匹配不到就改不了。这是“权限写进查询”的好例子（CSRF 问题另见第 13 章点评）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> “最多评论”把已屏蔽的评论也算进去 <span class="src">Chapter03/mysite/blog/templatetags/blog_tags.py</span></h4>
+    <p>用 <code>Count('comments', filter=Q(comments__active=True))</code>，见上文“带条件的聚合”。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> OrderField 并发时会产生重复序号 <span class="src">Chapter12/educa/courses/fields.py</span></h4>
+    <p><code>qs.latest(...)</code> 加一之后再写入，中间没有任何保护，数据库里也没有 <code>(course, order)</code> 唯一约束。修复见图 T4-7。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 点赞计数的信号每次保存整行 <span class="src">Chapter07/bookmarks/images/signals.py</span></h4>
+    <p>接收函数里 <code>instance.total_likes = instance.users_like.count()</code> 后调用 <code>instance.save()</code>，会把图片的所有字段写回一遍，可能覆盖别的请求刚改过的标题或描述。改成 <code>Image.objects.filter(pk=instance.pk).update(total_likes=instance.users_like.count())</code>，只更新这一个字段。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 下单不在事务里 <span class="src">Chapter08/myshop/orders/views.py</span></h4>
+    <p>订单和订单项分多次写入，中途出错会留下“半个订单”，异步任务也可能在提交前就开始执行。用 <code>transaction.atomic()</code> 包起来，任务用 <code>on_commit</code> 派发（见第 8 章点评和<a href="ch18.html#skeleton">附录的服务函数示例</a>）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 课程列表的统计以后要加字段时</h4>
+    <p>第 14 章 <code>Course.objects.annotate(total_modules=Count('modules'))</code> 本身是对的。以后如果要在同一个查询里再统计学生数，记得加 <code>distinct=True</code> 或改用子查询，见图 T4-4。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>QuerySet 是惰性的；要数量用 <code>count()</code>，要判断存在用 <code>exists()</code>。</li>
+  <li>“指向一个”用 <code>select_related</code>，“拥有多个”用 <code>prefetch_related</code>；预取时过滤用 <code>Prefetch</code>。</li>
+  <li>聚合可以带 <code>filter=Q(...)</code>；多个一对多关联同时计数要 <code>distinct=True</code> 或用子查询。</li>
+  <li><code>F</code>、<code>Case/When</code>、<code>Subquery</code>、<code>Exists</code>、窗口函数能把计算留在数据库里，一条 SQL 完成。</li>
+  <li>并发下不要“读到 Python 改完再写回”：用 F 更新、条件更新、行锁或唯一约束；外部动作放在 <code>on_commit</code> 里。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>修好第 3 章的 <code>get_most_commented_posts</code>，并写一个测试：屏蔽一条评论后排名随之变化。</li>
+    <li>在课程列表里同时统计模块数和学生数，先不加 <code>distinct</code> 看看结果，再修正。</li>
+    <li>用 <code>Exists</code> 给课程列表加上“已选修”标记，用 Debug Toolbar 确认只多了 0 条 SQL（子查询在同一条语句里）。</li>
+    <li>给 <code>Module</code> 加 <code>(course, order)</code> 唯一约束，写一个测试：同一门课连续创建两个模块，序号不同。</li>
+    <li>把第 7 章点赞改成 <code>F()</code> 更新或只更新计数字段，对比修改前后执行的 SQL。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

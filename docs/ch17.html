@@ -127,8 +127,9 @@ export DJANGO_SETTINGS_MODULE=educa.settings.local
 FROM python:3.12.3
 
 # Set environment variables
-ENV PYTHONDONTWRITEBYTECODE=1     # 不生成 .pyc
-ENV PYTHONUNBUFFERED=1            # 日志立即输出，不缓冲
+# 不生成 .pyc；日志立即输出，不缓冲
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
 
 WORKDIR /code
 

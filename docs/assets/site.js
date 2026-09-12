@@ -25,6 +25,10 @@
     { k: 'T1', f: 't01.html', t: '测试',       d: 'TestCase 与 pytest-django、factory_boy、Mock 外部服务、覆盖率与 CI', part: '专题补充' },
     { k: 'T2', f: 't02.html', t: '项目起步',   d: 'uv、设置拆分与环境变量、自定义用户模型、ruff 与 pre-commit' },
     { k: 'T3', f: 't03.html', t: '调试与日志', d: '读懂报错、breakpoint()、shell 与 Debug Toolbar、LOGGING 与 Sentry' },
+    { k: 'T4', f: 't04.html', t: 'ORM 进阶与并发', d: '聚合与 annotate、F/Q、Subquery 与 Exists、窗口函数、事务与锁' },
+    { k: 'T5', f: 't05.html', t: '迁移深入',       d: '迁移原理、数据迁移、回滚与冲突、squash、不停机迁移' },
+    { k: 'T6', f: 't06.html', t: '权限与安全',     d: '权限与组、对象级权限、安全总览、CSP 与安全响应头、限速' },
+    { k: 'T7', f: 't07.html', t: '部署补充',       d: 'Gunicorn、WhiteNoise、对象存储、健康检查、镜像与自动部署' },
     { n: 18, k: 'A', t: '代码点评总览',        d: 'Django 5.2 最佳实践与 Two Scoops 风格的整体改进清单', part: '附录' }
   ];
 
