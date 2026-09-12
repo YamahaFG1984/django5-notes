@@ -1,0 +1,516 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 15 章 · 构建 API — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="15">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 15 章 · 项目四：在线学习平台</span>
+<h1>构建 API</h1>
+<p class="lede">
+  网页之外，手机 App、第三方系统、前端框架都需要以程序方式访问平台数据。这一章用 <strong>Django REST framework（DRF）</strong>
+  为 Educa 构建一个 RESTful API：序列化器、通用 API 视图、分页、ViewSet 与路由器、认证与权限、自定义权限，最后用 Requests 写一个客户端脚本调用它。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解 REST 的资源、HTTP 方法与状态码约定</li>
+    <li>掌握 DRF 的核心组件：序列化器、解析器/渲染器、视图、路由、认证、权限</li>
+    <li>用 <code>SerializerMethodField</code>、嵌套序列化器、自定义关系字段扩展输出</li>
+    <li>用 <code>ReadOnlyModelViewSet</code> + <code>@action</code> + Router 组织接口</li>
+    <li>区分认证（你是谁）与权限（你能做什么），编写 <code>IsEnrolled</code> 权限</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="rest">REST 是什么</h2>
+
+<p>REST 把一切看作<strong>资源</strong>，用 URL 标识资源，用 HTTP 方法表达动作，用状态码表达结果，通常以 JSON 交换数据：</p>
+
+<div class="tw">
+<table>
+  <tr><th>HTTP 方法</th><th>URL</th><th>含义</th><th>常见状态码</th></tr>
+  <tr><td><code>GET</code></td><td><code>/api/courses/</code></td><td>列出课程</td><td>200</td></tr>
+  <tr><td><code>GET</code></td><td><code>/api/courses/3/</code></td><td>获取一门课程</td><td>200 / 404</td></tr>
+  <tr><td><code>POST</code></td><td><code>/api/courses/</code></td><td>新建课程</td><td>201 / 400</td></tr>
+  <tr><td><code>PUT</code> / <code>PATCH</code></td><td><code>/api/courses/3/</code></td><td>整体 / 部分更新</td><td>200 / 400</td></tr>
+  <tr><td><code>DELETE</code></td><td><code>/api/courses/3/</code></td><td>删除</td><td>204</td></tr>
+  <tr><td><code>POST</code></td><td><code>/api/courses/3/enroll/</code></td><td>自定义动作：选课</td><td>200 / 401 / 403</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install djangorestframework==3.15.1
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="educa/settings.py">
+<pre>
+INSTALLED_APPS = [..., 'rest_framework']
+
+REST_FRAMEWORK = {
+    'DEFAULT_PERMISSION_CLASSES': [
+        # 依赖 Django 权限系统：有模型权限才能写，匿名用户只读
+        'rest_framework.permissions.DjangoModelPermissionsOrAnonReadOnly'
+    ]
+}
+</pre>
+</div>
+
+<h2 id="pipeline">一个 API 请求在 DRF 里经历了什么</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="DRF 请求处理流水线：解析请求、认证、权限、限流、视图取数据、序列化、渲染为 JSON">
+  <rect class="bx" x="16" y="30" width="100" height="60" rx="10"/>
+  <text class="ttl" x="66" y="56" text-anchor="middle">HTTP</text>
+  <text class="sm" x="66" y="76" text-anchor="middle">请求</text>
+  <path class="ln" d="M118 60 H140" marker-end="url(#ar)"/>
+  <rect class="bx-p" x="144" y="30" width="120" height="60" rx="10"/>
+  <text class="ttl on-p" x="204" y="56" text-anchor="middle">认证</text>
+  <text class="sm" x="204" y="76" text-anchor="middle">→ request.user</text>
+  <path class="ln" d="M266 60 H288" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="292" y="30" width="120" height="60" rx="10"/>
+  <text class="ttl on-r" x="352" y="56" text-anchor="middle">权限</text>
+  <text class="sm" x="352" y="76" text-anchor="middle">401 / 403</text>
+  <path class="ln" d="M414 60 H436" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="440" y="30" width="100" height="60" rx="10"/>
+  <text class="ttl" x="490" y="56" text-anchor="middle">限流</text>
+  <text class="sm" x="490" y="76" text-anchor="middle">429（可选）</text>
+  <path class="ln" d="M542 60 H564" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="568" y="30" width="176" height="60" rx="10"/>
+  <text class="ttl on-a" x="656" y="56" text-anchor="middle">视图 / ViewSet</text>
+  <text class="sm" x="656" y="76" text-anchor="middle">get_queryset / get_object</text>
+
+  <path class="ln-a" d="M656 92 V130" marker-end="url(#ar-a)"/>
+  <rect class="bx-b" x="440" y="134" width="304" height="60" rx="10"/>
+  <text class="ttl on-b" x="592" y="158" text-anchor="middle">序列化器</text>
+  <text class="sm" x="592" y="178" text-anchor="middle">模型实例 → Python 原生类型（dict、list）</text>
+  <path class="ln" d="M438 164 H392" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="188" y="134" width="200" height="60" rx="10"/>
+  <text class="ttl on-g" x="288" y="158" text-anchor="middle">渲染器</text>
+  <text class="sm" x="288" y="178" text-anchor="middle">JSON / 可浏览的 HTML</text>
+  <path class="ln" d="M186 164 H120" marker-end="url(#ar)"/>
+  <rect class="bx" x="16" y="134" width="100" height="60" rx="10"/>
+  <text class="ttl" x="66" y="160" text-anchor="middle">Response</text>
+  <text class="sm" x="66" y="180" text-anchor="middle">+ 状态码</text>
+  <text class="sm" x="380" y="228" text-anchor="middle">写入方向相反：解析器（Parser）把 JSON 请求体变成 Python 数据，再由序列化器校验并保存</text>
+</svg>
+<figcaption>图 15-1　DRF 的每个环节都可以在设置里全局配置，也可以在单个视图上覆盖</figcaption>
+</figure>
+
+<h2 id="serializers">序列化器</h2>
+
+<p>序列化器之于 API，就像 ModelForm 之于网页：定义字段、校验输入、把模型和原生数据互相转换。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 150" role="img" aria-label="序列化器把模型实例转为 Python 字典，渲染器再转为 JSON 字节；反方向是解析器和反序列化">
+  <rect class="bx-a" x="16" y="40" width="170" height="60" rx="10"/>
+  <text class="mono sm on-a" x="101" y="66" text-anchor="middle">Subject 实例</text>
+  <text class="sm" x="101" y="86" text-anchor="middle">Python 对象</text>
+  <path class="ln" d="M188 60 H254" marker-end="url(#ar)"/>
+  <text class="mono sm" x="221" y="50" text-anchor="middle">Serializer</text>
+  <path class="ln" d="M254 84 H188" marker-end="url(#ar)"/>
+  <text class="sm" x="221" y="100" text-anchor="middle">.save()</text>
+  <rect class="bx-b" x="258" y="40" width="220" height="60" rx="10"/>
+  <text class="mono sm on-b" x="368" y="66" text-anchor="middle">{'id': 4, 'title': …}</text>
+  <text class="sm" x="368" y="86" text-anchor="middle">serializer.data（原生类型）</text>
+  <path class="ln" d="M480 60 H546" marker-end="url(#ar)"/>
+  <text class="mono sm" x="513" y="50" text-anchor="middle">Renderer</text>
+  <path class="ln" d="M546 84 H480" marker-end="url(#ar)"/>
+  <text class="mono sm" x="513" y="100" text-anchor="middle">Parser</text>
+  <rect class="bx-g" x="550" y="40" width="194" height="60" rx="10"/>
+  <text class="mono sm on-g" x="647" y="66" text-anchor="middle">b'{"id":4,…}'</text>
+  <text class="sm" x="647" y="86" text-anchor="middle">HTTP 里的 JSON</text>
+</svg>
+<figcaption>图 15-2　序列化（对象 → JSON）与反序列化（JSON → 对象）</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="courses/api/serializers.py">
+<pre>
+from django.db.models import Count
+from rest_framework import serializers
+
+from courses.models import Content, Course, Module, Subject
+
+
+class SubjectSerializer(serializers.ModelSerializer):
+    total_courses = serializers.IntegerField()              # 来自视图里 annotate 的字段
+    popular_courses = serializers.SerializerMethodField()   # 值由 get_popular_courses() 计算
+
+    def get_popular_courses(self, obj):
+        courses = obj.courses.annotate(total_students=Count('students')).order_by('-total_students')[:3]
+        return [f'{c.title} ({c.total_students} students)' for c in courses]
+
+    class Meta:
+        model = Subject
+        fields = ['id', 'title', 'slug', 'total_courses', 'popular_courses']
+
+
+class ModuleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Module
+        fields = ['order', 'title', 'description']
+
+
+class CourseSerializer(serializers.ModelSerializer):
+    modules = ModuleSerializer(many=True, read_only=True)   # 嵌套序列化器
+    class Meta:
+        model = Course
+        fields = ['id', 'subject', 'title', 'slug', 'overview', 'created', 'owner', 'modules']
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>关系的表示方式</th><th>输出示例</th></tr>
+  <tr><td>默认（<code>PrimaryKeyRelatedField</code>）</td><td><code>"modules": [6, 7, 9]</code></td></tr>
+  <tr><td><code>StringRelatedField</code></td><td><code>"modules": ["0. Installing Django", "1. Configuring"]</code></td></tr>
+  <tr><td>嵌套序列化器</td><td><code>"modules": [{"order": 0, "title": "…", "description": "…"}]</code></td></tr>
+  <tr><td><code>HyperlinkedRelatedField</code></td><td><code>"modules": ["http://…/api/modules/6/"]</code></td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; DRF 不会替你优化查询</div>
+  <p>序列化 20 门课程、每门课嵌套模块，如果视图的 queryset 没有 <code>prefetch_related('modules')</code>，就是 1 + 20 条 SQL。<code>SerializerMethodField</code> 里的查询同理（上面的 <code>get_popular_courses</code> 每个学科一条）。</p>
+</div>
+
+<h2 id="views">视图、分页、ViewSet 与路由</h2>
+
+<p>最初用通用视图 <code>ListAPIView</code>/<code>RetrieveAPIView</code> 写学科的列表和详情，然后合并成 ViewSet：</p>
+
+<div class="code" data-lang="py" data-file="courses/api/pagination.py 与 views.py">
+<pre>
+from rest_framework.pagination import PageNumberPagination
+
+
+class StandardPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'     # 允许客户端 ?page_size=20
+    max_page_size = 50
+
+
+class SubjectViewSet(viewsets.ReadOnlyModelViewSet):      # 只读：list + retrieve
+    queryset = Subject.objects.annotate(total_courses=Count('courses'))
+    serializer_class = SubjectSerializer
+    pagination_class = StandardPagination
+
+
+class CourseViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Course.objects.prefetch_related('modules')
+    serializer_class = CourseSerializer
+    pagination_class = StandardPagination
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="courses/api/urls.py">
+<pre>
+from rest_framework import routers
+
+app_name = 'courses'
+
+router = routers.DefaultRouter()
+router.register('courses', views.CourseViewSet)
+router.register('subjects', views.SubjectViewSet)
+
+urlpatterns = [path('', include(router.urls))]
+
+# educa/urls.py
+path('api/', include('courses.api.urls', namespace='api')),
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="DefaultRouter 为 ViewSet 自动生成的 URL 列表">
+  <rect class="bx-a" x="16" y="20" width="220" height="190" rx="12"/>
+  <text class="ttl on-a" x="126" y="44" text-anchor="middle">CourseViewSet</text>
+  <text class="mono sm" x="30" y="72">list()</text>
+  <text class="mono sm" x="30" y="94">retrieve()</text>
+  <text class="mono sm" x="30" y="116">@action enroll (POST)</text>
+  <text class="mono sm" x="30" y="138">@action contents (GET)</text>
+  <path class="ln-a" d="M238 115 H290" marker-end="url(#ar-a)"/>
+  <text class="mono sm" x="264" y="105" text-anchor="middle">Router</text>
+  <rect class="bx-g" x="294" y="20" width="450" height="190" rx="12"/>
+  <text class="ttl on-g" x="519" y="44" text-anchor="middle">自动生成的 URL（名字前缀 course-）</text>
+  <text class="mono sm" x="310" y="72">GET  /api/                      API 根（DefaultRouter 独有）</text>
+  <text class="mono sm" x="310" y="94">GET  /api/courses/              course-list</text>
+  <text class="mono sm" x="310" y="116">GET  /api/courses/{pk}/         course-detail</text>
+  <text class="mono sm" x="310" y="138">POST /api/courses/{pk}/enroll/  course-enroll</text>
+  <text class="mono sm" x="310" y="160">GET  /api/courses/{pk}/contents/ course-contents</text>
+  <text class="sm" x="310" y="192">分页响应：{"count", "next", "previous", "results": […]}</text>
+</svg>
+<figcaption>图 15-3　ViewSet 描述“能做什么”，Router 负责“URL 长什么样”</figcaption>
+</figure>
+
+<p>在浏览器打开 <code>/api/</code> 会看到 DRF 的<strong>可浏览 API</strong>（BrowsableAPIRenderer），用命令行可以 <code>curl http://127.0.0.1:8000/api/subjects/ | json_pp</code>。</p>
+
+<h2 id="auth">认证与权限</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="认证回答你是谁，失败返回 401；权限回答你能做什么，分视图级和对象级，失败返回 403">
+  <rect class="bx-p" x="16" y="20" width="350" height="170" rx="12"/>
+  <text class="ttl on-p" x="191" y="44" text-anchor="middle">认证 Authentication：你是谁？</text>
+  <text class="mono sm" x="30" y="70">BasicAuthentication   用户名密码（Base64）</text>
+  <text class="mono sm" x="30" y="92">TokenAuthentication   Authorization: Token …</text>
+  <text class="mono sm" x="30" y="114">SessionAuthentication 浏览器会话（需 CSRF）</text>
+  <text class="mono sm" x="30" y="136">RemoteUserAuthentication</text>
+  <text class="sm" x="30" y="164">只负责设置 request.user，本身不拦截请求</text>
+  <text class="sm on-r" x="30" y="182">凭据缺失/错误且需要登录 → 401</text>
+  <rect class="bx-r" x="386" y="20" width="358" height="170" rx="12"/>
+  <text class="ttl on-r" x="565" y="44" text-anchor="middle">权限 Permission：你能做什么？</text>
+  <text class="mono sm" x="400" y="70">AllowAny / IsAuthenticated</text>
+  <text class="mono sm" x="400" y="92">IsAuthenticatedOrReadOnly</text>
+  <text class="mono sm" x="400" y="114">DjangoModelPermissions(OrAnonReadOnly)</text>
+  <text class="mono sm" x="400" y="136">has_permission()        视图级</text>
+  <text class="mono sm" x="400" y="158">has_object_permission() 对象级（get_object 时）</text>
+  <text class="sm on-r" x="400" y="182">已认证但不允许 → 403</text>
+</svg>
+<figcaption>图 15-4　认证与权限是两件事</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="courses/api/permissions.py">
+<pre>
+from rest_framework.permissions import BasePermission
+
+
+class IsEnrolled(BasePermission):
+    def has_object_permission(self, request, view, obj):     # obj 是 Course
+        return obj.students.filter(id=request.user.id).exists()
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="courses/api/views.py（CourseViewSet 的自定义动作）">
+<pre>
+from rest_framework.authentication import BasicAuthentication
+from rest_framework.decorators import action
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+
+
+class CourseViewSet(viewsets.ReadOnlyModelViewSet):
+    # ...
+    @action(detail=True, methods=['post'],
+            authentication_classes=[BasicAuthentication],
+            permission_classes=[IsAuthenticated])
+    def enroll(self, request, *args, **kwargs):
+        course = self.get_object()
+        course.students.add(request.user)
+        return Response({'enrolled': True})
+
+    @action(detail=True, methods=['get'],
+            serializer_class=CourseWithContentsSerializer,
+            authentication_classes=[BasicAuthentication],
+            permission_classes=[IsAuthenticated, IsEnrolled])
+    def contents(self, request, *args, **kwargs):
+        return self.retrieve(request, *args, **kwargs)      # 复用 retrieve，只是换了序列化器
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+curl -i -X POST http://127.0.0.1:8000/api/courses/1/enroll/
+# HTTP/1.1 401 Unauthorized  {"detail":"Authentication credentials were not provided."}
+curl -i -X POST -u student:password http://127.0.0.1:8000/api/courses/1/enroll/
+# HTTP/1.1 200 OK  {"enrolled":true}
+</pre>
+</div>
+
+<h3>序列化课程内容</h3>
+
+<p>内容是泛型外键，书里用一个自定义关系字段直接调用上一章的 <code>render()</code> 输出 HTML：</p>
+
+<div class="code" data-lang="py" data-file="courses/api/serializers.py">
+<pre>
+class ItemRelatedField(serializers.RelatedField):
+    def to_representation(self, value):
+        return value.render()
+
+
+class ContentSerializer(serializers.ModelSerializer):
+    item = ItemRelatedField(read_only=True)
+    class Meta:
+        model = Content
+        fields = ['order', 'item']
+
+
+class ModuleWithContentsSerializer(serializers.ModelSerializer):
+    contents = ContentSerializer(many=True)
+    class Meta:
+        model = Module
+        fields = ['order', 'title', 'description', 'contents']
+
+
+class CourseWithContentsSerializer(serializers.ModelSerializer):
+    modules = ModuleWithContentsSerializer(many=True)
+    class Meta:
+        model = Course
+        fields = ['id', 'subject', 'title', 'slug', 'overview', 'created', 'owner', 'modules']
+</pre>
+</div>
+
+<h2 id="client">用 Requests 调用 API</h2>
+
+<div class="code" data-lang="py" data-file="api_examples/enroll_all.py">
+<pre>
+import requests
+
+username = ''
+password = ''
+base_url = 'http://127.0.0.1:8000/api/'
+url = f'{base_url}courses/'
+available_courses = []
+
+while url is not None:                     # 沿着 next 链接翻完所有页
+    print(f'Loading courses from {url}')
+    r = requests.get(url)
+    response = r.json()
+    url = response['next']
+    courses = response['results']
+    available_courses += [course['title'] for course in courses]
+
+print(f'Available courses: {", ".join(available_courses)}')
+
+for course in courses:
+    r = requests.post(f'{base_url}courses/{course["id"]}/enroll/', auth=(username, password))
+    if r.status_code == 200:
+        print(f'Successfully enrolled in {course["title"]}')
+</pre>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 15 章代码点评 <small>Chapter15/educa/courses/api、Chapter15/api_examples</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> API 代码独立成 <code>api/</code> 包，只读 ViewSet + 预取</h4>
+    <p>把序列化器、视图、权限、分页、URL 都放在 <code>courses/api/</code> 下，与网页视图分开，是 TSD 推荐的组织方式；<code>ReadOnlyModelViewSet</code> 不暴露写接口；<code>CourseViewSet</code> 的 queryset 带了 <code>prefetch_related('modules')</code>；自定义权限只做一件事，易于测试。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 客户端脚本只给最后一页的课程选课 <span class="src">Chapter15/api_examples/enroll_all.py</span></h4>
+    <p><code>courses</code> 变量在 while 循环里每页都被覆盖，循环结束时只剩最后一页的数据；课程超过 10 门（一页）时，前面几页的课程都不会被选上。应在翻页时累积完整的课程列表，或者在每页内就完成选课。另外账号密码写在源码里，应改为从环境变量读取。</p>
+<div class="code" data-lang="py"><pre>
+all_courses = []
+while url:
+    data = requests.get(url, timeout=10).json()
+    all_courses += data['results']
+    url = data['next']
+
+for course in all_courses:
+    ...
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> <code>contents</code> 接口的查询数量随内容线性增长</h4>
+    <p>
+      <code>CourseWithContentsSerializer</code> 对每个模块查一次 <code>contents</code>，对每个内容再做一次泛型外键查询，还要各渲染一个模板。一门 10 个模块、每模块 10 个内容的课程就是上百条 SQL。
+      自定义动作可以覆盖 queryset：
+    </p>
+<div class="code" data-lang="py"><pre>
+@action(detail=True, methods=['get'], serializer_class=CourseWithContentsSerializer,
+        permission_classes=[IsAuthenticated, IsEnrolled])
+def contents(self, request, *args, **kwargs):
+    self.queryset = Course.objects.prefetch_related('modules__contents__item')
+    return self.retrieve(request, *args, **kwargs)
+</pre></div>
+    <p>设计上也值得商榷：API 返回的是一段段 HTML（<code>render()</code> 的结果），移动端或前端框架很难使用。更“API 化”的做法是按内容类型输出结构化数据（<code>{"type": "video", "url": …}</code>），把展示留给客户端。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 生产 API 不要只用 Basic 认证 <span class="tag ts">TSD：REST API</span></h4>
+    <p>
+      Basic 认证每次请求都携带明文可解码的密码，必须全程 HTTPS，而且无法单独吊销；它还没有限流保护，是暴力破解的好靶子。
+      常见组合是：给自家网页前端用 <code>SessionAuthentication</code>（自动带 CSRF 校验），给移动端/第三方用令牌（DRF 的 <code>TokenAuthentication</code> 或 <code>djangorestframework-simplejwt</code>）。
+      认证类最好在 <code>REST_FRAMEWORK</code> 全局设置里统一配置，而不是写在每个 <code>@action</code> 上。同时开启限流：
+    </p>
+<div class="code" data-lang="py"><pre>
+REST_FRAMEWORK = {
+    'DEFAULT_AUTHENTICATION_CLASSES': [
+        'rest_framework.authentication.SessionAuthentication',
+        'rest_framework.authentication.TokenAuthentication',
+    ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.DjangoModelPermissionsOrAnonReadOnly',
+    ],
+    'DEFAULT_PAGINATION_CLASS': 'courses.api.pagination.StandardPagination',
+    'PAGE_SIZE': 10,
+    'DEFAULT_THROTTLE_CLASSES': [
+        'rest_framework.throttling.AnonRateThrottle',
+        'rest_framework.throttling.UserRateThrottle',
+    ],
+    'DEFAULT_THROTTLE_RATES': {'anon': '100/hour', 'user': '1000/hour'},
+}
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 版本化、文档与测试 <span class="tag ts">TSD：REST API</span></h4>
+    <p>
+      API 一旦被外部使用就很难改。TSD 建议从第一天起给 URL 加版本（<code>/api/v1/</code>，或 DRF 的 <code>URLPathVersioning</code>）；
+      用 <strong>drf-spectacular</strong> 自动生成 OpenAPI 文档与 Swagger UI；并为每个端点写测试 —— DRF 提供了 <code>APITestCase</code> 和 <code>APIClient</code>：
+    </p>
+<div class="code" data-lang="py" data-file="courses/tests/test_api.py"><pre>
+from django.contrib.auth import get_user_model
+from django.urls import reverse
+from rest_framework.test import APITestCase
+
+
+class EnrollAPITests(APITestCase):
+    def setUp(self):
+        self.user = get_user_model().objects.create_user('stu', password='pw-12345!')
+        self.course = make_course()          # 用 factory_boy 或辅助函数创建
+
+    def test_enroll_requires_auth(self):
+        url = reverse('api:course-enroll', args=[self.course.pk])
+        self.assertEqual(self.client.post(url).status_code, 401)
+
+    def test_contents_forbidden_if_not_enrolled(self):
+        self.client.force_authenticate(self.user)
+        url = reverse('api:course-contents', args=[self.course.pk])
+        self.assertEqual(self.client.get(url).status_code, 403)
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> <code>SerializerMethodField</code> 的 N+1</h4>
+    <p>学科列表每一项都会执行一次“最受欢迎课程”查询（书中也提到了）。数据量大时可以在视图里用 <code>Prefetch('courses', queryset=Course.objects.annotate(total_students=Count('students')).order_by('-total_students'))</code> 预取，再在 Python 中切片取前三；或者把这类统计结果缓存起来（第 14 章）。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>REST 用 URL 表示资源、用 HTTP 方法表示动作、用状态码表示结果。</li>
+  <li>DRF 的请求依次经过认证、权限、限流、视图、序列化器、渲染器。</li>
+  <li>序列化器可以用额外字段、方法字段、嵌套序列化器和自定义关系字段扩展。</li>
+  <li><code>ViewSet</code> + <code>Router</code> 自动生成 URL；<code>@action</code> 添加自定义端点。</li>
+  <li>认证确定身份（401），权限决定能否访问（403）；对象级权限通过 <code>has_object_permission</code> 实现。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>建 12 门课程，运行书中的 <code>enroll_all.py</code>，确认只选了后两门；然后修复它。</li>
+    <li>给 API 加上 <code>/api/v1/</code> 前缀，并接入 drf-spectacular 生成 Swagger 文档。</li>
+    <li>把认证改为 Session + Token，用 <code>python manage.py drf_create_token &lt;用户名&gt;</code> 生成令牌后用 curl 调用。</li>
+    <li>为 <code>enroll</code> 和 <code>contents</code> 各写两个 <code>APITestCase</code> 测试。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

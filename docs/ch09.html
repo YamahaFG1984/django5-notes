@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 9 章 · 支付与订单 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="9">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 9 章 · 项目三：在线商店</span>
+<h1>支付与订单</h1>
+<p class="lede">
+  商店能下单了，但还收不到钱。这一章接入 Stripe 支付：用户跳到 Stripe 托管的收银台付款，
+  Stripe 通过 <strong>Webhook</strong> 通知我们“钱到了”。之后我们扩展管理后台：自定义批量动作导出 CSV、自定义后台页面、
+  生成 PDF 发票并在付款后自动发邮件。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解支付网关的作用，用 Stripe Checkout 完成收款</li>
+    <li>理解“跳转回来的成功页”和“Webhook 通知”的区别，校验 Webhook 签名</li>
+    <li>在订单上保存支付 ID，并在 Admin 中链接到 Stripe 后台</li>
+    <li>编写自定义 Admin 动作（导出 CSV）和自定义 Admin 视图</li>
+    <li>用 WeasyPrint 把 HTML 模板渲染成 PDF，并作为邮件附件发送</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="gateway">为什么用支付网关</h2>
+
+<p>
+  自己处理信用卡意味着要满足 PCI DSS 合规、防欺诈、对接银行……几乎不可能。
+  支付网关（Stripe、PayPal、支付宝、微信支付等）替你承担这些：卡号<strong>从不经过</strong>你的服务器。
+  本书使用 <strong>Stripe Checkout</strong> —— 一个由 Stripe 托管的收银页面。
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install stripe==9.3.0 python-decouple==3.8
+</pre>
+</div>
+
+<div class="code" data-lang="env" data-file=".env">
+<pre>
+STRIPE_PUBLISHABLE_KEY=pk_test_XXXX      # 可以放前端
+STRIPE_SECRET_KEY=sk_test_XXXX           # 只能在服务器端，绝不能泄露
+STRIPE_WEBHOOK_SECRET=whsec_XXXX         # 用来验证 Webhook 签名
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="myshop/settings.py">
+<pre>
+STRIPE_PUBLISHABLE_KEY = config('STRIPE_PUBLISHABLE_KEY')
+STRIPE_SECRET_KEY = config('STRIPE_SECRET_KEY')
+STRIPE_API_VERSION = '2024-04-10'        # 锁定 API 版本，Stripe 升级不影响你
+STRIPE_WEBHOOK_SECRET = config('STRIPE_WEBHOOK_SECRET')
+</pre>
+</div>
+
+<h2 id="checkout">支付流程</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="支付流程：下单后重定向到支付页，POST 创建 Checkout Session，303 跳转 Stripe 收银台，付款后跳回成功页；同时 Stripe 通过 Webhook 通知服务器">
+  <rect class="bx" x="16" y="20" width="130" height="290" rx="12"/>
+  <text class="ttl" x="81" y="44" text-anchor="middle">浏览器</text>
+  <rect class="bx-a" x="315" y="20" width="160" height="290" rx="12"/>
+  <text class="ttl on-a" x="395" y="44" text-anchor="middle">我们的 Django</text>
+  <rect class="bx-p" x="614" y="20" width="130" height="290" rx="12"/>
+  <text class="ttl on-p" x="679" y="44" text-anchor="middle">Stripe</text>
+
+  <path class="ln" d="M148 70 H311" marker-end="url(#ar)"/>
+  <text class="sm" x="230" y="64" text-anchor="middle">① POST 下单 → 订单 ID 存会话</text>
+  <path class="ln" d="M313 94 H150" marker-end="url(#ar)"/>
+  <text class="sm" x="230" y="88" text-anchor="middle">302 → GET /payment/process/ 订单摘要</text>
+
+  <path class="ln" d="M148 124 H311" marker-end="url(#ar)"/>
+  <text class="sm" x="230" y="118" text-anchor="middle">② 点 Pay now（POST）</text>
+  <path class="ln-a" d="M477 136 H610" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="545" y="130" text-anchor="middle">③ Session.create(…)</text>
+  <path class="ln-a" d="M612 156 H479" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="545" y="150" text-anchor="middle">session.url</text>
+  <path class="ln" d="M313 170 H150" marker-end="url(#ar)"/>
+  <text class="sm" x="230" y="164" text-anchor="middle">④ 303 → Stripe 收银台</text>
+
+  <path class="ln-p" d="M148 204 H610" marker-end="url(#ar-p)"/>
+  <text class="sm on-p" x="400" y="198" text-anchor="middle">⑤ 用户在 Stripe 页面输入卡号并付款（卡号不经过我们）</text>
+
+  <path class="ln-p" d="M612 236 H150" marker-end="url(#ar-p)"/>
+  <text class="sm on-p" x="480" y="230" text-anchor="middle">⑥ 跳回 success_url / cancel_url</text>
+
+  <path class="ln-g" d="M612 280 H479" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="545" y="274" text-anchor="middle">⑦ Webhook（服务器之间）</text>
+  <text class="sm on-g" x="395" y="298" text-anchor="middle">标记 paid，发发票</text>
+</svg>
+<figcaption>图 9-1　⑥ 只是“把用户带回来”，⑦ 才是“钱到了”的可靠依据</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="orders/views.py（下单后改为跳转支付）">
+<pre>
+order_created.delay(order.id)
+request.session['order_id'] = order.id       # 把订单 ID 交给支付流程
+return redirect('payment:process')
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="payment/views.py">
+<pre>
+from decimal import Decimal
+
+import stripe
+from django.conf import settings
+from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
+from orders.models import Order
+
+stripe.api_key = settings.STRIPE_SECRET_KEY
+stripe.api_version = settings.STRIPE_API_VERSION
+
+
+def payment_process(request):
+    order_id = request.session.get('order_id')
+    order = get_object_or_404(Order, id=order_id)
+
+    if request.method == 'POST':
+        success_url = request.build_absolute_uri(reverse('payment:completed'))
+        cancel_url = request.build_absolute_uri(reverse('payment:canceled'))
+        session_data = {
+            'mode': 'payment',                      # 一次性付款（另有 subscription、setup）
+            'client_reference_id': order.id,        # 用来把 Stripe 的支付对回我们的订单
+            'success_url': success_url,
+            'cancel_url': cancel_url,
+            'line_items': [],
+        }
+        for item in order.items.all():
+            session_data['line_items'].append({
+                'price_data': {
+                    'unit_amount': int(item.price * Decimal('100')),   # 以“分”为单位的整数
+                    'currency': 'usd',
+                    'product_data': {'name': item.product.name},
+                },
+                'quantity': item.quantity,
+            })
+        session = stripe.checkout.Session.create(**session_data)
+        return redirect(session.url, code=303)      # POST 之后用 303 跳转
+    else:
+        return render(request, 'payment/process.html', locals())
+
+
+def payment_completed(request):
+    return render(request, 'payment/completed.html')
+
+
+def payment_canceled(request):
+    return render(request, 'payment/canceled.html')
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>测试卡号</th><th>结果</th></tr>
+  <tr><td><code>4242 4242 4242 4242</code></td><td>支付成功</td></tr>
+  <tr><td><code>4000 0000 0000 0002</code></td><td>支付失败（被拒）</td></tr>
+  <tr><td><code>4000 0025 0000 3155</code></td><td>需要 3D Secure 验证</td></tr>
+</table>
+</div>
+<p>CVC 任意 3 位，有效期任意未来日期。在 Stripe 后台的 Payments 页可以看到每笔支付的完整事件时间线（Checkout Session → PaymentIntent → Charge）。</p>
+
+<h2 id="webhook">Webhook：可靠地接收支付结果</h2>
+
+<p>
+  为什么不在 <code>payment_completed</code> 页面里把订单标记为已付款？因为用户付完款可能<strong>直接关掉浏览器</strong>，
+  也可能有人直接访问 <code>/payment/completed/</code>。可靠的做法是让 Stripe 主动调用我们的一个 URL —— 这就是 Webhook（回调）。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="Webhook 处理：验证 Stripe-Signature 签名，确认事件类型和支付状态，找到订单并标记已付款，保存支付 ID，异步发送发票">
+  <rect class="bx-p" x="16" y="90" width="140" height="80" rx="10"/>
+  <text class="ttl on-p" x="86" y="116" text-anchor="middle">Stripe</text>
+  <text class="mono sm" x="86" y="138" text-anchor="middle">POST /payment/</text>
+  <text class="mono sm" x="86" y="156" text-anchor="middle">webhook/</text>
+  <path class="ln-p" d="M158 130 H196" marker-end="url(#ar-p)"/>
+
+  <rect class="bx-r" x="200" y="20" width="170" height="90" rx="10"/>
+  <text class="ttl on-r" x="285" y="44" text-anchor="middle">① 验证签名</text>
+  <text class="sm" x="285" y="66" text-anchor="middle">construct_event(payload,</text>
+  <text class="sm" x="285" y="84" text-anchor="middle">Stripe-Signature, secret)</text>
+  <text class="sm on-r" x="285" y="102" text-anchor="middle">失败 → 400</text>
+
+  <rect class="bx-b" x="200" y="150" width="170" height="90" rx="10"/>
+  <text class="ttl on-b" x="285" y="174" text-anchor="middle">② 过滤事件</text>
+  <text class="mono sm" x="285" y="196" text-anchor="middle">checkout.session</text>
+  <text class="mono sm" x="285" y="214" text-anchor="middle">.completed 且 paid</text>
+  <path class="ln" d="M285 112 V146" marker-end="url(#ar)"/>
+
+  <path class="ln" d="M372 195 H410" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="414" y="150" width="160" height="90" rx="10"/>
+  <text class="ttl on-a" x="494" y="174" text-anchor="middle">③ 更新订单</text>
+  <text class="mono sm" x="494" y="196" text-anchor="middle">client_reference_id</text>
+  <text class="mono sm" x="494" y="214" text-anchor="middle">paid=True, stripe_id</text>
+
+  <path class="ln" d="M576 195 H614" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="618" y="150" width="126" height="90" rx="10"/>
+  <text class="ttl on-g" x="681" y="174" text-anchor="middle">④ Celery</text>
+  <text class="sm" x="681" y="196" text-anchor="middle">生成 PDF 发票</text>
+  <text class="sm" x="681" y="214" text-anchor="middle">发邮件</text>
+
+  <rect class="bx-d" x="414" y="20" width="330" height="96" rx="10"/>
+  <text class="ttl" x="579" y="44" text-anchor="middle">签名为什么重要</text>
+  <text class="sm" x="430" y="68">Webhook URL 是公开的，谁都能 POST</text>
+  <text class="sm" x="430" y="88">Stripe 用 whsec_ 密钥对“时间戳+内容”做 HMAC</text>
+  <text class="sm" x="430" y="108">不验签 = 任何人都能伪造“已付款”通知</text>
+</svg>
+<figcaption>图 9-2　Webhook 处理的四步；Webhook 必须 <code>@csrf_exempt</code>，因为请求来自 Stripe 而非你的页面</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="payment/webhooks.py">
+<pre>
+import stripe
+from django.conf import settings
+from django.http import HttpResponse
+from django.views.decorators.csrf import csrf_exempt
+from orders.models import Order
+
+from .tasks import payment_completed
+
+
+@csrf_exempt
+def stripe_webhook(request):
+    payload = request.body
+    sig_header = request.META['HTTP_STRIPE_SIGNATURE']
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, settings.STRIPE_WEBHOOK_SECRET)
+    except ValueError:                                  # 内容不是合法 JSON
+        return HttpResponse(status=400)
+    except stripe.error.SignatureVerificationError:     # 签名不对
+        return HttpResponse(status=400)
+
+    if event.type == 'checkout.session.completed':
+        session = event.data.object
+        if session.mode == 'payment' and session.payment_status == 'paid':
+            try:
+                order = Order.objects.get(id=session.client_reference_id)
+            except Order.DoesNotExist:
+                return HttpResponse(status=404)
+            order.paid = True
+            order.stripe_id = session.payment_intent     # 保存支付 ID，便于对账
+            order.save()
+            payment_completed.delay(order.id)
+    return HttpResponse(status=200)                     # 2xx 表示“收到了”，否则 Stripe 会重试
+</pre>
+</div>
+
+<p>本地没有公网地址，用 Stripe CLI 把事件转发到本机：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+brew install stripe/stripe-cli/stripe       # 或从 GitHub 下载
+stripe login
+stripe listen --forward-to 127.0.0.1:8000/payment/webhook/
+# 输出里的 whsec_… 就是 STRIPE_WEBHOOK_SECRET
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 事件顺序不保证</div>
+  <p>付一次款会收到 <code>payment_intent.created</code>、<code>payment_intent.succeeded</code>、<code>charge.succeeded</code>、<code>checkout.session.completed</code> 等多个事件，顺序不固定，同一事件也可能<strong>重复投递</strong>。所以只处理你关心的那一种，并让处理逻辑“做两次也没关系”（幂等）。</p>
+</div>
+
+<h3>在 Admin 里链接到 Stripe 支付详情</h3>
+
+<div class="code" data-lang="py" data-file="orders/models.py">
+<pre>
+class Order(models.Model):
+    # ...
+    stripe_id = models.CharField(max_length=250, blank=True)
+
+    def get_stripe_url(self):
+        if not self.stripe_id:
+            return ''
+        path = '/test/' if '_test_' in settings.STRIPE_SECRET_KEY else '/'
+        return f'https://dashboard.stripe.com{path}payments/{self.stripe_id}'
+</pre>
+</div>
+
+<h2 id="admin">扩展管理后台</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="Admin 的四种扩展方式：list_display 可调用对象、批量动作、自定义视图、覆盖模板">
+  <rect class="bx-b" x="16" y="30" width="170" height="150" rx="10"/>
+  <text class="ttl on-b" x="101" y="54" text-anchor="middle">list_display 函数</text>
+  <text class="sm" x="101" y="80" text-anchor="middle">为每行生成一列</text>
+  <text class="sm" x="101" y="100" text-anchor="middle">“Stripe payment”</text>
+  <text class="sm" x="101" y="120" text-anchor="middle">“View”“PDF” 链接</text>
+  <rect class="bx-a" x="202" y="30" width="170" height="150" rx="10"/>
+  <text class="ttl on-a" x="287" y="54" text-anchor="middle">actions 批量动作</text>
+  <text class="sm" x="287" y="80" text-anchor="middle">勾选多行 → 执行</text>
+  <text class="sm" x="287" y="100" text-anchor="middle">“Export to CSV”</text>
+  <text class="sm" x="287" y="120" text-anchor="middle">(modeladmin, request, qs)</text>
+  <rect class="bx-g" x="388" y="30" width="170" height="150" rx="10"/>
+  <text class="ttl on-g" x="473" y="54" text-anchor="middle">自定义视图</text>
+  <text class="sm" x="473" y="80" text-anchor="middle">订单详情、PDF</text>
+  <text class="sm" x="473" y="100" text-anchor="middle">继承 admin/base_site</text>
+  <text class="sm" x="473" y="120" text-anchor="middle">保持后台外观</text>
+  <rect class="bx-p" x="574" y="30" width="170" height="150" rx="10"/>
+  <text class="ttl on-p" x="659" y="54" text-anchor="middle">覆盖模板</text>
+  <text class="sm" x="659" y="80" text-anchor="middle">同路径同名放进</text>
+  <text class="sm" x="659" y="100" text-anchor="middle">自己的 templates/</text>
+  <text class="sm" x="659" y="120" text-anchor="middle">（第 10 章用到）</text>
+  <text class="sm" x="380" y="204" text-anchor="middle">从左到右，定制程度越来越高，维护成本也越来越高</text>
+</svg>
+<figcaption>图 9-3　Admin 的扩展点</figcaption>
+</figure>
+
+<h3>批量动作：导出 CSV</h3>
+
+<div class="code" data-lang="py" data-file="orders/admin.py">
+<pre>
+import csv
+import datetime
+
+from django.http import HttpResponse
+
+
+def export_to_csv(modeladmin, request, queryset):
+    opts = modeladmin.model._meta
+    response = HttpResponse(content_type='text/csv')
+    response['Content-Disposition'] = f'attachment; filename={opts.verbose_name}.csv'
+    writer = csv.writer(response)          # HttpResponse 是类文件对象，可以直接写
+    fields = [f for f in opts.get_fields() if not f.many_to_many and not f.one_to_many]
+    writer.writerow([field.verbose_name for field in fields])     # 表头
+    for obj in queryset:
+        data_row = []
+        for field in fields:
+            value = getattr(obj, field.name)
+            if isinstance(value, datetime.datetime):
+                value = value.strftime('%d/%m/%Y')
+            data_row.append(value)
+        writer.writerow(data_row)
+    return response
+
+
+export_to_csv.short_description = 'Export to CSV'
+
+
+@admin.register(Order)
+class OrderAdmin(admin.ModelAdmin):
+    # ...
+    actions = [export_to_csv]
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 更完整的导入导出</div>
+  <p>需要 Excel、导入、字段映射时用 <code>django-import-export</code>；数据量很大时应放到 Celery 后台生成（<code>django-import-export-celery</code>），否则请求可能超时。</p>
+</div>
+
+<h3>自定义 Admin 视图</h3>
+
+<div class="code" data-lang="py" data-file="orders/views.py">
+<pre>
+from django.contrib.admin.views.decorators import staff_member_required
+
+
+@staff_member_required                     # 要求 is_active 且 is_staff
+def admin_order_detail(request, order_id):
+    order = get_object_or_404(Order, id=order_id)
+    return render(request, 'admin/orders/order/detail.html', {'order': order})
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="orders/templates/admin/orders/order/detail.html（节选）">
+<pre>
+{% extends "admin/base_site.html" %}
+
+{% block title %}Order {{ order.id }} {{ block.super }}{% endblock %}
+
+{% block breadcrumbs %}
+  &lt;div class="breadcrumbs"&gt;
+    &lt;a href="{% url "admin:index" %}"&gt;Home&lt;/a&gt; &amp;rsaquo;
+    &lt;a href="{% url "admin:orders_order_changelist" %}"&gt;Orders&lt;/a&gt; &amp;rsaquo;
+    &lt;a href="{% url "admin:orders_order_change" order.id %}"&gt;Order {{ order.id }}&lt;/a&gt; &amp;rsaquo; Detail
+  &lt;/div&gt;
+{% endblock %}
+
+{% block content %}
+  ... 订单信息表格、商品明细 ...
+{% endblock %}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; Admin 的 URL 名字规律</div>
+  <p><code>admin:&lt;应用&gt;_&lt;模型&gt;_changelist</code>（列表）、<code>_add</code>（新增）、<code>_change</code>（编辑，需要 ID）、<code>_delete</code>、<code>_history</code>。<code>{{ block.super }}</code> 表示“保留父模板这个块的内容再追加”。</p>
+</div>
+
+<div class="code" data-lang="py" data-file="orders/admin.py">
+<pre>
+from django.urls import reverse
+from django.utils.safestring import mark_safe
+
+
+def order_detail(obj):
+    url = reverse('orders:admin_order_detail', args=[obj.id])
+    return mark_safe(f'&lt;a href="{url}"&gt;View&lt;/a&gt;')
+
+
+def order_pdf(obj):
+    url = reverse('orders:admin_order_pdf', args=[obj.id])
+    return mark_safe(f'&lt;a href="{url}"&gt;PDF&lt;/a&gt;')
+
+order_pdf.short_description = 'Invoice'     # 列标题
+</pre>
+</div>
+
+<h2 id="pdf">PDF 发票</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="PDF 生成流程：Django 模板渲染成 HTML，WeasyPrint 结合 CSS 转为 PDF，输出到 HTTP 响应或内存缓冲区作为邮件附件">
+  <rect class="bx" x="16" y="50" width="150" height="60" rx="10"/>
+  <text class="mono sm" x="91" y="76" text-anchor="middle">pdf.html 模板</text>
+  <text class="sm" x="91" y="96" text-anchor="middle">+ {'order': order}</text>
+  <path class="ln" d="M168 80 H212" marker-end="url(#ar)"/>
+  <text class="mono sm" x="190" y="70" text-anchor="middle">render_to_string</text>
+  <rect class="bx-b" x="216" y="50" width="120" height="60" rx="10"/>
+  <text class="ttl on-b" x="276" y="84" text-anchor="middle">HTML 字符串</text>
+  <path class="ln" d="M338 80 H382" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="386" y="40" width="170" height="80" rx="10"/>
+  <text class="ttl on-a" x="471" y="64" text-anchor="middle">WeasyPrint</text>
+  <text class="sm" x="471" y="86" text-anchor="middle">+ css/pdf.css</text>
+  <text class="sm" x="471" y="104" text-anchor="middle">（finders.find 定位）</text>
+  <path class="ln-a" d="M558 64 L604 44" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M558 96 L604 116" marker-end="url(#ar-a)"/>
+  <rect class="bx-g" x="608" y="16" width="136" height="52" rx="8"/>
+  <text class="sm on-g" x="676" y="38" text-anchor="middle">HttpResponse</text>
+  <text class="sm" x="676" y="56" text-anchor="middle">后台下载</text>
+  <rect class="bx-g" x="608" y="92" width="136" height="52" rx="8"/>
+  <text class="sm on-g" x="676" y="114" text-anchor="middle">BytesIO</text>
+  <text class="sm" x="676" y="132" text-anchor="middle">邮件附件</text>
+</svg>
+<figcaption>图 9-4　用 HTML + CSS 做排版，比用 ReportLab 逐行画 PDF 省事得多</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+# 先按官方文档安装 Pango 等系统依赖，然后：
+python -m pip install WeasyPrint==61.2
+python manage.py collectstatic          # 需要先设置 STATIC_ROOT = BASE_DIR / 'static'
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="orders/views.py">
+<pre>
+import weasyprint
+from django.contrib.staticfiles import finders
+from django.template.loader import render_to_string
+
+
+@staff_member_required
+def admin_order_pdf(request, order_id):
+    order = get_object_or_404(Order, id=order_id)
+    html = render_to_string('orders/order/pdf.html', {'order': order})
+    response = HttpResponse(content_type='application/pdf')
+    response['Content-Disposition'] = f'filename=order_{order.id}.pdf'
+    weasyprint.HTML(string=html).write_pdf(
+        response, stylesheets=[weasyprint.CSS(finders.find('css/pdf.css'))])
+    return response
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="payment/tasks.py">
+<pre>
+from io import BytesIO
+
+import weasyprint
+from celery import shared_task
+from django.contrib.staticfiles import finders
+from django.core.mail import EmailMessage
+from django.template.loader import render_to_string
+from orders.models import Order
+
+
+@shared_task
+def payment_completed(order_id):
+    order = Order.objects.get(id=order_id)
+    email = EmailMessage(f'My Shop - Invoice no. {order.id}',
+                         'Please, find attached the invoice for your recent purchase.',
+                         'admin@myshop.com', [order.email])
+    html = render_to_string('orders/order/pdf.html', {'order': order})
+    out = BytesIO()                                              # 内存中的“文件”
+    weasyprint.HTML(string=html).write_pdf(
+        out, stylesheets=[weasyprint.CSS(finders.find('css/pdf.css'))])
+    email.attach(f'order_{order.id}.pdf', out.getvalue(), 'application/pdf')
+    email.send()
+</pre>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 9 章代码点评 <small>Chapter09/myshop</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 以 Webhook 为准、校验签名、密钥走环境变量</h4>
+    <p>订单状态只在验签通过的 Webhook 里更新，成功页只做展示；锁定了 Stripe API 版本；POST 后用 303 跳转；PDF 生成放在 Celery 任务里。支付集成的大方向完全正确。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> Webhook 不幂等：重复投递会重复发发票 <span class="src">Chapter09/myshop/payment/webhooks.py:40</span></h4>
+    <p>
+      Stripe 明确说明同一事件可能投递多次（网络超时、你返回了非 2xx 等）。现在的代码每收到一次 <code>checkout.session.completed</code> 就发一次发票邮件。
+      用“条件更新”保证只有第一次真正生效：
+    </p>
+<div class="code" data-lang="py"><pre>
+from django.db import transaction
+
+updated = Order.objects.filter(
+    id=session.client_reference_id, paid=False,          # 只更新“还没付”的订单
+).update(paid=True, stripe_id=session.payment_intent)
+if updated:                                              # 0 表示已经处理过
+    transaction.on_commit(lambda: payment_completed.delay(int(session.client_reference_id)))
+</pre></div>
+    <p>另外 <code>request.META['HTTP_STRIPE_SIGNATURE']</code> 在缺少该请求头时会抛 <code>KeyError</code> 变成 500，应改用 <code>.get()</code>；视图也应加 <code>@require_POST</code>；严谨起见还应核对 <code>session.amount_total</code> 与订单金额一致。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 已付款的订单还能再付一次 <span class="src">payment/views.py:15</span></h4>
+    <p><code>payment_process</code> 只根据会话里的 <code>order_id</code> 取订单，不检查 <code>order.paid</code>。用户在浏览器里后退再点“Pay now”，就会创建第二个 Checkout Session 重复扣款。应在开头判断：已付款就重定向到订单完成页。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 不要用 <code>locals()</code> 传模板上下文 <span class="tag ts">TSD：模板</span></h4>
+    <p><code>render(request, 'payment/process.html', locals())</code> 会把视图里的所有局部变量都塞进模板，模板到底依赖哪些变量不再一目了然，以后在视图里加一个临时变量也可能意外覆盖模板变量。显式写出：<code>{'order': order}</code>。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> Admin 代码的现代写法：<code>format_html</code> 与装饰器</h4>
+    <p>
+      用 f-string 拼 HTML 再 <code>mark_safe</code>，一旦拼进的值来自外部（这里的 <code>stripe_id</code> 来自 Webhook），就有注入风险。
+      <code>format_html()</code> 会自动转义参数。另外 Django 3.2 起推荐用 <code>@admin.display</code> 和 <code>@admin.action</code> 装饰器代替给函数设置 <code>short_description</code> 属性：
+    </p>
+<div class="code" data-lang="py"><pre>
+from django.utils.html import format_html
+
+
+@admin.register(Order)
+class OrderAdmin(admin.ModelAdmin):
+    list_display = [..., 'order_payment', 'order_pdf']
+    actions = ['export_to_csv']
+
+    @admin.display(description='Stripe payment')
+    def order_payment(self, obj):
+        if not obj.stripe_id:
+            return ''
+        return format_html('&lt;a href="{}" target="_blank"&gt;{}&lt;/a&gt;',
+                           obj.get_stripe_url(), obj.stripe_id)
+
+    @admin.action(description='Export to CSV')
+    def export_to_csv(self, request, queryset):
+        ...
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 自定义后台视图应挂在 Admin 自己的 URL 下</h4>
+    <p>
+      现在的后台视图注册在 <code>orders.urls</code>（地址是 <code>/orders/admin/order/1/</code>），只用 <code>@staff_member_required</code> 保护：
+      任何 staff 用户都能看任何订单，不管他有没有 “view order” 权限。更好的做法是通过 <code>ModelAdmin.get_urls()</code> 注册，并用 <code>self.admin_site.admin_view()</code> 包装：
+    </p>
+<div class="code" data-lang="py"><pre>
+from django.urls import path
+
+
+class OrderAdmin(admin.ModelAdmin):
+    def get_urls(self):
+        return [
+            path('&lt;int:order_id&gt;/pdf/', self.admin_site.admin_view(self.pdf_view),
+                 name='orders_order_pdf'),
+        ] + super().get_urls()
+
+    def pdf_view(self, request, order_id):
+        order = get_object_or_404(Order, pk=order_id)
+        if not self.has_view_permission(request, order):
+            raise PermissionDenied
+        ...
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> CSV 导出的两个隐患</h4>
+    <p>① <strong>CSV 公式注入</strong>：顾客把名字填成 <code>=HYPERLINK("http://evil…")</code>，运营用 Excel 打开导出文件时会被当作公式执行。导出用户输入的字段时，应给以 <code>= + - @</code> 开头的值前加单引号。② 大量数据时应使用 <code>StreamingHttpResponse</code> 边查边写，避免一次性占用大量内存；日期格式化丢掉了时间信息，按需保留。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 金额与货币</h4>
+    <p><code>int(item.price * Decimal('100'))</code> 对两位小数的价格没问题，但更稳妥的写法是 <code>int((item.price * 100).quantize(Decimal('1')))</code>；货币写死 <code>'usd'</code>，零小数位货币（如日元）不需要乘 100。多币种商店应把币种作为订单字段保存。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>支付交给支付网关；Stripe Checkout 让卡号完全不经过你的服务器。</li>
+  <li>成功页只用于展示，Webhook 才是“已付款”的可信来源；Webhook 必须验签、必须幂等。</li>
+  <li>用 <code>client_reference_id</code> 把支付和订单关联，保存 <code>payment_intent</code> ID 便于对账。</li>
+  <li>Admin 可通过 list_display 函数、批量动作、自定义视图、覆盖模板四种方式扩展。</li>
+  <li>WeasyPrint 把 HTML 渲染成 PDF，可以写入响应或内存缓冲区作为附件。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 <code>stripe trigger checkout.session.completed</code> 或重放同一事件，观察是否收到两封发票邮件；然后按点评修复。</li>
+    <li>用测试卡 <code>4000 0000 0000 0002</code> 付款，观察 Stripe 后台和你的 Webhook 分别收到了什么事件。</li>
+    <li>把 Admin 中的三个链接函数改写为 <code>@admin.display</code> 方法并使用 <code>format_html</code>。</li>
+    <li>给 <code>OrderAdmin</code> 加一个“标记为已发货”的批量动作（需要先给 Order 加一个字段）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

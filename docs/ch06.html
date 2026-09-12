@@ -1,0 +1,676 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 6 章 · 分享内容 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="6">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 6 章 · 项目二：图片书签社交网站</span>
+<h1>分享内容</h1>
+<p class="lede">
+  这一章做出网站的核心玩法：用户在<strong>任何网站</strong>上点一下浏览器书签栏里的按钮，就能挑一张图片收藏到我们的站点。
+  我们会用到多对多关系、重写表单的 <code>save()</code>、JavaScript 书签小工具（bookmarklet）、缩略图，
+  以及用 <code>fetch()</code> 实现的“点赞不刷新”和“无限滚动”。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 <code>ManyToManyField</code> 表示“用户点赞图片”</li>
+    <li>在 <code>clean_&lt;field&gt;()</code> 中校验字段，重写 <code>ModelForm.save()</code> 下载远程图片</li>
+    <li>理解 bookmarklet 的“启动器 + 远程脚本”结构</li>
+    <li>用 easy-thumbnails 生成缩略图</li>
+    <li>在 JavaScript 请求中携带 CSRF 令牌，返回 <code>JsonResponse</code></li>
+    <li>用同一个视图同时服务整页请求和“只要列表片段”的异步请求，实现无限滚动</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="model">Image 模型与多对多关系</h2>
+
+<div class="code" data-lang="py" data-file="images/models.py">
+<pre>
+from django.conf import settings
+from django.db import models
+from django.urls import reverse
+from django.utils.text import slugify
+
+
+class Image(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, related_name='images_created',
+                             on_delete=models.CASCADE)
+    title = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=200, blank=True)
+    url = models.URLField(max_length=2000)                    # 原图地址
+    image = models.ImageField(upload_to='images/%Y/%m/%d/')   # 下载到本站的文件
+    description = models.TextField(blank=True)
+    created = models.DateTimeField(auto_now_add=True)
+    users_like = models.ManyToManyField(settings.AUTH_USER_MODEL,
+                                        related_name='images_liked', blank=True)
+
+    class Meta:
+        indexes = [models.Index(fields=['-created'])]
+        ordering = ['-created']
+
+    def __str__(self):
+        return self.title
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.title)          # 自动生成 slug
+        super().save(*args, **kwargs)
+
+    def get_absolute_url(self):
+        return reverse('images:detail', args=[self.id, self.slug])
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="多对多关系由中间表 images_image_users_like 实现，两个外键分别指向图片和用户">
+  <rect class="bx-a" x="20" y="50" width="180" height="120" rx="10"/>
+  <text class="ttl on-a" x="110" y="74" text-anchor="middle">images_image</text>
+  <text class="mono sm" x="36" y="100">id = 5</text>
+  <text class="mono sm" x="36" y="120">title = 'Cranes'</text>
+  <text class="mono sm" x="36" y="140">user_id = 1（上传者）</text>
+
+  <rect class="bx-d" x="270" y="40" width="220" height="140" rx="10"/>
+  <text class="ttl" x="380" y="64" text-anchor="middle">images_image_users_like</text>
+  <text class="mono sm" x="290" y="90">id  image_id  user_id</text>
+  <text class="mono sm" x="290" y="112">1   5         2</text>
+  <text class="mono sm" x="290" y="134">2   5         3</text>
+  <text class="mono sm" x="290" y="156">3   8         2</text>
+
+  <rect class="bx-b" x="560" y="50" width="180" height="120" rx="10"/>
+  <text class="ttl on-b" x="650" y="74" text-anchor="middle">auth_user</text>
+  <text class="mono sm" x="576" y="100">id = 2  bob</text>
+  <text class="mono sm" x="576" y="120">id = 3  eve</text>
+
+  <path class="ln-a" d="M268 120 H202" marker-end="url(#ar-a)"/>
+  <path class="ln-b" d="M492 120 H556" marker-end="url(#ar-b)"/>
+  <text class="sm" x="380" y="206" text-anchor="middle">image.users_like.all()  ⇄  user.images_liked.all()　　add() / remove() / clear() 都是幂等的</text>
+</svg>
+<figcaption>图 6-1　Django 自动创建中间表；需要额外字段（如点赞时间）时可用 <code>through=</code> 自定义中间模型</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 同一张表的两条关系必须区分 related_name</div>
+  <p><code>user</code>（外键）和 <code>users_like</code>（多对多）都指向用户模型。如果不写 <code>related_name</code>，两个反向访问器都叫 <code>image_set</code>，Django 会报冲突。所以这里分别叫 <code>images_created</code> 和 <code>images_liked</code>。</p>
+</div>
+
+<h2 id="form">表单：校验 URL，下载图片</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="ImageCreateForm 的处理流程：clean_url 校验扩展名，save 下载图片并写入 ImageField，视图补上 user 再保存">
+  <rect class="bx" x="16" y="30" width="150" height="60" rx="10"/>
+  <text class="sm" x="91" y="56" text-anchor="middle">POST：title、url</text>
+  <text class="sm" x="91" y="74" text-anchor="middle">description</text>
+  <path class="ln" d="M168 60 H206" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="210" y="30" width="160" height="60" rx="10"/>
+  <text class="mono sm on-b" x="290" y="56" text-anchor="middle">clean_url()</text>
+  <text class="sm" x="290" y="74" text-anchor="middle">扩展名是 jpg/png？</text>
+  <path class="ln" d="M372 60 H410" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="414" y="20" width="330" height="90" rx="10"/>
+  <text class="mono sm on-a" x="579" y="42" text-anchor="middle">form.save(commit=False)（重写）</text>
+  <text class="mono sm" x="428" y="64">response = requests.get(image_url)</text>
+  <text class="mono sm" x="428" y="84">image.image.save(name, ContentFile(…),</text>
+  <text class="mono sm" x="428" y="102">                 save=False)</text>
+  <path class="ln-a" d="M579 112 V140" marker-end="url(#ar-a)"/>
+  <rect class="bx-g" x="414" y="144" width="330" height="54" rx="10"/>
+  <text class="mono sm on-g" x="579" y="166" text-anchor="middle">视图：new_image.user = request.user</text>
+  <text class="mono sm" x="579" y="186" text-anchor="middle">new_image.save() → redirect(详情页)</text>
+</svg>
+<figcaption>图 6-2　“下载远程文件”封装在表单的 save() 里，视图保持简洁</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="images/forms.py">
+<pre>
+import requests
+from django import forms
+from django.core.files.base import ContentFile
+from django.utils.text import slugify
+
+from .models import Image
+
+
+class ImageCreateForm(forms.ModelForm):
+    class Meta:
+        model = Image
+        fields = ['title', 'url', 'description']
+        widgets = {'url': forms.HiddenInput}          # url 由小工具传入，不让用户看到
+
+    def clean_url(self):
+        url = self.cleaned_data['url']
+        valid_extensions = ['jpg', 'jpeg', 'png']
+        extension = url.rsplit('.', 1)[1].lower()
+        if extension not in valid_extensions:
+            raise forms.ValidationError('The given URL does not match valid image extensions.')
+        return url
+
+    def save(self, force_insert=False, force_update=False, commit=True):
+        image = super().save(commit=False)
+        image_url = self.cleaned_data['url']
+        name = slugify(image.title)
+        extension = image_url.rsplit('.', 1)[1].lower()
+        image_name = f'{name}.{extension}'
+        response = requests.get(image_url)            # 下载图片
+        image.image.save(image_name, ContentFile(response.content), save=False)
+        if commit:
+            image.save()
+        return image
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="images/views.py">
+<pre>
+@login_required
+def image_create(request):
+    if request.method == 'POST':
+        form = ImageCreateForm(data=request.POST)
+        if form.is_valid():
+            new_image = form.save(commit=False)
+            new_image.user = request.user
+            new_image.save()
+            messages.success(request, 'Image added successfully')
+            return redirect(new_image.get_absolute_url())
+    else:
+        form = ImageCreateForm(data=request.GET)      # 用小工具传来的 GET 参数预填表单
+    return render(request, 'images/image/create.html', {'section': 'images', 'form': form})
+</pre>
+</div>
+
+<h2 id="bookmarklet">书签小工具（Bookmarklet）</h2>
+
+<p>
+  Bookmarklet 是一个 <code>href</code> 以 <code>javascript:</code> 开头的书签。点它时，代码在<strong>当前正在浏览的网页</strong>里执行。
+  问题是书签一旦被拖进书签栏就改不了了，所以采用“启动器”模式：书签里只放几行代码，负责从我们的服务器加载真正的脚本。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="书签小工具流程：书签里的启动器从本站加载 bookmarklet.js，在第三方页面上显示图片选择层，选中后打开本站的创建页面">
+  <rect class="bx-p" x="16" y="20" width="220" height="80" rx="10"/>
+  <text class="ttl on-p" x="126" y="44" text-anchor="middle">① 浏览器书签栏</text>
+  <text class="mono sm" x="30" y="68">javascript:(function(){</text>
+  <text class="mono sm" x="30" y="86">  加载 bookmarklet.js …})()</text>
+
+  <rect class="bx" x="270" y="20" width="474" height="160" rx="12"/>
+  <text class="ttl" x="507" y="44" text-anchor="middle">② 任意第三方网站（如 commons.wikimedia.org）</text>
+  <rect class="bx-a" x="290" y="60" width="200" height="104" rx="8"/>
+  <text class="sm on-a" x="390" y="82" text-anchor="middle">注入的 &lt;script&gt;</text>
+  <text class="mono sm" x="302" y="104">bookmarklet.js</text>
+  <text class="sm" x="302" y="124">加载 CSS、插入浮层</text>
+  <text class="sm" x="302" y="144">找出 ≥250×250 的图片</text>
+  <rect class="bx-g" x="510" y="60" width="214" height="104" rx="8"/>
+  <text class="sm on-g" x="617" y="82" text-anchor="middle">浮层：选择一张图片</text>
+  <rect class="bx" x="526" y="94" width="50" height="40" rx="4"/>
+  <rect class="bx-a" x="590" y="94" width="50" height="40" rx="4"/>
+  <rect class="bx" x="654" y="94" width="50" height="40" rx="4"/>
+  <text class="sm" x="615" y="152" text-anchor="middle">点击 ↑</text>
+  <path class="ln-p" d="M238 60 H286" marker-end="url(#ar-p)"/>
+
+  <path class="ln-g" d="M617 182 V214" marker-end="url(#ar-g)"/>
+  <rect class="bx-b" x="270" y="218" width="474" height="70" rx="10"/>
+  <text class="ttl on-b" x="507" y="242" text-anchor="middle">③ 新窗口打开本站</text>
+  <text class="mono sm" x="507" y="266" text-anchor="middle">/images/create/?url=https%3A…cranes.jpg&amp;title=Wikimedia…</text>
+  <text class="sm" x="507" y="282" text-anchor="middle">登录用户补充描述 → 提交 → 服务器下载原图保存</text>
+
+  <rect class="bx-d" x="16" y="130" width="220" height="130" rx="10"/>
+  <text class="ttl" x="126" y="154" text-anchor="middle">为什么要“启动器”</text>
+  <text class="sm" x="30" y="178">书签内容无法远程更新</text>
+  <text class="sm" x="30" y="198">启动器只负责加载远程脚本</text>
+  <text class="sm" x="30" y="218">脚本改了，用户无需重拖书签</text>
+  <text class="sm" x="30" y="238">?r=随机数 防止浏览器缓存</text>
+</svg>
+<figcaption>图 6-3　Bookmarklet = 启动器（存在书签里）+ 真正的脚本（存在我们服务器上）</figcaption>
+</figure>
+
+<div class="code" data-lang="js" data-file="images/templates/bookmarklet_launcher.js（启动器）">
+<pre>
+(function(){
+  if(!window.bookmarklet) {
+    bookmarklet_js = document.body.appendChild(document.createElement('script'));
+    bookmarklet_js.src = '//127.0.0.1:8000/static/js/bookmarklet.js?r=' + Math.floor(Math.random()*9999999999999999);
+    window.bookmarklet = true;
+  }
+  else {
+    bookmarkletLaunch();       // 已经加载过就直接再次打开浮层
+  }
+})();
+</pre>
+</div>
+
+<p>在 dashboard 放一个可以拖进书签栏的链接，<code>{% include %}</code> 把启动器代码塞进 <code>href</code>：</p>
+
+<div class="code" data-lang="html" data-file="account/templates/account/dashboard.html（节选）">
+<pre>
+{% with total_images_created=request.user.images_created.count %}
+  &lt;p&gt;Welcome to your dashboard. You have bookmarked {{ total_images_created }} image{{ total_images_created|pluralize }}.&lt;/p&gt;
+{% endwith %}
+&lt;p&gt;Drag the following button to your bookmarks toolbar → &lt;a href="javascript:{% include "bookmarklet_launcher.js" %}" class="button"&gt;Bookmark it&lt;/a&gt;&lt;/p&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="js" data-file="images/static/js/bookmarklet.js（核心部分）">
+<pre>
+const siteUrl = '//127.0.0.1:8000/';
+const minWidth = 250;
+const minHeight = 250;
+
+// …加载 CSS、插入 #bookmarklet 浮层…
+
+function bookmarkletLaunch() {
+  bookmarklet = document.getElementById('bookmarklet');
+  var imagesFound = bookmarklet.querySelector('.images');
+  imagesFound.innerHTML = '';
+  bookmarklet.style.display = 'block';
+
+  // 找出页面上足够大的 JPEG/PNG 图片
+  images = document.querySelectorAll('img[src$=".jpg"], img[src$=".jpeg"], img[src$=".png"]');
+  images.forEach(image =&gt; {
+    if (image.naturalWidth &gt;= minWidth &amp;&amp; image.naturalHeight &gt;= minHeight) {
+      var imageFound = document.createElement('img');
+      imageFound.src = image.src;
+      imagesFound.append(imageFound);
+    }
+  });
+
+  // 点中某张图：打开本站的创建页面，把图片地址和页面标题带过去
+  imagesFound.querySelectorAll('img').forEach(image =&gt; {
+    image.addEventListener('click', function(event){
+      bookmarklet.style.display = 'none';
+      window.open(siteUrl + 'images/create/?url=' + encodeURIComponent(event.target.src)
+                  + '&amp;title=' + encodeURIComponent(document.title), '_blank');
+    });
+  });
+}
+bookmarkletLaunch();
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 为什么上一章要折腾 HTTPS</div>
+  <p>绝大多数网站都是 HTTPS，浏览器禁止在 HTTPS 页面里加载 HTTP 脚本（混合内容）。所以我们的脚本也必须通过 HTTPS 提供。生产环境可以用 Let's Encrypt 免费证书。</p>
+</div>
+
+<h2 id="thumbnails">详情页与缩略图</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install easy-thumbnails==2.8.5
+# INSTALLED_APPS 加 'easy_thumbnails'，然后 migrate
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="images/templates/images/image/detail.html（节选）">
+<pre>
+{% load thumbnail %}
+&lt;a href="{{ image.image.url }}"&gt;
+  &lt;img src="{% thumbnail image.image 300x0 %}" class="image-detail"&gt;   {# 宽 300，高按比例 #}
+&lt;/a&gt;
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 150" role="img" aria-label="首次请求时生成缩略图文件并缓存，之后直接使用">
+  <rect class="bx" x="16" y="30" width="200" height="80" rx="10"/>
+  <text class="sm" x="116" y="56" text-anchor="middle">原图 cranes.jpg</text>
+  <text class="sm" x="116" y="76" text-anchor="middle">4000×3000，5 MB</text>
+  <path class="ln-a" d="M218 70 H300" marker-end="url(#ar-a)"/>
+  <text class="mono sm" x="259" y="60" text-anchor="middle">300x0</text>
+  <rect class="bx-a" x="304" y="30" width="240" height="80" rx="10"/>
+  <text class="mono sm on-a" x="424" y="56" text-anchor="middle">cranes.jpg.300x0_q85.jpg</text>
+  <text class="sm" x="424" y="76" text-anchor="middle">300×225，约 30 KB</text>
+  <text class="sm" x="424" y="96" text-anchor="middle">第一次访问时生成，之后复用</text>
+  <rect class="bx-d" x="570" y="30" width="174" height="80" rx="10"/>
+  <text class="sm" x="657" y="56" text-anchor="middle">crop="smart"</text>
+  <text class="sm" x="657" y="76" text-anchor="middle">裁掉信息量最少的边缘</text>
+  <text class="sm" x="657" y="96" text-anchor="middle">q85 = JPEG 质量</text>
+</svg>
+<figcaption>图 6-4　缩略图既统一了尺寸，也大幅减少了流量</figcaption>
+</figure>
+
+<h2 id="ajax">用 fetch 实现点赞</h2>
+
+<p>点“赞”不需要刷新整页：浏览器用 JavaScript 发一个 POST 请求，服务器返回 JSON，页面局部更新。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="点赞流程：点击按钮，fetch 带 X-CSRFToken 头 POST 到 image_like 视图，返回 JSON，前端切换按钮文字和计数">
+  <rect class="bx" x="16" y="30" width="190" height="190" rx="12"/>
+  <text class="ttl" x="111" y="54" text-anchor="middle">浏览器（详情页）</text>
+  <rect class="bx-a" x="36" y="70" width="150" height="34" rx="6"/>
+  <text class="sm on-a" x="111" y="92" text-anchor="middle">&lt;a data-action="like"&gt;</text>
+  <text class="sm" x="36" y="130">① 点击 → preventDefault</text>
+  <text class="sm" x="36" y="150">② FormData: id, action</text>
+  <text class="sm" x="36" y="186">⑤ 切换 like/unlike</text>
+  <text class="sm" x="36" y="206">　 计数 ±1</text>
+
+  <path class="ln-a" d="M208 110 H440" marker-end="url(#ar-a)"/>
+  <text class="mono sm on-a" x="324" y="96" text-anchor="middle">③ POST /images/like/</text>
+  <text class="mono sm" x="324" y="126" text-anchor="middle">X-CSRFToken: {csrftoken}</text>
+
+  <rect class="bx-b" x="444" y="30" width="300" height="150" rx="12"/>
+  <text class="ttl on-b" x="594" y="54" text-anchor="middle">@login_required @require_POST</text>
+  <text class="mono sm" x="460" y="80">image_like(request)</text>
+  <text class="mono sm" x="460" y="102">image.users_like.add(user)</text>
+  <text class="mono sm" x="460" y="122">  或 .remove(user)</text>
+  <text class="mono sm" x="460" y="150">return JsonResponse({'status':'ok'})</text>
+
+  <path class="ln-g" d="M442 196 H210" marker-end="url(#ar-g)"/>
+  <text class="mono sm on-g" x="324" y="214" text-anchor="middle">④ {"status": "ok"}</text>
+</svg>
+<figcaption>图 6-5　异步请求同样要带 CSRF 令牌 —— 放在 <code>X-CSRFToken</code> 请求头里</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="images/views.py">
+<pre>
+from django.http import JsonResponse
+from django.views.decorators.http import require_POST
+
+
+@login_required
+@require_POST
+def image_like(request):
+    image_id = request.POST.get('id')
+    action = request.POST.get('action')
+    if image_id and action:
+        try:
+            image = Image.objects.get(id=image_id)
+            if action == 'like':
+                image.users_like.add(request.user)
+            else:
+                image.users_like.remove(request.user)
+            return JsonResponse({'status': 'ok'})
+        except Image.DoesNotExist:
+            pass
+    return JsonResponse({'status': 'error'})
+</pre>
+</div>
+
+<p>基础模板里读取 CSRF Cookie，并提供一个 <code>domready</code> 块给子模板写页面脚本：</p>
+
+<div class="code" data-lang="html" data-file="account/templates/base.html（body 末尾）">
+<pre>
+&lt;script src="//cdn.jsdelivr.net/npm/js-cookie@3.0.5/dist/js.cookie.min.js"&gt;&lt;/script&gt;
+&lt;script&gt;
+  const csrftoken = Cookies.get('csrftoken');
+  document.addEventListener('DOMContentLoaded', (event) =&gt; {
+    {% block domready %}
+    {% endblock %}
+  })
+&lt;/script&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="js" data-file="detail.html 的 domready 块">
+<pre>
+const url = '{% url "images:like" %}';
+var options = {
+  method: 'POST',
+  headers: {'X-CSRFToken': csrftoken},
+  mode: 'same-origin'
+}
+
+document.querySelector('a.like').addEventListener('click', function(e){
+  e.preventDefault();
+  var likeButton = this;
+  var formData = new FormData();
+  formData.append('id', likeButton.dataset.id);
+  formData.append('action', likeButton.dataset.action);
+  options['body'] = formData;
+
+  fetch(url, options)
+  .then(response =&gt; response.json())
+  .then(data =&gt; {
+    if (data['status'] === 'ok') {
+      var previousAction = likeButton.dataset.action;
+      var action = previousAction === 'like' ? 'unlike' : 'like';
+      likeButton.dataset.action = action;
+      likeButton.innerHTML = action;
+      var likeCount = document.querySelector('span.count .total');
+      var totalLikes = parseInt(likeCount.innerHTML);
+      likeCount.innerHTML = previousAction === 'like' ? totalLikes + 1 : totalLikes - 1;
+    }
+  })
+});
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 服务器端模板语言 vs 浏览器端 JavaScript</div>
+  <p><code>{% url "images:like" %}</code> 在服务器渲染时就被替换成了 <code>/images/like/</code>；浏览器拿到的是纯 JavaScript。两者运行在不同的地方、不同的时间，别把它们混为一谈。大段脚本更推荐写成独立的 <code>.js</code> 静态文件。</p>
+</div>
+
+<h2 id="infinite">无限滚动</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="同一个视图：普通请求返回整页，带 images_only 参数的请求只返回图片片段，空响应表示没有更多">
+  <rect class="bx" x="16" y="20" width="200" height="200" rx="12"/>
+  <text class="ttl" x="116" y="44" text-anchor="middle">/images/ 页面</text>
+  <rect class="bx-g" x="36" y="60" width="160" height="40" rx="6"/><text class="sm" x="116" y="85" text-anchor="middle">第 1 页（首次渲染）</text>
+  <rect class="bx-a" x="36" y="108" width="160" height="40" rx="6"/><text class="sm" x="116" y="133" text-anchor="middle">第 2 页（追加）</text>
+  <rect class="bx-d" x="36" y="156" width="160" height="40" rx="6"/><text class="sm" x="116" y="181" text-anchor="middle">滚到离底部 200px…</text>
+
+  <path class="ln-a" d="M218 176 H330" marker-end="url(#ar-a)"/>
+  <text class="mono sm on-a" x="274" y="166" text-anchor="middle">fetch</text>
+  <text class="mono sm" x="274" y="196" text-anchor="middle">?images_only=1&amp;page=3</text>
+
+  <rect class="bx-b" x="334" y="20" width="410" height="200" rx="12"/>
+  <text class="ttl on-b" x="539" y="44" text-anchor="middle">image_list 视图</text>
+  <text class="sm" x="350" y="72">普通请求 → list.html（继承 base，include 片段）</text>
+  <text class="sm" x="350" y="96">images_only=1 → 只渲染 list_images.html 片段</text>
+  <text class="sm" x="350" y="120">页码越界且 images_only → 返回空字符串</text>
+  <text class="sm on-a" x="350" y="150">前端：收到 HTML → insertAdjacentHTML 追加</text>
+  <text class="sm on-a" x="350" y="172">收到空串 → emptyPage = true，不再请求</text>
+  <text class="sm" x="350" y="200">blockRequest 防止滚动事件在请求未返回时重复触发</text>
+</svg>
+<figcaption>图 6-6　“整页”与“片段”共用一个视图，片段模板被两边复用</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="images/views.py">
+<pre>
+@login_required
+def image_list(request):
+    images = Image.objects.all()
+    paginator = Paginator(images, 8)
+    page = request.GET.get('page')
+    images_only = request.GET.get('images_only')
+    try:
+        images = paginator.page(page)
+    except PageNotAnInteger:
+        images = paginator.page(1)
+    except EmptyPage:
+        if images_only:
+            return HttpResponse('')                 # 告诉前端：没有更多了
+        images = paginator.page(paginator.num_pages)
+    if images_only:
+        return render(request, 'images/image/list_images.html', {'section': 'images', 'images': images})
+    return render(request, 'images/image/list.html', {'section': 'images', 'images': images})
+</pre>
+</div>
+
+<div class="code" data-lang="js" data-file="list.html 的 domready 块">
+<pre>
+var page = 1;
+var emptyPage = false;
+var blockRequest = false;
+
+window.addEventListener('scroll', function(e) {
+  var margin = document.body.clientHeight - window.innerHeight - 200;
+  if (window.pageYOffset &gt; margin &amp;&amp; !emptyPage &amp;&amp; !blockRequest) {
+    blockRequest = true;
+    page += 1;
+    fetch('?images_only=1&amp;page=' + page)
+    .then(response =&gt; response.text())
+    .then(html =&gt; {
+      if (html === '') {
+        emptyPage = true;
+      } else {
+        document.getElementById('image-list').insertAdjacentHTML('beforeEnd', html);
+        blockRequest = false;
+      }
+    })
+  }
+});
+window.dispatchEvent(new Event('scroll'));    // 内容不满一屏时也能触发加载
+</pre>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 6 章代码点评 <small>Chapter06/bookmarks/images</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 点赞视图的装饰器组合与 CSRF 处理</h4>
+    <p><code>@login_required</code> + <code>@require_POST</code>，前端用 <code>X-CSRFToken</code> 头、<code>mode: 'same-origin'</code>，返回 <code>JsonResponse</code>。多对多的 <code>add()/remove()</code> 天然幂等，重复点赞不会产生重复行。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 服务器替用户下载任意 URL：SSRF 与资源耗尽 <span class="src">Chapter06/bookmarks/images/forms.py:36</span></h4>
+    <p>
+      <code>requests.get(image_url)</code> 由<strong>服务器</strong>去访问一个<strong>用户提供</strong>的地址，这是典型的 SSRF（服务器端请求伪造）入口：
+      用户可以提交 <code>http://169.254.169.254/latest/meta-data/...?.jpg</code>（云主机元数据）或 <code>http://localhost:6379/x.png</code> 这类内网地址。
+      同时：没有 <code>timeout</code>（对方不响应，工作进程就一直挂着）；没有大小上限（一个 10 GB 的“图片”会被整个读进内存）；
+      不检查响应状态码和内容类型（404 页面也会被当成图片存下来）。扩展名检查也形同虚设 —— 查询字符串里带 <code>.jpg</code> 就能通过。
+    </p>
+<div class="code" data-lang="py"><pre>
+import ipaddress
+import socket
+from urllib.parse import urlparse
+
+MAX_BYTES = 5 * 1024 * 1024
+
+
+def _is_public_host(hostname):
+    for info in socket.getaddrinfo(hostname, None):
+        ip = ipaddress.ip_address(info[4][0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return False
+    return True
+
+
+def download_image(url):
+    parsed = urlparse(url)
+    if parsed.scheme not in ('http', 'https') or not _is_public_host(parsed.hostname):
+        raise forms.ValidationError('URL not allowed.')
+    with requests.get(url, timeout=(3, 10), stream=True, allow_redirects=False) as r:
+        r.raise_for_status()
+        if not r.headers.get('Content-Type', '').startswith('image/'):
+            raise forms.ValidationError('Not an image.')
+        data = b''
+        for chunk in r.iter_content(64 * 1024):
+            data += chunk
+            if len(data) &gt; MAX_BYTES:
+                raise forms.ValidationError('Image too large.')
+    return data     # 之后再交给 Pillow 验证确实是图片
+</pre></div>
+    <p>另外，下载这种慢操作放在请求里做会阻塞工作进程，更好的做法是交给第 8 章的 Celery 后台任务。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 中文标题会生成空 slug，保存后直接 500 <span class="src">Chapter06/bookmarks/images/models.py:36</span></h4>
+    <p>
+      <code>slugify('中文标题')</code> 返回空字符串。<code>get_absolute_url()</code> 用空 slug 反向解析 <code>&lt;slug:slug&gt;</code> 会抛 <code>NoReverseMatch</code>，
+      收藏成功后的重定向就变成了服务器错误。对中文用户这是必现 bug。可以这样修：
+    </p>
+<div class="code" data-lang="py"><pre>
+def save(self, *args, **kwargs):
+    if not self.slug:
+        self.slug = slugify(self.title) or 'image'     # 兜底；或引入 python-slugify 做拼音转写
+    super().save(*args, **kwargs)
+</pre></div>
+    <p>同理 <code>forms.py</code> 里用 <code>slugify(image.title)</code> 生成的文件名也会变成 <code>.jpg</code>。另外 <code>clean_url</code> 中 <code>url.rsplit('.', 1)[1]</code> 在 URL 不含点时会 <code>IndexError</code>。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> GET 预填表单应当用 <code>initial</code> <span class="src">images/views.py:30</span></h4>
+    <p><code>ImageCreateForm(data=request.GET)</code> 创建的是<strong>绑定</strong>表单，页面一打开就会把“description 为空”等当成提交错误显示出来（取决于字段是否必填）。只想预填时应当用 <code>ImageCreateForm(initial=request.GET.dict())</code>。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 点赞接口的输入和状态码</h4>
+    <p><code>action</code> 不是 <code>like</code> 的任何值都会执行“取消赞”；图片不存在或参数缺失时返回 <strong>200</strong> + <code>{"status": "error"}</code>。API 应当用状态码表达结果，前端也应处理失败：</p>
+<div class="code" data-lang="py"><pre>
+@login_required
+@require_POST
+def image_like(request):
+    action = request.POST.get('action')
+    if action not in ('like', 'unlike'):
+        return JsonResponse({'status': 'error'}, status=400)
+    image = get_object_or_404(Image, pk=request.POST.get('id'))
+    if action == 'like':
+        image.users_like.add(request.user)
+    else:
+        image.users_like.remove(request.user)
+    return JsonResponse({'status': 'ok', 'likes': image.users_like.count()})
+</pre></div>
+    <p>顺便把最新的点赞数返回给前端，就不必在浏览器里“猜”着 ±1 了。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 详情页的 N+1 查询</h4>
+    <p>点赞用户列表里每个 <code>user.profile.photo</code> 都会触发一次 Profile 查询。可以在视图里预取：</p>
+<div class="code" data-lang="py"><pre>
+image = get_object_or_404(
+    Image.objects.prefetch_related('users_like__profile'), id=id, slug=slug
+)
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> bookmarklet 脚本的几个隐患 <span class="src">images/static/js/bookmarklet.js</span></h4>
+    <p>
+      ① <code>body.innerHTML += boxHtml</code> 会让浏览器<strong>重新解析整个页面</strong>，宿主网页上已绑定的事件监听全部丢失，页面可能直接坏掉，应改为 <code>body.insertAdjacentHTML('beforeend', boxHtml)</code>；
+      ② <code>siteUrl</code> 写死 <code>//127.0.0.1:8000/</code>，上线必须改代码 —— 可以把 JS 也作为模板渲染，用 <code>request.build_absolute_uri</code> 注入；
+      ③ <code>boxHtml</code>、<code>images</code> 等没有声明的变量会成为宿主页面的全局变量，可能覆盖对方的同名变量，应该整个包进一个立即执行函数。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 模板里的无效 HTML <span class="src">images/templates/images/image/list_images.html:4</span></h4>
+    <p>片段模板里 <code>&lt;a&gt;</code> 里面又套了一个 <code>&lt;a&gt;</code>，HTML 规范不允许嵌套链接，浏览器会自动“修正”DOM 结构，导致样式和点击区域错乱。删掉外层的 <code>&lt;a&gt;</code> 即可。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 现代 Django 社区常用 HTMX 做这类交互</h4>
+    <p>
+      点赞、无限滚动这类“服务器返回 HTML 片段、局部替换”的交互，正是 <strong>HTMX</strong> 的强项，可以几乎不写 JavaScript：
+      <code>&lt;div hx-get="?page=3" hx-trigger="revealed" hx-swap="afterend"&gt;</code>。本书的 <code>images_only</code> 参数思路与之一致。
+      另外为了一个 <code>Cookies.get()</code> 从第三方 CDN 加载 js-cookie 并无必要，可以直接 <code>document.cookie</code> 解析，或在页面里用 <code>{% csrf_token %}</code> 渲染后从 DOM 读取。
+    </p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li><code>ManyToManyField</code> 通过中间表实现，<code>related_name</code> 让两端都能方便访问。</li>
+  <li><code>clean_&lt;field&gt;()</code> 校验单个字段；重写 <code>ModelForm.save()</code> 可以把“保存前的额外处理”封装在表单里。</li>
+  <li>Bookmarklet 用“启动器 + 远程脚本”解决无法更新的问题，必须通过 HTTPS 提供。</li>
+  <li>easy-thumbnails 按需生成并缓存缩略图。</li>
+  <li><code>fetch()</code> 发 POST 时要带 <code>X-CSRFToken</code>；同一视图可以同时返回整页和片段。</li>
+  <li>任何“服务器替用户访问 URL”的功能都要防 SSRF、设超时、限大小。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用中文标题收藏一张图片，复现 <code>NoReverseMatch</code>；按点评修复。</li>
+    <li>给 <code>requests.get()</code> 加上超时和大小限制，并用一个很大的图片 URL 测试。</li>
+    <li>把点赞接口改为返回最新点赞数，前端直接使用返回值更新计数。</li>
+    <li>选做：用 HTMX 重写无限滚动，比较两种实现的代码量。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

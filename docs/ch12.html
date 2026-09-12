@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 12 章 · 构建在线学习平台 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="12">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 12 章 · 项目四：在线学习平台</span>
+<h1>构建在线学习平台</h1>
+<p class="lede">
+  最后一个项目是在线学习平台 Educa：讲师发布课程，课程分模块，模块里有文字、图片、文件、视频等各种内容。
+  这一章专注于<strong>数据建模</strong>：用 fixture 准备初始数据、用模型继承处理“多种类型的内容”、写一个自定义模型字段来自动维护顺序。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>设计“学科 → 课程 → 模块 → 内容”的层级模型</li>
+    <li>用 <code>dumpdata</code>/<code>loaddata</code> 和 fixture 提供初始数据</li>
+    <li>分清三种模型继承：抽象基类、多表继承、代理模型</li>
+    <li>用“抽象基类 + 泛型外键”实现多态内容</li>
+    <li>编写自定义模型字段 <code>OrderField</code>，理解 <code>pre_save()</code></li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="roadmap">项目蓝图</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="educa 项目在第 12 到 17 章逐步完成的功能">
+  <rect class="bx-a" x="16" y="30" width="110" height="110" rx="10"/>
+  <text class="ttl on-a" x="71" y="54" text-anchor="middle">第 12 章</text>
+  <text class="sm" x="71" y="80" text-anchor="middle">数据模型</text>
+  <text class="sm" x="71" y="100" text-anchor="middle">fixture</text>
+  <text class="sm" x="71" y="120" text-anchor="middle">自定义字段</text>
+  <rect class="bx" x="140" y="30" width="110" height="110" rx="10"/>
+  <text class="ttl" x="195" y="54" text-anchor="middle">第 13 章</text>
+  <text class="sm" x="195" y="80" text-anchor="middle">讲师 CMS</text>
+  <text class="sm" x="195" y="100" text-anchor="middle">CBV + 权限</text>
+  <text class="sm" x="195" y="120" text-anchor="middle">拖拽排序</text>
+  <rect class="bx" x="264" y="30" width="110" height="110" rx="10"/>
+  <text class="ttl" x="319" y="54" text-anchor="middle">第 14 章</text>
+  <text class="sm" x="319" y="80" text-anchor="middle">学生选课</text>
+  <text class="sm" x="319" y="100" text-anchor="middle">内容渲染</text>
+  <text class="sm" x="319" y="120" text-anchor="middle">缓存</text>
+  <rect class="bx" x="388" y="30" width="110" height="110" rx="10"/>
+  <text class="ttl" x="443" y="54" text-anchor="middle">第 15 章</text>
+  <text class="sm" x="443" y="80" text-anchor="middle">REST API</text>
+  <text class="sm" x="443" y="100" text-anchor="middle">DRF</text>
+  <rect class="bx" x="512" y="30" width="110" height="110" rx="10"/>
+  <text class="ttl" x="567" y="54" text-anchor="middle">第 16 章</text>
+  <text class="sm" x="567" y="80" text-anchor="middle">课程聊天室</text>
+  <text class="sm" x="567" y="100" text-anchor="middle">Channels</text>
+  <rect class="bx" x="636" y="30" width="108" height="110" rx="10"/>
+  <text class="ttl" x="690" y="54" text-anchor="middle">第 17 章</text>
+  <text class="sm" x="690" y="80" text-anchor="middle">上线部署</text>
+  <text class="sm" x="690" y="100" text-anchor="middle">Docker/Nginx</text>
+</svg>
+<figcaption>图 12-1　Educa 项目贯穿全书最后六章</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m venv env/educa &amp;&amp; source env/educa/bin/activate
+python -m pip install "Django~=5.2" Pillow
+django-admin startproject educa
+cd educa &amp;&amp; django-admin startapp courses
+# settings.py: INSTALLED_APPS 最前面加 'courses.apps.CoursesConfig'，配置 MEDIA_URL/MEDIA_ROOT
+</pre>
+</div>
+
+<h2 id="models">课程模型</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="数据层级：学科包含课程，课程包含模块，模块包含内容，内容可以是文字、文件、图片或视频">
+  <rect class="bx-p" x="16" y="90" width="120" height="60" rx="10"/>
+  <text class="ttl on-p" x="76" y="116" text-anchor="middle">Subject</text>
+  <text class="sm" x="76" y="136" text-anchor="middle">数学、编程…</text>
+  <path class="ln" d="M138 120 H166" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="170" y="90" width="120" height="60" rx="10"/>
+  <text class="ttl on-a" x="230" y="116" text-anchor="middle">Course</text>
+  <text class="sm" x="230" y="136" text-anchor="middle">owner = 讲师</text>
+  <path class="ln" d="M292 120 H320" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="324" y="90" width="120" height="60" rx="10"/>
+  <text class="ttl on-b" x="384" y="116" text-anchor="middle">Module</text>
+  <text class="sm" x="384" y="136" text-anchor="middle">有顺序</text>
+  <path class="ln" d="M446 120 H474" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="478" y="90" width="110" height="60" rx="10"/>
+  <text class="ttl on-g" x="533" y="116" text-anchor="middle">Content</text>
+  <text class="sm" x="533" y="136" text-anchor="middle">有顺序</text>
+  <path class="ln-d" d="M590 110 L630 40" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M590 115 L630 90" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M590 125 L630 150" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M590 130 L630 200" marker-end="url(#ar)"/>
+  <rect class="bx" x="634" y="20" width="110" height="36" rx="6"/><text class="sm" x="689" y="43" text-anchor="middle">Text（文字）</text>
+  <rect class="bx" x="634" y="72" width="110" height="36" rx="6"/><text class="sm" x="689" y="95" text-anchor="middle">File（文件）</text>
+  <rect class="bx" x="634" y="132" width="110" height="36" rx="6"/><text class="sm" x="689" y="155" text-anchor="middle">Image（图片）</text>
+  <rect class="bx" x="634" y="184" width="110" height="36" rx="6"/><text class="sm" x="689" y="207" text-anchor="middle">Video（视频）</text>
+  <text class="sm" x="300" y="196" text-anchor="middle">“一对多”一路向下；最后一层是“一个 Content 指向四种之一” —— 多态</text>
+</svg>
+<figcaption>图 12-2　课程目录的层级结构</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="courses/models.py（第一版）">
+<pre>
+from django.contrib.auth.models import User
+from django.db import models
+
+
+class Subject(models.Model):
+    title = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=200, unique=True)
+
+    class Meta:
+        ordering = ['title']
+
+
+class Course(models.Model):
+    owner = models.ForeignKey(User, related_name='courses_created', on_delete=models.CASCADE)
+    subject = models.ForeignKey(Subject, related_name='courses', on_delete=models.CASCADE)
+    title = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=200, unique=True)
+    overview = models.TextField()
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created']
+
+
+class Module(models.Model):
+    course = models.ForeignKey(Course, related_name='modules', on_delete=models.CASCADE)
+    title = models.CharField(max_length=200)
+    description = models.TextField(blank=True)
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="courses/admin.py">
+<pre>
+class ModuleInline(admin.StackedInline):     # StackedInline：每条纵向堆叠；TabularInline：表格
+    model = Module
+
+
+@admin.register(Course)
+class CourseAdmin(admin.ModelAdmin):
+    list_display = ['title', 'subject', 'created']
+    list_filter = ['created', 'subject']
+    search_fields = ['title', 'overview']
+    prepopulated_fields = {'slug': ('title',)}
+    inlines = [ModuleInline]
+</pre>
+</div>
+
+<h2 id="fixtures">用 fixture 提供初始数据</h2>
+
+<p>学科列表这类“系统需要预置”的数据，可以先在后台录入，再导出成 fixture 文件，以后任何新环境一条命令就能导入：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+mkdir courses/fixtures
+python manage.py dumpdata courses --indent=2 --output=courses/fixtures/subjects.json
+python manage.py loaddata subjects.json     # 默认在每个应用的 fixtures/ 目录里查找
+</pre>
+</div>
+
+<div class="code" data-lang="json" data-file="courses/fixtures/subjects.json（节选）">
+<pre>
+[
+  {"model": "courses.subject", "pk": 1, "fields": {"title": "Mathematics", "slug": "mathematics"}},
+  {"model": "courses.subject", "pk": 2, "fields": {"title": "Music", "slug": "music"}}
+]
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; fixture、数据迁移、工厂 —— 各有其用 <span class="tag ts">TSD：测试与数据</span></div>
+  <p>
+    <strong>系统运行必需</strong>的数据（学科、国家列表）更适合写成<strong>数据迁移</strong>（<code>RunPython</code>），它随代码版本一起走、自动执行；
+    <strong>演示数据</strong>用 fixture 很方便；<strong>测试数据</strong> TSD 推荐用 <code>factory_boy</code> 在测试里现造，因为 fixture 写死了主键和字段，模型一改就全部失效。
+  </p>
+</div>
+
+<h2 id="inheritance">三种模型继承</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="三种继承方式对比：抽象基类只为子类建表；多表继承父子各一张表并用一对一连接；代理模型共享父表只改变行为">
+  <rect class="bx-g" x="16" y="20" width="236" height="260" rx="12"/>
+  <text class="ttl on-g" x="134" y="44" text-anchor="middle">抽象基类 abstract</text>
+  <text class="mono sm" x="30" y="70">class Base(Model):</text>
+  <text class="mono sm" x="44" y="88">title, created</text>
+  <text class="mono sm" x="44" y="106">Meta: abstract=True</text>
+  <text class="mono sm" x="30" y="124">class Text(Base): body</text>
+  <rect class="bx" x="40" y="142" width="188" height="70" rx="6"/>
+  <text class="mono sm" x="50" y="162">表 text</text>
+  <text class="mono sm" x="50" y="182">id title created body</text>
+  <text class="sm" x="50" y="202">（Base 没有表）</text>
+  <text class="sm on-g" x="30" y="236">复用字段，无 JOIN</text>
+  <text class="sm" x="30" y="256">不能查询“所有 Base”</text>
+
+  <rect class="bx-b" x="262" y="20" width="236" height="260" rx="12"/>
+  <text class="ttl on-b" x="380" y="44" text-anchor="middle">多表继承</text>
+  <text class="mono sm" x="276" y="70">class Base(Model):</text>
+  <text class="mono sm" x="290" y="88">title, created</text>
+  <text class="mono sm" x="276" y="106">class Text(Base): body</text>
+  <rect class="bx" x="276" y="124" width="98" height="60" rx="6"/>
+  <text class="mono sm" x="284" y="144">表 base</text>
+  <text class="mono sm" x="284" y="164">id title…</text>
+  <rect class="bx" x="386" y="124" width="100" height="60" rx="6"/>
+  <text class="mono sm" x="392" y="144">表 text</text>
+  <text class="mono sm" x="392" y="164">base_ptr body</text>
+  <path class="ln-b" d="M384 154 H376" marker-end="url(#ar-b)"/>
+  <text class="sm" x="276" y="206">子表通过 OneToOne(base_ptr)</text>
+  <text class="sm" x="276" y="224">指向父表</text>
+  <text class="sm on-b" x="276" y="248">能查询所有 Base</text>
+  <text class="sm on-r" x="276" y="266">每次取子类都要 JOIN</text>
+
+  <rect class="bx-p" x="508" y="20" width="236" height="260" rx="12"/>
+  <text class="ttl on-p" x="626" y="44" text-anchor="middle">代理模型 proxy</text>
+  <text class="mono sm" x="522" y="70">class Ordered(Base):</text>
+  <text class="mono sm" x="536" y="88">Meta: proxy=True</text>
+  <text class="mono sm" x="536" y="106">      ordering=[…]</text>
+  <text class="mono sm" x="536" y="124">def created_delta()</text>
+  <rect class="bx" x="532" y="142" width="188" height="50" rx="6"/>
+  <text class="mono sm" x="542" y="162">共用表 base</text>
+  <text class="sm" x="542" y="182">不新增任何列</text>
+  <text class="sm on-p" x="522" y="216">改变行为：方法、排序、</text>
+  <text class="sm on-p" x="522" y="234">默认管理器、Admin 展示</text>
+  <text class="sm" x="522" y="258">不能加字段</text>
+</svg>
+<figcaption>图 12-3　选择依据：要不要父表？要不要新字段？</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; TSD 对继承的建议</div>
+  <p>TSD 推荐优先使用<strong>抽象基类</strong>（如 TimeStampedModel），<strong>尽量避免多表继承</strong> —— 它的隐式 JOIN 和隐式一对一字段容易带来性能问题和困惑。需要“可以统一查询的父表”时，显式地写一个 OneToOneField 或外键，比多表继承更清楚。</p>
+</div>
+
+<h2 id="content">多态内容：抽象基类 + 泛型外键</h2>
+
+<div class="code" data-lang="py" data-file="courses/models.py">
+<pre>
+from django.contrib.contenttypes.fields import GenericForeignKey
+from django.contrib.contenttypes.models import ContentType
+
+
+class Content(models.Model):
+    module = models.ForeignKey(Module, related_name='contents', on_delete=models.CASCADE)
+    content_type = models.ForeignKey(
+        ContentType, on_delete=models.CASCADE,
+        limit_choices_to={'model__in': ('text', 'video', 'image', 'file')},
+    )
+    object_id = models.PositiveIntegerField()
+    item = GenericForeignKey('content_type', 'object_id')
+
+
+class ItemBase(models.Model):
+    owner = models.ForeignKey(User, related_name='%(class)s_related', on_delete=models.CASCADE)
+    title = models.CharField(max_length=250)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+
+    def __str__(self):
+        return self.title
+
+
+class Text(ItemBase):
+    content = models.TextField()
+
+class File(ItemBase):
+    file = models.FileField(upload_to='files')
+
+class Image(ItemBase):
+    file = models.FileField(upload_to='images')
+
+class Video(ItemBase):
+    url = models.URLField()
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="Content 表通过 content_type 和 object_id 指向四张内容表中的某一行；ItemBase 是抽象的，没有表">
+  <rect class="bx-g" x="16" y="60" width="220" height="130" rx="12"/>
+  <text class="ttl on-g" x="126" y="84" text-anchor="middle">courses_content</text>
+  <text class="mono sm" x="30" y="110">module_id = 3</text>
+  <text class="mono sm" x="30" y="130">content_type → "courses.video"</text>
+  <text class="mono sm" x="30" y="150">object_id = 7</text>
+  <text class="mono sm" x="30" y="170">order = 2</text>
+  <path class="ln-g" d="M238 140 C 360 160, 400 180, 476 186" marker-end="url(#ar-g)"/>
+
+  <rect class="bx-d" x="300" y="16" width="160" height="40" rx="8"/>
+  <text class="sm" x="380" y="41" text-anchor="middle">ItemBase（abstract，无表）</text>
+  <path class="ln-d" d="M380 58 V80"/>
+  <path class="ln-d" d="M300 80 H660"/>
+  <rect class="bx" x="480" y="86" width="130" height="36" rx="6"/><text class="mono sm" x="545" y="109" text-anchor="middle">courses_text</text>
+  <rect class="bx" x="620" y="86" width="124" height="36" rx="6"/><text class="mono sm" x="682" y="109" text-anchor="middle">courses_file</text>
+  <rect class="bx" x="480" y="130" width="130" height="36" rx="6"/><text class="mono sm" x="545" y="153" text-anchor="middle">courses_image</text>
+  <rect class="bx-a" x="480" y="172" width="130" height="36" rx="6"/><text class="mono sm on-a" x="545" y="195" text-anchor="middle">courses_video id=7</text>
+  <text class="sm" x="600" y="236" text-anchor="middle">每张表都有 owner/title/created/updated + 自己的字段</text>
+  <text class="sm" x="126" y="216" text-anchor="middle">content.item → Video 对象</text>
+</svg>
+<figcaption>图 12-4　related_name 里的 <code>%(class)s</code> 会被替换为子类名：<code>text_related</code>、<code>video_related</code>…</figcaption>
+</figure>
+
+<h2 id="orderfield">自定义模型字段：OrderField</h2>
+
+<p>模块和内容都需要一个顺序号。我们希望：不指定时<strong>自动取“同组里最大值 + 1”</strong>，而“同组”可以配置（模块按课程分组，内容按模块分组）。</p>
+
+<div class="code" data-lang="py" data-file="courses/fields.py">
+<pre>
+from django.core.exceptions import ObjectDoesNotExist
+from django.db import models
+
+
+class OrderField(models.PositiveIntegerField):
+    def __init__(self, for_fields=None, *args, **kwargs):
+        self.for_fields = for_fields                  # 按哪些字段分组计算顺序
+        super().__init__(*args, **kwargs)
+
+    def pre_save(self, model_instance, add):          # 保存前由 Django 调用
+        if getattr(model_instance, self.attname) is None:
+            try:
+                qs = self.model.objects.all()
+                if self.for_fields:
+                    query = {field: getattr(model_instance, field) for field in self.for_fields}
+                    qs = qs.filter(**query)           # 只看同一课程 / 同一模块
+                last_item = qs.latest(self.attname)
+                value = getattr(last_item, self.attname) + 1
+            except ObjectDoesNotExist:
+                value = 0                             # 第一个
+            setattr(model_instance, self.attname, value)
+            return value
+        else:
+            return super().pre_save(model_instance, add)
+
+
+# 使用
+class Module(models.Model):
+    # ...
+    order = OrderField(blank=True, for_fields=['course'])
+
+    class Meta:
+        ordering = ['order']
+
+class Content(models.Model):
+    # ...
+    order = OrderField(blank=True, for_fields=['module'])
+
+    class Meta:
+        ordering = ['order']
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="OrderField 在每个课程内独立计算顺序：未指定时取最大值加一，指定时使用指定值">
+  <rect class="bx-a" x="16" y="20" width="360" height="160" rx="12"/>
+  <text class="ttl on-a" x="196" y="44" text-anchor="middle">Course 1 的模块</text>
+  <text class="mono sm" x="32" y="72">Module 1 → order 0   （第一个）</text>
+  <text class="mono sm" x="32" y="94">Module 2 → order 1   （0 + 1）</text>
+  <text class="mono sm" x="32" y="116">Module 3 → order 5   （手动指定）</text>
+  <text class="mono sm" x="32" y="138">Module 4 → order 6   （5 + 1）</text>
+  <text class="sm" x="32" y="166">不保证连续，只保证递增</text>
+  <rect class="bx-b" x="396" y="20" width="348" height="160" rx="12"/>
+  <text class="ttl on-b" x="570" y="44" text-anchor="middle">Course 2 的模块</text>
+  <text class="mono sm" x="412" y="72">Module 1 → order 0</text>
+  <text class="sm" x="412" y="100">for_fields=['course']：</text>
+  <text class="sm" x="412" y="120">每个课程各算各的</text>
+  <text class="sm" x="412" y="150">模板里显示时 {{ m.order|add:1 }}</text>
+</svg>
+<figcaption>图 12-5　自定义字段把“分组自增顺序”这条规则封装起来，任何模型都能复用</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; 给已有数据的表加非空字段</div>
+  <p>运行 <code>makemigrations</code> 时 Django 会问“已有行的 order 填什么”。书里选择输入默认值 <code>0</code>。也可以在字段上直接写 <code>default</code>，或者 <code>null=True</code>。</p>
+</div>
+
+<h2 id="auth">认证视图</h2>
+
+<div class="code" data-lang="py" data-file="educa/urls.py">
+<pre>
+from django.contrib.auth import views as auth_views
+
+urlpatterns = [
+    path('accounts/login/', auth_views.LoginView.as_view(), name='login'),
+    path('accounts/logout/', auth_views.LogoutView.as_view(), name='logout'),
+    path('admin/', admin.site.urls),
+]
+</pre>
+</div>
+
+<p>模板结构与第 4 章相同：<code>templates/base.html</code> 定义 <code>title</code>、<code>content</code>、<code>domready</code> 三个块，<code>registration/login.html</code> 和 <code>logged_out.html</code> 继承它。登出是 POST 表单。登录成功后默认跳转 <code>/accounts/profile/</code>（此时还不存在），第 14 章会设置 <code>LOGIN_REDIRECT_URL</code>。</p>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 12 章代码点评 <small>Chapter12/educa</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 抽象基类 + <code>%(class)s</code> 的 related_name</h4>
+    <p>四种内容共享字段又各自独立成表，避免了多表继承的隐式 JOIN；<code>'%(class)s_related'</code> 让抽象基类里的外键在每个子类上都有不冲突的反向名称。这是 TSD 推荐的继承用法。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 直接引用 <code>User</code> 而不是 <code>AUTH_USER_MODEL</code> <span class="src">Chapter12/educa/courses/models.py:1</span></h4>
+    <p>前两个项目都用的是 <code>settings.AUTH_USER_MODEL</code>，这里却 <code>from django.contrib.auth.models import User</code>。一旦项目换成自定义用户模型，这些外键就指向了错误的表。应当统一写成 <code>models.ForeignKey(settings.AUTH_USER_MODEL, …)</code>。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 自定义字段缺少 <code>deconstruct()</code> <span class="src">courses/fields.py:5</span></h4>
+    <p>
+      Django 文档明确要求：自定义字段在 <code>__init__</code> 里新增了参数，就必须在 <code>deconstruct()</code> 里把它写回，否则迁移系统“看不见”这个参数。
+      仓库生成的迁移文件里就是 <code>courses.fields.OrderField(blank=True, default=0)</code> —— <code>for_fields</code> 丢了。后果：在数据迁移里使用历史模型时顺序会按全表计算；以后修改 <code>for_fields</code>，<code>makemigrations</code> 也检测不到。
+    </p>
+<div class="code" data-lang="py"><pre>
+class OrderField(models.PositiveIntegerField):
+    def __init__(self, for_fields=None, *args, **kwargs):
+        self.for_fields = for_fields
+        super().__init__(*args, **kwargs)
+
+    def deconstruct(self):
+        name, path, args, kwargs = super().deconstruct()
+        if self.for_fields is not None:
+            kwargs['for_fields'] = self.for_fields
+        return name, path, args, kwargs
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> OrderField 的并发与查询方式</h4>
+    <p>
+      “先查最大值再 +1”不是原子的：两个请求同时给同一模块添加内容，会得到相同的 order。影响不大时可以接受；要严格一些，可以在事务里对父对象加锁（<code>Module.objects.select_for_update().get(pk=…)</code>）再计算。
+      另外 <code>qs.latest()</code> 会取回整行对象，用聚合更轻：<code>qs.aggregate(m=Max(self.attname))['m']</code>。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> <code>limit_choices_to</code> 没限定应用 <span class="src">courses/models.py:66</span></h4>
+    <p><code>{'model__in': ('text', 'video', 'image', 'file')}</code> 只按模型名过滤。项目里只要别的应用也有叫 <code>Image</code>、<code>File</code> 的模型（第二个项目就有 <code>images.Image</code>！），它们也会出现在可选列表里。应加上 <code>'app_label': 'courses'</code>。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 泛型关系的“孤儿数据”与主键类型</h4>
+    <p>
+      删除一个 Text，指向它的 Content 行不会被删除（泛型外键没有数据库级 CASCADE），反之亦然。在 <code>ItemBase</code> 上加 <code>GenericRelation</code> 可以让删除内容时级联删除 Content：
+      <code>contents = GenericRelation('Content')</code>（放在抽象基类里对每个子类生效）。
+      同时，<code>object_id</code> 应与 <code>BigAutoField</code> 主键匹配，改用 <code>PositiveBigIntegerField</code>（与第 7 章同理）。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 上传文件的类型与安全</h4>
+    <p>
+      <code>Image</code> 用的是 <code>FileField</code> 而非 <code>ImageField</code>，任何文件都能作为“图片”上传；<code>File</code> 也没有扩展名白名单（可用 <code>FileExtensionValidator</code>）。
+      更要注意的是：讲师上传的 <code>.html</code>、<code>.svg</code> 如果和网站同域名提供，就能在学员浏览器里以你的域名执行脚本。生产环境应把用户上传文件放在独立域名或对象存储上，并设置 <code>Content-Disposition: attachment</code>。
+    </p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>fixture 是 Django 的数据序列化格式，<code>dumpdata</code>/<code>loaddata</code> 可用于初始数据和演示数据。</li>
+  <li>抽象基类复用字段不建父表；多表继承父子各一张表；代理模型只改变行为。</li>
+  <li>“抽象基类 + 泛型外键”可以实现多态内容。</li>
+  <li>自定义字段可以重写 <code>pre_save()</code> 在保存前计算值；新增构造参数时必须实现 <code>deconstruct()</code>。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>给 <code>OrderField</code> 实现 <code>deconstruct()</code>，重新 <code>makemigrations</code>，查看迁移文件里是否出现 <code>for_fields</code>。</li>
+    <li>把学科初始数据改写成一个数据迁移，删除数据库后 <code>migrate</code> 验证学科自动出现。</li>
+    <li>给 <code>ItemBase</code> 加 <code>GenericRelation</code>，在 shell 里删除一个 Text，确认对应的 Content 被级联删除。</li>
+    <li>用代理模型写一个 <code>PublishedCourse</code>（默认管理器只返回有模块的课程），并在 Admin 单独注册。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

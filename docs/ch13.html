@@ -1,0 +1,520 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 13 章 · 内容管理系统 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="13">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 13 章 · 项目四：在线学习平台</span>
+<h1>内容管理系统</h1>
+<p class="lede">
+  这一章给讲师做一个 CMS：管理自己的课程、编辑模块、往模块里添加各种类型的内容、拖拽排序。
+  主角是<strong>类视图与 Mixin</strong> —— 把“只能操作自己的对象”“自动设置 owner”这些横切逻辑写一次、到处复用；
+  配角是权限组、Formset 和动态表单。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 Mixin 组合类视图，理解多重继承下的方法解析顺序（MRO）</li>
+    <li>用组和权限控制访问：<code>LoginRequiredMixin</code>、<code>PermissionRequiredMixin</code></li>
+    <li>用 <code>inlineformset_factory</code> 在一个页面编辑多个关联对象</li>
+    <li>用 <code>modelform_factory</code> 根据 URL 参数动态生成表单</li>
+    <li>用 HTML5 Sortable + fetch 实现拖拽排序</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="map">CMS 的视图全景</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="CMS 视图：课程列表、创建、编辑、删除，模块 formset，模块内容列表，内容创建编辑删除，模块和内容排序">
+  <rect class="bx-a" x="16" y="20" width="230" height="250" rx="12"/>
+  <text class="ttl on-a" x="131" y="44" text-anchor="middle">课程（通用 CBV + Mixin）</text>
+  <text class="mono sm" x="30" y="72">ManageCourseListView</text>
+  <text class="sm" x="44" y="90">/course/mine/</text>
+  <text class="mono sm" x="30" y="116">CourseCreateView</text>
+  <text class="sm" x="44" y="134">/course/create/</text>
+  <text class="mono sm" x="30" y="160">CourseUpdateView</text>
+  <text class="sm" x="44" y="178">/course/&lt;pk&gt;/edit/</text>
+  <text class="mono sm" x="30" y="204">CourseDeleteView</text>
+  <text class="sm" x="44" y="222">/course/&lt;pk&gt;/delete/</text>
+  <text class="sm on-a" x="30" y="252">ListView / CreateView / …</text>
+
+  <rect class="bx-b" x="264" y="20" width="230" height="250" rx="12"/>
+  <text class="ttl on-b" x="379" y="44" text-anchor="middle">模块（View + 模板 Mixin）</text>
+  <text class="mono sm" x="278" y="72">CourseModuleUpdateView</text>
+  <text class="sm" x="292" y="90">formset 批量增删改模块</text>
+  <text class="mono sm" x="278" y="116">ModuleContentListView</text>
+  <text class="sm" x="292" y="134">侧栏模块 + 当前模块内容</text>
+  <text class="mono sm" x="278" y="160">ModuleOrderView</text>
+  <text class="sm" x="292" y="178">JSON：保存拖拽后的顺序</text>
+
+  <rect class="bx-g" x="512" y="20" width="232" height="250" rx="12"/>
+  <text class="ttl on-g" x="628" y="44" text-anchor="middle">内容（动态表单）</text>
+  <text class="mono sm" x="526" y="72">ContentCreateUpdateView</text>
+  <text class="sm" x="540" y="90">…/content/&lt;model_name&gt;/create/</text>
+  <text class="sm" x="540" y="108">…/content/&lt;model_name&gt;/&lt;id&gt;/</text>
+  <text class="mono sm" x="526" y="134">ContentDeleteView</text>
+  <text class="mono sm" x="526" y="160">ContentOrderView</text>
+  <text class="sm" x="540" y="188">一个视图服务四种内容模型</text>
+</svg>
+<figcaption>图 13-1　成功操作后多数视图都重定向回“我的课程”或模块内容页</figcaption>
+</figure>
+
+<h2 id="mixins">用 Mixin 组合类视图</h2>
+
+<p>“只能看到/编辑自己的课程”这条规则，列表、创建、编辑、删除四个视图都需要。与其写四遍，不如写成 Mixin：</p>
+
+<div class="code" data-lang="py" data-file="courses/views.py">
+<pre>
+from django.contrib.auth.mixins import LoginRequiredMixin, PermissionRequiredMixin
+from django.urls import reverse_lazy
+from django.views.generic.edit import CreateView, DeleteView, UpdateView
+from django.views.generic.list import ListView
+
+
+class OwnerMixin:
+    def get_queryset(self):                          # 只查自己的
+        qs = super().get_queryset()
+        return qs.filter(owner=self.request.user)
+
+
+class OwnerEditMixin:
+    def form_valid(self, form):                      # 保存前自动设置 owner
+        form.instance.owner = self.request.user
+        return super().form_valid(form)
+
+
+class OwnerCourseMixin(OwnerMixin, LoginRequiredMixin, PermissionRequiredMixin):
+    model = Course
+    fields = ['subject', 'title', 'slug', 'overview']
+    success_url = reverse_lazy('manage_course_list')
+
+
+class OwnerCourseEditMixin(OwnerCourseMixin, OwnerEditMixin):
+    template_name = 'courses/manage/course/form.html'
+
+
+class ManageCourseListView(OwnerCourseMixin, ListView):
+    template_name = 'courses/manage/course/list.html'
+    permission_required = 'courses.view_course'
+
+
+class CourseCreateView(OwnerCourseEditMixin, CreateView):
+    permission_required = 'courses.add_course'
+
+
+class CourseUpdateView(OwnerCourseEditMixin, UpdateView):
+    permission_required = 'courses.change_course'
+
+
+class CourseDeleteView(OwnerCourseMixin, DeleteView):
+    template_name = 'courses/manage/course/delete.html'
+    permission_required = 'courses.delete_course'
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="CourseUpdateView 的方法解析顺序：从左到右依次是各个 Mixin，最后是 UpdateView；super() 沿着这条链调用">
+  <text class="ttl" x="20" y="24">CourseUpdateView.__mro__（调用 super() 时的查找顺序，从左往右）</text>
+  <rect class="bx-a" x="20" y="40" width="150" height="46" rx="8"/><text class="mono sm on-a" x="95" y="67" text-anchor="middle">CourseUpdateView</text>
+  <rect class="bx" x="186" y="40" width="160" height="46" rx="8"/><text class="mono sm" x="266" y="67" text-anchor="middle">OwnerCourseEditMixin</text>
+  <rect class="bx" x="362" y="40" width="150" height="46" rx="8"/><text class="mono sm" x="437" y="67" text-anchor="middle">OwnerCourseMixin</text>
+  <rect class="bx-g" x="528" y="40" width="100" height="46" rx="8"/><text class="mono sm on-g" x="578" y="60" text-anchor="middle">OwnerMixin</text><text class="sm" x="578" y="78" text-anchor="middle">get_queryset</text>
+  <rect class="bx-p" x="20" y="110" width="170" height="46" rx="8"/><text class="mono sm on-p" x="105" y="130" text-anchor="middle">LoginRequiredMixin</text><text class="sm" x="105" y="148" text-anchor="middle">dispatch：未登录→登录页</text>
+  <rect class="bx-p" x="206" y="110" width="200" height="46" rx="8"/><text class="mono sm on-p" x="306" y="130" text-anchor="middle">PermissionRequiredMixin</text><text class="sm" x="306" y="148" text-anchor="middle">dispatch：无权限→403</text>
+  <rect class="bx-g" x="422" y="110" width="130" height="46" rx="8"/><text class="mono sm on-g" x="487" y="130" text-anchor="middle">OwnerEditMixin</text><text class="sm" x="487" y="148" text-anchor="middle">form_valid</text>
+  <rect class="bx-b" x="568" y="110" width="176" height="46" rx="8"/><text class="mono sm on-b" x="656" y="130" text-anchor="middle">UpdateView</text><text class="sm" x="656" y="148" text-anchor="middle">真正的处理逻辑</text>
+  <path class="ln" d="M172 63 H182" marker-end="url(#ar)"/>
+  <path class="ln" d="M348 63 H358" marker-end="url(#ar)"/>
+  <path class="ln" d="M514 63 H524" marker-end="url(#ar)"/>
+  <path class="ln" d="M630 63 H660 V96 H105 V106" marker-end="url(#ar)"/>
+  <path class="ln" d="M192 133 H202" marker-end="url(#ar)"/>
+  <path class="ln" d="M408 133 H418" marker-end="url(#ar)"/>
+  <path class="ln" d="M554 133 H564" marker-end="url(#ar)"/>
+
+  <rect class="bx-d" x="20" y="180" width="724" height="84" rx="10"/>
+  <text class="sm" x="36" y="204">规则一：Mixin 写在左边，具体视图基类（ListView、UpdateView…）写在最右边。</text>
+  <text class="sm" x="36" y="226">规则二：每个 Mixin 的方法都调用 super()，才能把调用“传下去”，所有 Mixin 都有机会参与。</text>
+  <text class="sm" x="36" y="248">规则三：访问控制类 Mixin（登录、权限）应尽量靠左，保证它们的 dispatch 最先执行。</text>
+</svg>
+<figcaption>图 13-2　Mixin 就是“可以插拔的一小段行为”，靠 Python 的 MRO 串起来</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 只想要标准 CRUD？</div>
+  <p>书中提到了 Django 核心开发者 Carlton Gibson 的 <strong>Neapolitan</strong> 包：一个视图类就能提供列表、详情、创建、编辑、删除，适合后台类页面快速起步。</p>
+</div>
+
+<h2 id="permissions">组与权限</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="用户属于组，组拥有权限；每个模型自动有 add、change、delete、view 四个权限">
+  <rect class="bx" x="16" y="60" width="140" height="70" rx="10"/>
+  <text class="ttl" x="86" y="88" text-anchor="middle">用户 alice</text>
+  <text class="sm" x="86" y="110" text-anchor="middle">is_staff 不必为真</text>
+  <path class="ln" d="M158 95 H206" marker-end="url(#ar)"/>
+  <text class="sm" x="182" y="85" text-anchor="middle">属于</text>
+  <rect class="bx-a" x="210" y="60" width="160" height="70" rx="10"/>
+  <text class="ttl on-a" x="290" y="88" text-anchor="middle">组 Instructors</text>
+  <text class="sm" x="290" y="110" text-anchor="middle">成员继承组的权限</text>
+  <path class="ln" d="M372 95 H420" marker-end="url(#ar)"/>
+  <text class="sm" x="396" y="85" text-anchor="middle">拥有</text>
+  <rect class="bx-g" x="424" y="20" width="320" height="150" rx="12"/>
+  <text class="ttl on-g" x="584" y="44" text-anchor="middle">权限：应用标签.动作_模型名</text>
+  <text class="mono sm" x="440" y="72">courses.add_course      courses.view_course</text>
+  <text class="mono sm" x="440" y="94">courses.change_course   courses.delete_course</text>
+  <text class="mono sm" x="440" y="116">courses.add_module …（每个模型四个）</text>
+  <text class="sm" x="440" y="146">user.has_perm('courses.add_course')</text>
+  <text class="sm" x="440" y="164">超级用户自动拥有全部权限</text>
+</svg>
+<figcaption>图 13-3　在 Admin 中建一个 Instructors 组，勾选 courses 应用（除 Subject 外）的权限，再把讲师加入该组</figcaption>
+</figure>
+
+<p>自定义权限写在模型的 <code>Meta.permissions</code> 里（第 15 章会用到），模板里可以用 <code>{% if perms.courses.add_course %}</code> 判断。</p>
+
+<h2 id="formsets">Formset：一次编辑多个模块</h2>
+
+<div class="code" data-lang="py" data-file="courses/forms.py">
+<pre>
+from django.forms.models import inlineformset_factory
+
+from .models import Course, Module
+
+ModuleFormSet = inlineformset_factory(
+    Course,                       # 父模型
+    Module,                       # 子模型
+    fields=['title', 'description'],
+    extra=2,                      # 额外显示 2 个空表单用来新增
+    can_delete=True,              # 每个表单带一个“删除”复选框
+)
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="一个 formset 包含管理表单和多个子表单：已有模块的表单、额外的空表单，每个都带删除复选框">
+  <rect class="bx-d" x="16" y="16" width="728" height="200" rx="12"/>
+  <text class="ttl" x="30" y="40">&lt;form method="post"&gt;  ModuleFormSet(instance=course)</text>
+  <rect class="bx-p" x="30" y="54" width="230" height="146" rx="8"/>
+  <text class="ttl on-p" x="145" y="76" text-anchor="middle">management_form</text>
+  <text class="mono sm" x="42" y="100">form-TOTAL_FORMS = 4</text>
+  <text class="mono sm" x="42" y="120">form-INITIAL_FORMS = 2</text>
+  <text class="mono sm" x="42" y="140">form-MIN/MAX_NUM_FORMS</text>
+  <text class="sm" x="42" y="168">隐藏字段：告诉 Django</text>
+  <text class="sm" x="42" y="186">一共提交了几个表单（必须渲染！）</text>
+  <rect class="bx-a" x="276" y="54" width="220" height="64" rx="8"/>
+  <text class="sm on-a" x="386" y="76" text-anchor="middle">form-0：已有模块 1</text>
+  <text class="sm" x="386" y="96" text-anchor="middle">title / description / DELETE☐</text>
+  <rect class="bx-a" x="276" y="130" width="220" height="64" rx="8"/>
+  <text class="sm on-a" x="386" y="152" text-anchor="middle">form-1：已有模块 2</text>
+  <text class="sm" x="386" y="172" text-anchor="middle">title / description / DELETE☑</text>
+  <rect class="bx-g" x="512" y="54" width="220" height="64" rx="8"/>
+  <text class="sm on-g" x="622" y="76" text-anchor="middle">form-2：extra 空表单</text>
+  <text class="sm" x="622" y="96" text-anchor="middle">填了就新增</text>
+  <rect class="bx-g" x="512" y="130" width="220" height="64" rx="8"/>
+  <text class="sm on-g" x="622" y="152" text-anchor="middle">form-3：extra 空表单</text>
+  <text class="sm" x="622" y="172" text-anchor="middle">留空则忽略</text>
+</svg>
+<figcaption>图 13-4　<code>formset.is_valid()</code> 校验全部子表单，<code>formset.save()</code> 一次性完成增、改、删</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="courses/views.py">
+<pre>
+from django.views.generic.base import TemplateResponseMixin, View
+
+
+class CourseModuleUpdateView(TemplateResponseMixin, View):
+    template_name = 'courses/manage/module/formset.html'
+    course = None
+
+    def get_formset(self, data=None):
+        return ModuleFormSet(instance=self.course, data=data)
+
+    def dispatch(self, request, pk):                  # GET 和 POST 都需要课程，放在 dispatch 里取
+        self.course = get_object_or_404(Course, id=pk, owner=request.user)
+        return super().dispatch(request, pk)
+
+    def get(self, request, *args, **kwargs):
+        return self.render_to_response({'course': self.course, 'formset': self.get_formset()})
+
+    def post(self, request, *args, **kwargs):
+        formset = self.get_formset(data=request.POST)
+        if formset.is_valid():
+            formset.save()
+            return redirect('manage_course_list')
+        return self.render_to_response({'course': self.course, 'formset': formset})
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="courses/manage/module/formset.html（核心）">
+<pre>
+&lt;form method="post"&gt;
+  {{ formset }}
+  {{ formset.management_form }}
+  {% csrf_token %}
+  &lt;input type="submit" value="Save modules"&gt;
+&lt;/form&gt;
+</pre>
+</div>
+
+<h2 id="dynamic-form">动态表单：一个视图服务四种内容</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="URL 中的 model_name 决定用哪个模型，modelform_factory 按模型动态生成表单，保存内容后创建 Content 关联到模块">
+  <rect class="bx" x="16" y="30" width="230" height="60" rx="10"/>
+  <text class="mono sm" x="131" y="54" text-anchor="middle">/course/module/6/content/</text>
+  <text class="mono sm on-a" x="131" y="74" text-anchor="middle">image/create/</text>
+  <path class="ln" d="M248 60 H290" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="294" y="20" width="200" height="80" rx="10"/>
+  <text class="mono sm on-b" x="394" y="42" text-anchor="middle">get_model('image')</text>
+  <text class="sm" x="394" y="62" text-anchor="middle">白名单校验后</text>
+  <text class="mono sm" x="394" y="82" text-anchor="middle">apps.get_model(...)</text>
+  <path class="ln" d="M496 60 H538" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="542" y="20" width="202" height="80" rx="10"/>
+  <text class="mono sm on-a" x="643" y="42" text-anchor="middle">modelform_factory(</text>
+  <text class="mono sm" x="643" y="62" text-anchor="middle">Image, exclude=[owner,</text>
+  <text class="mono sm" x="643" y="82" text-anchor="middle">order, created, updated])</text>
+  <path class="ln-a" d="M643 102 V130" marker-end="url(#ar-a)"/>
+  <rect class="bx-g" x="294" y="134" width="450" height="60" rx="10"/>
+  <text class="sm on-g" x="519" y="158" text-anchor="middle">POST 有效：obj.owner = user；obj.save()</text>
+  <text class="sm" x="519" y="178" text-anchor="middle">新建时再 Content.objects.create(module=…, item=obj)</text>
+</svg>
+<figcaption>图 13-5　“表单类”本身也可以在运行时生成</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="courses/views.py">
+<pre>
+from django.apps import apps
+from django.forms.models import modelform_factory
+
+
+class ContentCreateUpdateView(TemplateResponseMixin, View):
+    module = None
+    model = None
+    obj = None
+    template_name = 'courses/manage/content/form.html'
+
+    def get_model(self, model_name):
+        if model_name in ['text', 'video', 'image', 'file']:
+            return apps.get_model(app_label='courses', model_name=model_name)
+        return None
+
+    def get_form(self, model, *args, **kwargs):
+        Form = modelform_factory(model, exclude=['owner', 'order', 'created', 'updated'])
+        return Form(*args, **kwargs)
+
+    def dispatch(self, request, module_id, model_name, id=None):
+        self.module = get_object_or_404(Module, id=module_id, course__owner=request.user)
+        self.model = self.get_model(model_name)
+        if id:
+            self.obj = get_object_or_404(self.model, id=id, owner=request.user)
+        return super().dispatch(request, module_id, model_name, id)
+
+    def get(self, request, module_id, model_name, id=None):
+        form = self.get_form(self.model, instance=self.obj)
+        return self.render_to_response({'form': form, 'object': self.obj})
+
+    def post(self, request, module_id, model_name, id=None):
+        form = self.get_form(self.model, instance=self.obj, data=request.POST, files=request.FILES)
+        if form.is_valid():
+            obj = form.save(commit=False)
+            obj.owner = request.user
+            obj.save()
+            if not id:
+                Content.objects.create(module=self.module, item=obj)
+            return redirect('module_content_list', self.module.id)
+        return self.render_to_response({'form': form, 'object': self.obj})
+</pre>
+</div>
+
+<p>模板里想知道 <code>content.item</code> 是哪种模型，但 Django 模板禁止访问以下划线开头的属性（<code>item._meta</code>），所以写一个小过滤器：</p>
+
+<div class="code" data-lang="py" data-file="courses/templatetags/course.py">
+<pre>
+@register.filter
+def model_name(obj):
+    try:
+        return obj._meta.model_name
+    except AttributeError:
+        return None
+
+# 模板里：{% url "module_content_update" module.id item|model_name item.id %}
+</pre>
+</div>
+
+<h2 id="sortable">拖拽排序</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="拖拽排序：用户拖动列表项，sortupdate 事件收集新顺序，fetch 以 JSON 发送给排序视图，视图批量更新 order 字段">
+  <rect class="bx" x="16" y="20" width="170" height="170" rx="12"/>
+  <text class="ttl" x="101" y="44" text-anchor="middle">#modules 列表</text>
+  <rect class="bx-d" x="32" y="58" width="138" height="30" rx="6"/><text class="sm" x="101" y="78" text-anchor="middle">Module 1  (id=4)</text>
+  <rect class="bx-a" x="32" y="96" width="138" height="30" rx="6"/><text class="sm on-a" x="101" y="116" text-anchor="middle">Module 3 ↕ 拖动</text>
+  <rect class="bx-d" x="32" y="134" width="138" height="30" rx="6"/><text class="sm" x="101" y="154" text-anchor="middle">Module 2  (id=5)</text>
+  <path class="ln-a" d="M188 105 H240" marker-end="url(#ar-a)"/>
+  <text class="mono sm on-a" x="214" y="96" text-anchor="middle">sortupdate</text>
+  <rect class="bx-b" x="244" y="60" width="200" height="90" rx="10"/>
+  <text class="ttl on-b" x="344" y="84" text-anchor="middle">收集新顺序</text>
+  <text class="mono sm" x="344" y="108" text-anchor="middle">{"4": 0, "6": 1, "5": 2}</text>
+  <text class="sm" x="344" y="130" text-anchor="middle">同时更新页面上的编号</text>
+  <path class="ln" d="M446 105 H492" marker-end="url(#ar)"/>
+  <text class="mono sm" x="469" y="96" text-anchor="middle">fetch</text>
+  <rect class="bx-g" x="496" y="50" width="248" height="110" rx="12"/>
+  <text class="mono sm on-g" x="620" y="74" text-anchor="middle">ModuleOrderView.post()</text>
+  <text class="mono sm" x="512" y="98">for id, order in request_json:</text>
+  <text class="mono sm" x="528" y="118">Module.objects.filter(id=id,</text>
+  <text class="mono sm" x="528" y="138">  course__owner=user).update(…)</text>
+</svg>
+<figcaption>图 13-6　过滤条件里带上 owner，保证只能给自己的模块排序</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="courses/views.py（书中版本，使用 django-braces）">
+<pre>
+from braces.views import CsrfExemptMixin, JsonRequestResponseMixin
+
+
+class ModuleOrderView(CsrfExemptMixin, JsonRequestResponseMixin, View):
+    def post(self, request):
+        for id, order in self.request_json.items():
+            Module.objects.filter(id=id, course__owner=request.user).update(order=order)
+        return self.render_json_response({'saved': 'OK'})
+</pre>
+</div>
+
+<div class="code" data-lang="js" data-file="content_list.html 的 domready 块（节选）">
+<pre>
+sortable('#modules', {
+  forcePlaceholderSize: true,
+  placeholderClass: 'placeholder'
+})[0].addEventListener('sortupdate', function(e) {
+  modulesOrder = {};
+  document.querySelectorAll('#modules li').forEach(function (module, index) {
+    modulesOrder[module.dataset.id] = index;
+    module.querySelector('.order').innerHTML = index + 1;
+  });
+  options['body'] = JSON.stringify(modulesOrder);
+  fetch(moduleOrderUrl, options);
+});
+</pre>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 13 章代码点评 <small>Chapter13/educa</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 用 Mixin 表达横切关注点，查询里始终带 owner</h4>
+    <p><code>OwnerMixin</code> / <code>OwnerEditMixin</code> 是 CBV Mixin 的教科书用法；模块、内容相关的每个查询都带着 <code>course__owner=request.user</code>，即使拿到别人的 ID 也只会得到 404 —— 这是防止“越权访问（IDOR）”的正确姿势。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 仓库代码的“登出”变成了 GET 链接 <span class="src">Chapter13/educa/courses/templates/base.html:14</span></h4>
+    <p>第 12 章的 base.html 用的是 POST 表单登出，第 13 章仓库代码却改回了 <code>&lt;a href="{% url "logout" %}"&gt;</code>。Django 5.0 起 <code>LogoutView</code> 只接受 POST，点这个链接会得到 <strong>405 Method Not Allowed</strong>，用户根本退不出去。改回带 <code>{% csrf_token %}</code> 的 POST 表单。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 模块与内容相关的视图没有登录保护</h4>
+    <p>
+      <code>CourseModuleUpdateView</code>、<code>ContentCreateUpdateView</code>、<code>ContentDeleteView</code>、<code>ModuleContentListView</code> 以及两个排序视图都没有 <code>LoginRequiredMixin</code>。
+      匿名用户访问时，<code>owner=request.user</code> 中的 <code>AnonymousUser</code> 会让查询抛出 <code>TypeError</code>，得到 500 而不是跳转登录页；也没有检查讲师权限。
+      把它们都加上访问控制（按 Django 文档建议放在最左边）：
+    </p>
+<div class="code" data-lang="py"><pre>
+class CourseModuleUpdateView(LoginRequiredMixin, PermissionRequiredMixin,
+                             TemplateResponseMixin, View):
+    permission_required = 'courses.change_course'
+    ...
+</pre></div>
+    <p>或者直接启用 Django 5.1 的 <code>LoginRequiredMiddleware</code>（见第 4 章点评），从根本上避免“忘了加”。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 排序接口关闭了 CSRF 保护</h4>
+    <p>
+      <code>CsrfExemptMixin</code> 让任何网站都能以已登录讲师的身份 POST 到 <code>/course/module/order/</code>，打乱他的课程结构（典型 CSRF）。
+      第 6 章已经演示过正确做法：在 fetch 请求头里带上 <code>X-CSRFToken</code>。这样既不需要 django-braces，也不需要豁免：
+    </p>
+<div class="code" data-lang="py"><pre>
+import json
+
+from django.db import transaction
+from django.http import JsonResponse
+
+
+class ModuleOrderView(LoginRequiredMixin, View):
+    def post(self, request):
+        order_map = {int(k): int(v) for k, v in json.loads(request.body).items()}
+        modules = list(Module.objects.filter(id__in=order_map, course__owner=request.user))
+        for m in modules:
+            m.order = order_map[m.id]
+        with transaction.atomic():
+            Module.objects.bulk_update(modules, ['order'])     # 一条语句代替 N 条 UPDATE
+        return JsonResponse({'saved': 'OK'})
+</pre></div>
+<div class="code" data-lang="js"><pre>
+var options = {
+  method: 'POST',
+  mode: 'same-origin',
+  headers: {'X-CSRFToken': '{{ csrf_token }}', 'Content-Type': 'application/json'}
+}
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 非法的 model_name 会导致 500 <span class="src">courses/views.py:111</span></h4>
+    <p><code>get_model()</code> 对未知名称返回 <code>None</code>，随后 <code>modelform_factory(None, …)</code> 或 <code>get_object_or_404(None, …)</code> 直接崩溃。应在 <code>dispatch</code> 里 <code>if self.model is None: raise Http404</code>。同理，URL 里的 <code>&lt;pk&gt;</code>、<code>&lt;id&gt;</code> 应写成 <code>&lt;int:pk&gt;</code>，否则 <code>/course/abc/edit/</code> 这类地址也会走到数据库查询。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 删除内容不是原子的；列表页有 N+1</h4>
+    <p>
+      <code>ContentDeleteView</code> 先删 item 再删 Content，中间失败会留下孤儿；包进 <code>transaction.atomic()</code>，或按第 12 章点评用 <code>GenericRelation</code> 让数据库级联。
+      <code>content_list.html</code> 对每个 <code>content.item</code> 做一次泛型查询，课程列表里每门课又调用 <code>course.modules.count</code> 和 <code>course.modules.first</code>。可以在视图中
+      <code>module.contents.prefetch_related('item')</code>，课程列表用 <code>annotate(num_modules=Count('modules'))</code>。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 关于 <code>exclude</code> 与第三方 Mixin <span class="tag ts">TSD：表单 / 第三方包</span></h4>
+    <p>
+      TSD 反对在 ModelForm 里用 <code>exclude</code>（新增字段会被自动暴露），本章的动态表单为了兼容四种模型只能这样写，属于有意识的取舍 —— 给内容模型新增字段时要记得检查是否应该出现在表单里。
+      django-braces 提供的 Mixin 在 Django 自身已有等价物（<code>LoginRequiredMixin</code>、<code>PermissionRequiredMixin</code>、<code>JsonResponse</code>）的情况下价值有限，少一个依赖就少一个升级风险。
+    </p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>Mixin 把可复用的行为拆成小块，按 MRO 从左到右组合；每个方法都要调用 <code>super()</code>。</li>
+  <li>权限格式为 <code>应用.动作_模型</code>；用组批量授权；<code>PermissionRequiredMixin</code> 检查权限。</li>
+  <li><code>inlineformset_factory</code> 在一个页面增删改一组关联对象，别忘了 <code>management_form</code>。</li>
+  <li><code>modelform_factory</code> 可以在运行时为任意模型生成表单。</li>
+  <li>异步请求同样要带 CSRF 令牌；批量更新用 <code>bulk_update</code>。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>退出登录后直接访问 <code>/course/module/1/</code>，复现 500；给所有 CMS 视图加上访问控制。</li>
+    <li>去掉 <code>CsrfExemptMixin</code>，改为在 fetch 中发送 <code>X-CSRFToken</code>，并用 <code>bulk_update</code> 保存顺序。</li>
+    <li>在 Python shell 中打印 <code>CourseUpdateView.__mro__</code>，对照图 13-2。</li>
+    <li>给 formset 设置 <code>min_num=1, validate_min=True</code>，让课程至少保留一个模块。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

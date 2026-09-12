@@ -1,0 +1,678 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 17 章 · 上线部署 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="17">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 17 章 · 项目四：在线学习平台</span>
+<h1>上线部署</h1>
+<p class="lede">
+  一直以来我们都在用 <code>runserver</code> 和 SQLite 做开发。这一章把 Educa 平台搬进一个“像生产环境”的环境：
+  设置按环境拆分，用 Docker Compose 同时运行 PostgreSQL、Redis、uWSGI、Daphne 和 Nginx，
+  配置静态文件和 HTTPS，最后再学两个很实用的扩展点：<strong>自定义中间件</strong>和<strong>自定义管理命令</strong>。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>把 <code>settings.py</code> 拆成 base / local / prod，用环境变量读取机密信息</li>
+    <li>理解 Dockerfile 与 docker-compose.yml，把多个服务编排在一起</li>
+    <li>理解 Nginx → uWSGI（HTTP）与 Nginx → Daphne（WebSocket）的分工</li>
+    <li>用 <code>collectstatic</code> 收集静态文件并交给 Nginx</li>
+    <li>用 <code>check --deploy</code> 检查安全设置，配置 SSL/TLS 和 HTTPS 重定向</li>
+    <li>编写函数式中间件（子域名跳转）和带参数的管理命令</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="settings">按环境拆分设置</h2>
+
+<p>开发环境和生产环境有很多共同的设置（已安装应用、中间件、模板……），也有一些必须不同（<code>DEBUG</code>、数据库、域名、密钥）。常见做法是“一个基础文件 + 每个环境一个文件”：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="settings 目录：base.py 保存公共设置；local.py 和 prod.py 通过 from .base import * 继承并覆盖；DJANGO_SETTINGS_MODULE 决定加载哪一个">
+  <rect class="bx-d" x="16" y="16" width="220" height="218" rx="12"/>
+  <text class="ttl" x="126" y="40" text-anchor="middle">educa/settings/</text>
+  <text class="mono sm" x="36" y="70">__init__.py</text>
+  <text class="mono sm on-b" x="36" y="96">base.py</text>
+  <text class="mono sm on-g" x="36" y="122">local.py</text>
+  <text class="mono sm on-r" x="36" y="148">prod.py</text>
+  <text class="sm" x="36" y="184">BASE_DIR 要多加一层</text>
+  <text class="mono sm" x="36" y="206">.parent.parent.parent</text>
+
+  <rect class="bx-b" x="300" y="80" width="170" height="90" rx="12"/>
+  <text class="ttl on-b" x="385" y="106" text-anchor="middle">base.py</text>
+  <text class="sm" x="385" y="130" text-anchor="middle">INSTALLED_APPS、中间件</text>
+  <text class="sm" x="385" y="150" text-anchor="middle">模板、缓存、通道层……</text>
+
+  <rect class="bx-g" x="540" y="24" width="204" height="90" rx="12"/>
+  <text class="ttl on-g" x="642" y="50" text-anchor="middle">local.py</text>
+  <text class="mono sm" x="642" y="72" text-anchor="middle">from .base import *</text>
+  <text class="sm" x="642" y="96" text-anchor="middle">DEBUG=True，SQLite</text>
+
+  <rect class="bx-r" x="540" y="136" width="204" height="98" rx="12"/>
+  <text class="ttl on-r" x="642" y="162" text-anchor="middle">prod.py</text>
+  <text class="mono sm" x="642" y="184" text-anchor="middle">from .base import *</text>
+  <text class="sm" x="642" y="206" text-anchor="middle">DEBUG=False，PostgreSQL</text>
+  <text class="sm" x="642" y="224" text-anchor="middle">域名、HTTPS、Redis 主机</text>
+
+  <path class="ln-g" d="M536 70 L474 110" marker-end="url(#ar-g)"/>
+  <path class="ln-r" d="M536 184 L474 146" marker-end="url(#ar-r)"/>
+  <text class="sm" x="488" y="82">继承</text>
+  <text class="sm" x="488" y="180">继承</text>
+  <text class="mono sm on-a" x="300" y="212">DJANGO_SETTINGS_MODULE=</text>
+  <text class="mono sm on-a" x="300" y="230">educa.settings.prod</text>
+</svg>
+<figcaption>图 17-1　按环境拆分设置：用 <code>--settings</code> 参数或 <code>DJANGO_SETTINGS_MODULE</code> 环境变量选择</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="educa/settings/prod.py">
+<pre>
+from decouple import config
+
+from .base import *
+
+DEBUG = False
+ADMINS = [('Antonio M', 'email@mydomain.com')]    # 出错时 Django 会给这些人发邮件
+ALLOWED_HOSTS = ['.educaproject.com']              # 前导点：匹配主域名和所有子域名
+
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': config('POSTGRES_DB'),              # python-decouple 从环境变量读取
+        'USER': config('POSTGRES_USER'),
+        'PASSWORD': config('POSTGRES_PASSWORD'),
+        'HOST': 'db',                               # Compose 里的服务名就是主机名
+        'PORT': 5432,
+    }
+}
+
+REDIS_URL = 'redis://cache:6379'
+CACHES['default']['LOCATION'] = REDIS_URL
+CHANNEL_LAYERS['default']['CONFIG']['hosts'] = [REDIS_URL]
+
+# Security
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SECURE = True
+SECURE_SSL_REDIRECT = True
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+python manage.py runserver --settings=educa.settings.local
+# 或者设一次环境变量
+export DJANGO_SETTINGS_MODULE=educa.settings.local
+</pre>
+</div>
+
+<h2 id="docker">Docker Compose：一次启动所有服务</h2>
+
+<p>
+  <strong>镜像（image）</strong>是一个打包好的“文件系统 + 运行环境”，<strong>容器（container）</strong>是镜像跑起来的实例。
+  Dockerfile 描述怎样构建我们自己的 Django 镜像；docker-compose.yml 描述要同时运行哪些容器、它们如何连接。
+</p>
+
+<div class="code" data-lang="bash" data-file="Dockerfile">
+<pre>
+# Pull official base Python Docker image
+FROM python:3.12.3
+
+# Set environment variables
+ENV PYTHONDONTWRITEBYTECODE=1     # 不生成 .pyc
+ENV PYTHONUNBUFFERED=1            # 日志立即输出，不缓冲
+
+WORKDIR /code
+
+RUN pip install --upgrade pip
+COPY requirements.txt .
+RUN pip install -r requirements.txt   # 先装依赖：requirements 不变时这一层可以复用缓存
+
+COPY . .
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="Docker Compose 中的五个服务：nginx 暴露 80 和 443 端口；web 运行 uWSGI；daphne 运行 ASGI；db 运行 PostgreSQL；cache 运行 Redis；web 与 daphne 由同一个 Dockerfile 构建，都依赖 db 和 cache">
+  <rect class="bx-d" x="10" y="10" width="740" height="310" rx="14"/>
+  <text class="sm" x="28" y="32">docker compose up —— 同一个网络里，服务名即主机名</text>
+
+  <rect class="bx-p" x="290" y="46" width="180" height="64" rx="10"/>
+  <text class="ttl on-p" x="380" y="72" text-anchor="middle">nginx</text>
+  <text class="sm" x="380" y="94" text-anchor="middle">nginx:1.25.5 · 端口 80 / 443</text>
+
+  <rect class="bx-b" x="100" y="150" width="220" height="70" rx="10"/>
+  <text class="ttl on-b" x="210" y="176" text-anchor="middle">web</text>
+  <text class="sm" x="210" y="198" text-anchor="middle">uWSGI + Django（WSGI）</text>
+  <text class="mono sm" x="210" y="214" text-anchor="middle">uwsgi_app.sock</text>
+
+  <rect class="bx-a" x="440" y="150" width="220" height="70" rx="10"/>
+  <text class="ttl on-a" x="550" y="176" text-anchor="middle">daphne</text>
+  <text class="sm" x="550" y="198" text-anchor="middle">Daphne + Channels（ASGI）</text>
+  <text class="mono sm" x="550" y="214" text-anchor="middle">daphne:9001</text>
+
+  <path class="ln-b" d="M340 112 L250 146" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="236" y="130">Unix socket</text>
+  <path class="ln-a" d="M420 112 L510 146" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="478" y="130">HTTP（/ws/）</text>
+
+  <rect class="bx-g" x="150" y="258" width="200" height="50" rx="10"/>
+  <text class="ttl on-g" x="250" y="280" text-anchor="middle">db</text>
+  <text class="sm" x="250" y="298" text-anchor="middle">postgres:16.2 · ./data/db</text>
+  <rect class="bx-r" x="410" y="258" width="200" height="50" rx="10"/>
+  <text class="ttl on-r" x="510" y="280" text-anchor="middle">cache</text>
+  <text class="sm" x="510" y="298" text-anchor="middle">redis:7.2.4 · ./data/cache</text>
+
+  <path class="ln-d" d="M210 222 L240 254" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M260 222 L470 254" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M500 222 L300 254" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M550 222 L520 254" marker-end="url(#ar)"/>
+  <text class="sm" x="40" y="250">depends_on</text>
+  <text class="sm" x="40" y="268">+ wait-for-it.sh</text>
+  <text class="sm" x="660" y="80" text-anchor="middle">同一个 Dockerfile</text>
+  <text class="sm" x="660" y="98" text-anchor="middle">构建 web 与 daphne</text>
+</svg>
+<figcaption>图 17-2　最终的 Compose 应用有 5 个容器；数据目录挂载到宿主机，容器删了数据还在</figcaption>
+</figure>
+
+<div class="code" data-lang="bash" data-file="docker-compose.yml（节选）">
+<pre>
+services:
+  db:
+    image: postgres:16.2
+    restart: always
+    volumes:
+      - ./data/db:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+
+  web:
+    build: .
+    command: ["./wait-for-it.sh", "db:5432", "--",
+              "uwsgi", "--ini", "/code/config/uwsgi/uwsgi.ini"]
+    restart: always
+    volumes:
+      - .:/code
+    environment:
+      - DJANGO_SETTINGS_MODULE=educa.settings.prod
+      - POSTGRES_DB=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+    depends_on:
+      - db
+      - cache
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; depends_on 只保证“先启动”，不保证“已就绪”</div>
+  <p>PostgreSQL 第一次启动要初始化数据库，可能要好几秒。书中用 <code>wait-for-it.sh db:5432</code> 等端口可连接后再启动 Django。现代 Compose 还可以给 db 加 <code>healthcheck</code>（<code>pg_isready</code>），再写 <code>depends_on: {db: {condition: service_healthy}}</code>。</p>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+docker compose up                                              # 启动全部服务
+docker compose exec web python /code/educa/manage.py migrate   # 在容器里执行命令
+docker compose exec web python /code/educa/manage.py createsuperuser
+docker compose exec web python /code/educa/manage.py collectstatic
+</pre>
+</div>
+
+<h2 id="servers">uWSGI、Nginx 与 Daphne</h2>
+
+<p><code>runserver</code> 只为开发设计：单进程、不够安全、不擅长发静态文件。生产环境要分工：</p>
+
+<ol class="steps">
+  <li><strong>Nginx</strong> 面向互联网：终结 TLS、直接发送静态/媒体文件、按路径把请求转给后端。</li>
+  <li><strong>uWSGI</strong> 是 WSGI 应用服务器：管理多个 worker 进程，通过 Unix socket 接收 Nginx 转来的普通 HTTP 请求。</li>
+  <li><strong>Daphne</strong> 是 ASGI 服务器：处理以 <code>/ws/</code> 开头的 WebSocket 连接。</li>
+</ol>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="生产环境的请求路径：浏览器经 80 端口被 301 重定向到 443；Nginx 根据路径把 static 和 media 直接从磁盘返回，ws 转给 Daphne，其余转给 uWSGI；两个应用服务器都访问 PostgreSQL 和 Redis">
+  <rect class="bx" x="14" y="130" width="110" height="60" rx="10"/>
+  <text class="ttl" x="69" y="156" text-anchor="middle">浏览器</text>
+  <text class="sm" x="69" y="176" text-anchor="middle">https / wss</text>
+
+  <rect class="bx-p" x="170" y="40" width="190" height="250" rx="12"/>
+  <text class="ttl on-p" x="265" y="64" text-anchor="middle">Nginx</text>
+  <rect class="bx-d" x="186" y="78" width="158" height="40" rx="6"/>
+  <text class="mono sm" x="265" y="96" text-anchor="middle">:80 → 301 https</text>
+  <text class="sm" x="265" y="112" text-anchor="middle">只做重定向</text>
+  <rect class="bx-d" x="186" y="128" width="158" height="146" rx="6"/>
+  <text class="mono sm" x="265" y="148" text-anchor="middle">:443 ssl</text>
+  <text class="mono sm" x="200" y="178">/static/</text>
+  <text class="mono sm" x="200" y="200">/media/</text>
+  <text class="mono sm" x="200" y="230">/ws/</text>
+  <text class="mono sm" x="200" y="260">/ 其他</text>
+  <path class="ln" d="M126 150 H166" marker-end="url(#ar)"/>
+
+  <rect class="bx-g" x="430" y="20" width="310" height="70" rx="10"/>
+  <text class="ttl on-g" x="585" y="46" text-anchor="middle">磁盘上的文件</text>
+  <text class="mono sm" x="585" y="66" text-anchor="middle">/code/educa/static/  /code/educa/media/</text>
+  <text class="sm" x="585" y="82" text-anchor="middle">collectstatic 的输出 + 用户上传</text>
+  <path class="ln-g" d="M300 176 L426 60" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M300 198 L426 74" marker-end="url(#ar-g)"/>
+
+  <rect class="bx-a" x="430" y="120" width="150" height="66" rx="10"/>
+  <text class="ttl on-a" x="505" y="146" text-anchor="middle">Daphne</text>
+  <text class="sm" x="505" y="168" text-anchor="middle">ASGI · Channels</text>
+  <path class="ln-a" d="M270 226 L426 164" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="366" y="214">proxy_pass</text>
+
+  <rect class="bx-b" x="430" y="220" width="150" height="66" rx="10"/>
+  <text class="ttl on-b" x="505" y="246" text-anchor="middle">uWSGI</text>
+  <text class="sm" x="505" y="268" text-anchor="middle">WSGI · Django</text>
+  <path class="ln-b" d="M280 258 H426" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="366" y="250">uwsgi_pass</text>
+
+  <rect class="bx-d" x="620" y="120" width="120" height="166" rx="10"/>
+  <text class="ttl" x="680" y="150" text-anchor="middle">PostgreSQL</text>
+  <text class="ttl" x="680" y="200" text-anchor="middle">Redis</text>
+  <text class="sm" x="680" y="222" text-anchor="middle">缓存 + 通道层</text>
+  <path class="ln-d" d="M582 153 H616" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M582 253 H616" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 17-3　Nginx 作为反向代理：静态文件不再经过 Python，HTTP 和 WebSocket 分别交给最合适的服务器</figcaption>
+</figure>
+
+<div class="code" data-lang="bash" data-file="config/uwsgi/uwsgi.ini">
+<pre>
+[uwsgi]
+socket=/code/educa/uwsgi_app.sock   # 通过 Unix socket 和 Nginx 通信
+chdir = /code/educa/
+module=educa.wsgi:application
+master=true
+chmod-socket=666
+uid=www-data
+gid=www-data
+vacuum=true                           # 退出时清理 socket 文件
+</pre>
+</div>
+
+<div class="code" data-lang="bash" data-file="config/nginx/default.conf.template">
+<pre>
+upstream uwsgi_app { server unix:/code/educa/uwsgi_app.sock; }
+upstream daphne    { server daphne:9001; }
+
+server {
+    listen       80;
+    server_name  *.educaproject.com educaproject.com;
+    return 301 https://$host$request_uri;          # HTTP 一律跳到 HTTPS
+}
+
+server {
+    listen       443 ssl;
+    ssl_certificate      /code/educa/ssl/educa.crt;
+    ssl_certificate_key  /code/educa/ssl/educa.key;
+    server_name  *.educaproject.com educaproject.com;
+
+    location / {
+        include      /etc/nginx/uwsgi_params;
+        uwsgi_pass   uwsgi_app;
+    }
+    location /ws/ {
+        proxy_pass          http://daphne;
+        proxy_http_version  1.1;
+        proxy_set_header    Upgrade $http_upgrade;      # WebSocket 握手需要这两个头
+        proxy_set_header    Connection "upgrade";
+        proxy_redirect      off;
+    }
+    location /static/ { alias /code/educa/static/; }
+    location /media/  { alias /code/educa/media/; }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 静态文件的一条流水线</div>
+  <p>每个应用的 <code>static/</code> 目录 → <code>collectstatic</code> → <code>STATIC_ROOT</code>（一个目录）→ Nginx 的 <code>location /static/</code>。<code>DEBUG=False</code> 时 Django 不再替你发静态文件，这就是第一次启动时后台“没有样式”的原因。</p>
+</div>
+
+<h2 id="tls">安全检查与 HTTPS</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+python manage.py check --deploy --settings=educa.settings.prod
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>警告</th><th>含义</th><th>处理</th></tr>
+  <tr><td><code>security.W009</code></td><td>SECRET_KEY 太短或以 <code>django-insecure-</code> 开头</td><td>换成足够长的随机串，并放到环境变量</td></tr>
+  <tr><td><code>security.W012</code></td><td>会话 Cookie 可以经 HTTP 发送</td><td><code>SESSION_COOKIE_SECURE = True</code></td></tr>
+  <tr><td><code>security.W016</code></td><td>CSRF Cookie 可以经 HTTP 发送</td><td><code>CSRF_COOKIE_SECURE = True</code></td></tr>
+  <tr><td><code>security.W008</code></td><td>没有强制跳转 HTTPS</td><td><code>SECURE_SSL_REDIRECT = True</code>（或在 Nginx 中重定向）</td></tr>
+  <tr><td><code>security.W004</code></td><td>没有启用 HSTS</td><td>拿到受信任证书后设置 <code>SECURE_HSTS_SECONDS</code></td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="bash" data-file="生成自签名证书（仅用于本地测试）">
+<pre>
+openssl req -x509 -newkey rsa:2048 -sha256 -days 3650 -nodes \
+  -keyout ssl/educa.key -out ssl/educa.crt \
+  -subj '/CN=*.educaproject.com' \
+  -addext 'subjectAltName=DNS:*.educaproject.com'
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="HTTPS 的三层保护：Nginx 把 HTTP 301 到 HTTPS；Cookie 带 Secure 标志只经 HTTPS 发送；HSTS 让浏览器以后直接用 HTTPS">
+  <rect class="bx-b" x="16" y="20" width="230" height="130" rx="12"/>
+  <text class="ttl on-b" x="131" y="46" text-anchor="middle">① 重定向</text>
+  <text class="mono sm" x="131" y="74" text-anchor="middle">http://… → 301</text>
+  <text class="mono sm" x="131" y="96" text-anchor="middle">https://…</text>
+  <text class="sm" x="131" y="126" text-anchor="middle">Nginx 做比 Django 更省</text>
+  <rect class="bx-g" x="265" y="20" width="230" height="130" rx="12"/>
+  <text class="ttl on-g" x="380" y="46" text-anchor="middle">② Secure Cookie</text>
+  <text class="mono sm" x="380" y="74" text-anchor="middle">Set-Cookie: sessionid=…;</text>
+  <text class="mono sm" x="380" y="96" text-anchor="middle">Secure; HttpOnly</text>
+  <text class="sm" x="380" y="126" text-anchor="middle">会话永远不走明文</text>
+  <rect class="bx-a" x="514" y="20" width="230" height="130" rx="12"/>
+  <text class="ttl on-a" x="629" y="46" text-anchor="middle">③ HSTS</text>
+  <text class="mono sm" x="629" y="74" text-anchor="middle">Strict-Transport-Security:</text>
+  <text class="mono sm" x="629" y="96" text-anchor="middle">max-age=31536000</text>
+  <text class="sm" x="629" y="126" text-anchor="middle">浏览器记住“只用 HTTPS”</text>
+</svg>
+<figcaption>图 17-4　真实域名请用 Let's Encrypt 获取免费证书；确认 HTTPS 稳定后再逐步加大 HSTS 时长</figcaption>
+</figure>
+
+<p>别忘了 WebSocket：页面走 HTTPS 时，聊天室的客户端也要改成 <code>wss://</code>，否则浏览器会拦截“混合内容”。<code>asgi.py</code> 里也加上了 <code>AllowedHostsOriginValidator</code>（第 16 章点评里提到的问题，书在这一章补上了）。</p>
+
+<h2 id="middleware">自定义中间件</h2>
+
+<p>中间件是包在视图外面的一层层“洋葱皮”：请求按 <code>MIDDLEWARE</code> 列表的顺序从外往里走，响应按相反顺序从里往外走。任何一层都可以直接返回响应，让请求不再往里走（短路）。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="中间件洋葱模型：请求从外层 SecurityMiddleware 依次进入 Session、Common、Csrf、Auth、Messages 到达视图；响应按相反顺序返回；某层可以短路直接返回响应">
+  <rect class="bx-d" x="120" y="20" width="520" height="240" rx="18"/>
+  <text class="sm" x="136" y="40">SecurityMiddleware</text>
+  <rect class="bx-d" x="150" y="48" width="460" height="200" rx="16"/>
+  <text class="sm" x="166" y="68">SessionMiddleware</text>
+  <rect class="bx-d" x="180" y="76" width="400" height="160" rx="14"/>
+  <text class="sm" x="196" y="96">CsrfViewMiddleware</text>
+  <rect class="bx-d" x="210" y="104" width="340" height="120" rx="12"/>
+  <text class="sm" x="226" y="124">AuthenticationMiddleware</text>
+  <rect class="bx-a" x="240" y="132" width="280" height="80" rx="10"/>
+  <text class="sm on-a" x="256" y="152">subdomain_course_middleware</text>
+  <rect class="bx-g" x="320" y="162" width="120" height="40" rx="8"/>
+  <text class="ttl on-g" x="380" y="187" text-anchor="middle">视图</text>
+
+  <path class="ln-b" d="M20 110 H316" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="20" y="100">请求 →</text>
+  <path class="ln-g" d="M444 190 H740" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="690" y="210">→ 响应</text>
+  <path class="ln-r" d="M520 150 C600 140 640 120 740 120" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="646" y="110">短路：redirect</text>
+</svg>
+<figcaption>图 17-5　顺序很重要：后面的中间件会依赖前面的中间件放进 <code>request</code> 的东西（例如 <code>request.user</code>）</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="courses/middleware.py">
+<pre>
+from django.shortcuts import get_object_or_404, redirect
+from django.urls import reverse
+
+from .models import Course
+
+
+def subdomain_course_middleware(get_response):     # 工厂：启动时调用一次
+    """
+    Subdomains for courses
+    """
+    def middleware(request):                        # 每个请求调用一次
+        host_parts = request.get_host().split('.')
+        if len(host_parts) &gt; 2 and host_parts[0] != 'www':
+            course = get_object_or_404(Course, slug=host_parts[0])
+            course_url = reverse('course_detail', args=[course.slug])
+            url = '{}://{}{}'.format(request.scheme, '.'.join(host_parts[1:]), course_url)
+            return redirect(url)                     # 短路，不再调用视图
+        response = get_response(request)
+        return response
+
+    return middleware
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 130" role="img" aria-label="子域名跳转：django.educaproject.com 被拆成三段，第一段 django 作为课程 slug，重定向到 educaproject.com/course/django/">
+  <rect class="bx-a" x="16" y="36" width="220" height="56" rx="10"/>
+  <text class="mono sm on-a" x="126" y="60" text-anchor="middle">django.educaproject.com</text>
+  <text class="sm" x="126" y="80" text-anchor="middle">split('.') → 3 段</text>
+  <path class="ln" d="M238 64 H290" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="294" y="36" width="170" height="56" rx="10"/>
+  <text class="sm" x="379" y="60" text-anchor="middle">slug='django'</text>
+  <text class="sm" x="379" y="80" text-anchor="middle">查课程，找不到则 404</text>
+  <path class="ln" d="M466 64 H518" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="522" y="36" width="222" height="56" rx="10"/>
+  <text class="mono sm on-g" x="633" y="60" text-anchor="middle">302 → educaproject.com</text>
+  <text class="mono sm on-g" x="633" y="80" text-anchor="middle">/course/django/</text>
+</svg>
+<figcaption>图 17-6　子域名成了课程详情页的快捷方式；Nginx 的 <code>server_name</code> 和 <code>ALLOWED_HOSTS</code> 都要允许通配子域名</figcaption>
+</figure>
+
+<h2 id="commands">自定义管理命令</h2>
+
+<p>放在应用的 <code>management/commands/</code> 目录下的每个模块，都会成为一个 <code>manage.py</code> 子命令，模块名就是命令名。</p>
+
+<div class="code" data-lang="bash" data-file="目录结构">
+<pre>
+students/
+    management/
+        __init__.py
+        commands/
+            __init__.py
+            enroll_reminder.py   # → python manage.py enroll_reminder
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="students/management/commands/enroll_reminder.py">
+<pre>
+class Command(BaseCommand):
+    help = 'Sends an e-mail reminder to users registered more' \
+           'than N days that are not enrolled into any courses yet'
+
+    def add_arguments(self, parser):
+        parser.add_argument('--days', dest='days', type=int)    # argparse 语法
+
+    def handle(self, *args, **options):
+        emails = []
+        subject = 'Enroll in a course'
+        date_joined = timezone.now().today() - datetime.timedelta(days=options['days'] or 0)
+        users = User.objects.annotate(
+            course_count=Count('courses_joined')
+        ).filter(course_count=0, date_joined__date__lte=date_joined)
+        for user in users:
+            message = f"""Dear {user.first_name},
+            We noticed that you didn't enroll in any courses yet.
+            What are you waiting for?"""
+            emails.append((subject, message, settings.DEFAULT_FROM_EMAIL, [user.email]))
+        send_mass_mail(emails)                       # 一次 SMTP 连接发送所有邮件
+        self.stdout.write(f'Sent {len(emails)} reminders')
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+docker compose exec web python /code/educa/manage.py enroll_reminder --days=20
+# 在代码里调用：management.call_command('enroll_reminder', days=20)
+# 定时执行：cron 或 Celery Beat
+</pre>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 17 章代码点评 <small>Chapter17/</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 设置分层、限定主机、Nginx 分工清晰</h4>
+    <p>设置拆成 base/local/prod，数据库凭据用 python-decouple 从环境变量读取；<code>ALLOWED_HOSTS</code> 收紧到自己的域名；静态文件由 Nginx 直接发送，HTTP→HTTPS 在 Nginx 层重定向；WebSocket 补上了 <code>AllowedHostsOriginValidator</code> 与 <code>wss://</code>；提醒邮件用 <code>send_mass_mail</code> 复用一条 SMTP 连接。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 子域名中间件把“用 IP 访问”全部变成 404 <span class="src">Chapter17/educa/courses/middleware.py:13</span></h4>
+    <p>
+      中间件写在 <code>base.py</code> 里，本地环境同样生效。按书上说的打开 <code>http://127.0.0.1:8000/</code>：
+      <code>'127.0.0.1:8000'.split('.')</code> 得到 4 段，第一段 <code>'127'</code> 被当成课程 slug —— <strong>每一个页面都 404</strong>。
+      负载均衡器、容器编排平台用 IP 做健康检查时也会失败。
+      判断“是不是子域名”应该和配置好的主域名比较，而不是数点号：
+    </p>
+<div class="code" data-lang="py"><pre>
+# settings/base.py
+SITE_DOMAIN = 'educaproject.com'          # local.py 中可以改成 'localhost'
+
+# courses/middleware.py
+def subdomain_course_middleware(get_response):
+    base = settings.SITE_DOMAIN
+
+    def middleware(request):
+        host = request.get_host().split(':')[0].lower()
+        if host.endswith('.' + base):
+            subdomain = host.removesuffix('.' + base)
+            if subdomain != 'www':
+                course = get_object_or_404(Course, slug=subdomain)
+                return redirect(f'{request.scheme}://{base}{course.get_absolute_url()}')
+        return get_response(request)
+
+    return middleware
+</pre></div>
+    <p>另外，只做重定向的中间件放在列表靠前的位置（<code>SecurityMiddleware</code> 之后）即可，没必要先走完会话、CSRF、认证。需要更完整的子域名路由时可以用 django-hosts。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 机密信息都在版本库里 <span class="tag ts">TSD：设置与环境变量</span></h4>
+    <p>
+      ① <code>SECRET_KEY</code> 仍然写死在 <code>base.py</code>，生产也用这一个；② TLS 私钥 <code>educa/ssl/educa.key</code> 被提交进仓库；
+      ③ 数据库密码 <code>postgres</code> 明文写在 docker-compose.yml 里。
+      Two Scoops 的原则是：<strong>机密只来自环境（或密钥管理服务），缺失时立即报错</strong>，而不是悄悄用一个默认值。
+    </p>
+<div class="code" data-lang="py" data-file="settings/prod.py"><pre>
+SECRET_KEY = config('DJANGO_SECRET_KEY')            # 没设置就抛异常，启动失败
+DATABASES = {'default': {
+    'ENGINE': 'django.db.backends.postgresql',
+    'NAME': config('POSTGRES_DB'),
+    'USER': config('POSTGRES_USER'),
+    'PASSWORD': config('POSTGRES_PASSWORD'),
+    'HOST': config('POSTGRES_HOST', default='db'),
+    'PORT': config('POSTGRES_PORT', default=5432, cast=int),
+    'CONN_MAX_AGE': 60,
+    'CONN_HEALTH_CHECKS': True,
+}}
+</pre></div>
+    <p>Compose 里改用 <code>env_file: .env.prod</code>，把 <code>.env*</code>、<code>ssl/*.key</code>、<code>data/</code> 加进 <code>.gitignore</code> 和 <code>.dockerignore</code>。已经提交过的密钥要视为泄露，重新生成。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 拆分设置后，默认设置模块指向了空文件 <span class="src">educa/manage.py、wsgi.py、asgi.py</span></h4>
+    <p>
+      三个入口文件都还是 <code>os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'educa.settings')</code>。拆分后 <code>educa.settings</code> 是一个<strong>空的</strong> <code>__init__.py</code>，
+      忘了写 <code>--settings</code> 时会报 “SECRET_KEY setting must not be empty” 这类让初学者摸不着头脑的错误。
+      建议 <code>manage.py</code> 默认 <code>educa.settings.local</code>，<code>wsgi.py</code>/<code>asgi.py</code> 默认 <code>educa.settings.prod</code>（或者不给默认值，强制要求设置环境变量）。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 开发工具混进了生产设置 <span class="tag ts">TSD：多份 requirements</span></h4>
+    <p>
+      <code>debug_toolbar</code>（应用、排在第一位的中间件、<code>__debug__/</code> URL）、<code>redisboard</code>，以及 <code>EMAIL_BACKEND = console</code> 都在 <code>base.py</code> 里。
+      最后一项影响最大：生产环境的 <code>ADMINS</code> 报错邮件和提醒邮件都只会打印到容器日志里，没人收得到。
+      把它们移进 <code>local.py</code>；prod 配置真正的 SMTP 或邮件服务。依赖也按 Two Scoops 拆成 <code>requirements/base.txt</code>、<code>local.txt</code>、<code>production.txt</code>，生产镜像就不必安装调试工具。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> Docker 镜像与 Compose 的生产化</h4>
+    <p>
+      ① 生产环境仍然 <code>volumes: - .:/code</code> 把宿主机源码挂进容器 —— 这是开发模式，镜像里 <code>COPY . .</code> 的内容被覆盖，部署的并不是构建出来的那个镜像；
+      ② 没有 <code>.dockerignore</code>，<code>data/db</code>、SQLite 文件、私钥都会被复制进镜像；
+      ③ 容器以 root 运行，可以 <code>RUN useradd</code> 后 <code>USER app</code>；
+      ④ 基础镜像可换成 <code>python:3.12-slim</code>，<code>pip install --no-cache-dir</code>；
+      ⑤ <code>collectstatic</code> 放进构建步骤，<code>migrate</code> 作为独立的发布步骤，而不是手工 exec；
+      ⑥ 仓库里的 web 服务仍然映射了 8000 端口，但 uWSGI 只监听 socket，这个映射是多余的（书中正文已要求删除）。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 还缺的几项生产配置</h4>
+    <p>
+      ① Nginx 默认 <code>client_max_body_size 1m</code>，讲师上传超过 1 MB 的课程图片/文件会得到 413，需要显式调大；
+      ② Daphne 在代理后面要加 <code>--proxy-headers</code>，Nginx 的 <code>/ws/</code> 块补上 <code>X-Forwarded-For</code>、<code>X-Forwarded-Proto</code>，否则拿不到真实 IP 和协议；
+      ③ 没有 <code>LOGGING</code> 配置，生产排错困难；
+      ④ 静态文件建议用 <code>STORAGES["staticfiles"]</code> 配置 <code>ManifestStaticFilesStorage</code>，文件名带哈希，可以放心设置长缓存；
+      ⑤ 用真实证书后设置 <code>SECURE_HSTS_SECONDS</code>；
+      ⑥ 把 <code>manage.py check --deploy --fail-level WARNING</code> 放进 CI。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 提醒命令的日期计算与幂等性 <span class="src">students/management/commands/enroll_reminder.py:21</span></h4>
+    <p>
+      <code>timezone.now().today()</code> 看起来是“带时区的今天”，实际上 <code>today()</code> 是类方法，返回的是<strong>服务器本地时间的 naive datetime</strong>，与 <code>TIME_ZONE</code> 无关（书中正文说的 <code>.date()</code> 才是本意）。
+      此外 help 字符串拼接漏了空格（“morethan”）；直接导入 <code>User</code> 而不是 <code>get_user_model()</code>；没有排除停用账号和空邮箱；
+      更重要的是，每天用 cron 跑一次，同一个人会<strong>每天都收到一封</strong> —— 需要记录“已提醒”的时间。
+    </p>
+<div class="code" data-lang="py"><pre>
+def handle(self, *args, days, **options):
+    cutoff = timezone.localdate() - datetime.timedelta(days=days)
+    users = (get_user_model().objects
+             .filter(is_active=True, courses_joined__isnull=True,
+                     date_joined__date__lte=cutoff)
+             .exclude(email='')
+             .only('first_name', 'email'))
+    messages = [(subject, render_to_string('students/email/reminder.txt', {'user': u}),
+                 None, [u.email]) for u in users.iterator()]
+    sent = send_mass_mail(messages)
+    self.stdout.write(self.style.SUCCESS(f'Sent {sent} reminders'))
+# add_arguments 里：parser.add_argument('--days', type=int, default=0)
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> uWSGI 之外的选择</h4>
+    <p>
+      uWSGI 官方文档已声明项目处于<strong>维护模式</strong>（只修 bug）。新项目更常见的组合是 <strong>Gunicorn</strong>（WSGI）+ Daphne/Uvicorn（ASGI），
+      或者干脆只跑一个 ASGI 服务器同时处理 HTTP 和 WebSocket（例如 <code>gunicorn -k uvicorn_worker.UvicornWorker</code>），少维护一套进程。
+      如果不想自己维护 Nginx 发静态文件，WhiteNoise 也是 Django 社区的常用方案。
+      至于平台，Docker Compose 适合单机；多机伸缩再考虑 Kubernetes，或者直接用 PaaS（Render、Fly.io、Railway 等）。
+    </p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>设置按环境拆分；机密从环境变量读取；用 <code>--settings</code> 或 <code>DJANGO_SETTINGS_MODULE</code> 选择。</li>
+  <li>Docker Compose 用一个文件编排 Nginx、uWSGI、Daphne、PostgreSQL、Redis；服务名即主机名。</li>
+  <li>Nginx 负责 TLS、静态文件、HTTP→HTTPS 重定向，并按路径分流到 uWSGI（HTTP）和 Daphne（WebSocket）。</li>
+  <li><code>check --deploy</code> 能发现大部分安全设置遗漏；Secure Cookie、SSL 重定向、HSTS 一起用。</li>
+  <li>中间件是请求/响应的洋葱层，函数式写法是“返回函数的函数”；管理命令放在 <code>management/commands/</code>。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 <code>--settings=educa.settings.local</code> 启动后访问 <code>http://127.0.0.1:8000/</code>，验证子域名中间件的 404 问题，再按点评修复。</li>
+    <li>把 <code>SECRET_KEY</code> 移到 <code>.env</code>，确认缺少它时 prod 设置会启动失败。</li>
+    <li>给 db 服务加 <code>healthcheck</code>，用 <code>condition: service_healthy</code> 替换 wait-for-it.sh。</li>
+    <li>给 <code>enroll_reminder</code> 加一个 <code>--dry-run</code> 参数：只打印会发给谁，不真正发送。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

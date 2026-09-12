@@ -1,0 +1,729 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 8 章 · 构建在线商店 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="8">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 8 章 · 项目三：在线商店</span>
+<h1>构建在线商店</h1>
+<p class="lede">
+  第三个项目是一个完整的电商网站。这一章搭出骨架：商品目录、基于会话的购物车、让购物车在每个页面都可见的上下文处理器、
+  下单流程，以及用 Celery + RabbitMQ 在后台发送订单确认邮件。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>设计分类与商品模型，理解金额为什么要用 <code>DecimalField</code></li>
+    <li>理解 Django 会话的工作方式与各种存储引擎</li>
+    <li>用一个 <code>Cart</code> 类把购物车封装在会话里</li>
+    <li>编写自定义上下文处理器</li>
+    <li>创建订单与订单项，使用 Admin 内联</li>
+    <li>理解“生产者 → 消息队列 → 工作进程”模型，用 Celery 执行异步任务并用 Flower 监控</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="overview">项目结构</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="myshop 项目由 shop、cart、orders 三个应用组成，后续章节增加 payment 和 coupons">
+  <rect class="bx-a" x="20" y="20" width="720" height="170" rx="12"/>
+  <text class="ttl on-a" x="40" y="44">myshop 项目</text>
+  <rect class="bx-b" x="40" y="60" width="160" height="110" rx="10"/>
+  <text class="ttl on-b" x="120" y="84" text-anchor="middle">shop</text>
+  <text class="sm" x="120" y="108" text-anchor="middle">Category、Product</text>
+  <text class="sm" x="120" y="128" text-anchor="middle">目录列表 / 详情</text>
+  <rect class="bx-g" x="220" y="60" width="160" height="110" rx="10"/>
+  <text class="ttl on-g" x="300" y="84" text-anchor="middle">cart</text>
+  <text class="sm" x="300" y="108" text-anchor="middle">Cart 类（会话）</text>
+  <text class="sm" x="300" y="128" text-anchor="middle">上下文处理器</text>
+  <rect class="bx-p" x="400" y="60" width="160" height="110" rx="10"/>
+  <text class="ttl on-p" x="480" y="84" text-anchor="middle">orders</text>
+  <text class="sm" x="480" y="108" text-anchor="middle">Order、OrderItem</text>
+  <text class="sm" x="480" y="128" text-anchor="middle">Celery 任务</text>
+  <rect class="bx-d" x="580" y="60" width="140" height="110" rx="10"/>
+  <text class="ttl" x="650" y="84" text-anchor="middle">后续</text>
+  <text class="sm" x="650" y="108" text-anchor="middle">payment（第 9 章）</text>
+  <text class="sm" x="650" y="128" text-anchor="middle">coupons（第 10 章）</text>
+  <text class="sm" x="650" y="148" text-anchor="middle">i18n（第 11 章）</text>
+</svg>
+<figcaption>图 8-1　按业务边界拆分应用：每个应用只做一件事</figcaption>
+</figure>
+
+<h2 id="catalog">商品目录</h2>
+
+<div class="code" data-lang="py" data-file="shop/models.py">
+<pre>
+from django.db import models
+from django.urls import reverse
+
+
+class Category(models.Model):
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=200, unique=True)    # unique 自带索引
+
+    class Meta:
+        ordering = ['name']
+        indexes = [models.Index(fields=['name'])]
+        verbose_name = 'category'
+        verbose_name_plural = 'categories'                  # 否则 Admin 显示 “Categorys”
+
+    def get_absolute_url(self):
+        return reverse('shop:product_list_by_category', args=[self.slug])
+
+
+class Product(models.Model):
+    category = models.ForeignKey(Category, related_name='products', on_delete=models.CASCADE)
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=200)
+    image = models.ImageField(upload_to='products/%Y/%m/%d', blank=True)
+    description = models.TextField(blank=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    available = models.BooleanField(default=True)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['name']
+        indexes = [
+            models.Index(fields=['id', 'slug']),
+            models.Index(fields=['name']),
+            models.Index(fields=['-created']),
+        ]
+
+    def get_absolute_url(self):
+        return reverse('shop:product_detail', args=[self.id, self.slug])
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 钱永远用 DecimalField</div>
+  <p>
+    浮点数是二进制近似：<code>0.1 + 0.2 == 0.30000000000000004</code>。几千笔订单累加下来，账就对不上了。
+    <code>DecimalField</code> 对应 Python 的 <code>decimal.Decimal</code>，按十进制精确计算。<code>max_digits=10, decimal_places=2</code> 表示最大 99,999,999.99。
+  </p>
+</div>
+
+<div class="code" data-lang="py" data-file="shop/admin.py">
+<pre>
+@admin.register(Product)
+class ProductAdmin(admin.ModelAdmin):
+    list_display = ['name', 'slug', 'price', 'available', 'created', 'updated']
+    list_filter = ['available', 'created', 'updated']
+    list_editable = ['price', 'available']          # 在列表页直接批量修改
+    prepopulated_fields = {'slug': ('name',)}
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="shop/views.py 与 shop/urls.py">
+<pre>
+def product_list(request, category_slug=None):
+    category = None
+    categories = Category.objects.all()
+    products = Product.objects.filter(available=True)
+    if category_slug:
+        category = get_object_or_404(Category, slug=category_slug)
+        products = products.filter(category=category)
+    return render(request, 'shop/product/list.html',
+                  {'category': category, 'categories': categories, 'products': products})
+
+
+def product_detail(request, id, slug):
+    product = get_object_or_404(Product, id=id, slug=slug, available=True)
+    cart_product_form = CartAddProductForm()
+    return render(request, 'shop/product/detail.html',
+                  {'product': product, 'cart_product_form': cart_product_form})
+
+
+app_name = 'shop'
+urlpatterns = [
+    path('', views.product_list, name='product_list'),
+    path('&lt;slug:category_slug&gt;/', views.product_list, name='product_list_by_category'),
+    path('&lt;int:id&gt;/&lt;slug:slug&gt;/', views.product_detail, name='product_detail'),
+]
+</pre>
+</div>
+
+<p>模板里没有图片的商品显示一张默认图：<code>{% if product.image %}{{ product.image.url }}{% else %}{% static "img/no_image.png" %}{% endif %}</code>。</p>
+
+<h2 id="sessions">Django 会话</h2>
+
+<p>购物车需要在用户浏览时一直“记住”，而且未登录用户也要能用 —— 这正是会话（session）的用途。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="会话机制：浏览器只保存 sessionid Cookie，数据保存在服务器端，SessionMiddleware 把它变成 request.session 字典">
+  <rect class="bx" x="16" y="70" width="150" height="90" rx="10"/>
+  <text class="ttl" x="91" y="96" text-anchor="middle">浏览器</text>
+  <text class="mono sm" x="91" y="120" text-anchor="middle">Cookie:</text>
+  <text class="mono sm" x="91" y="140" text-anchor="middle">sessionid=k3x9…</text>
+  <path class="ln" d="M168 115 H226" marker-end="url(#ar)"/>
+  <rect class="bx-p" x="230" y="60" width="200" height="110" rx="12"/>
+  <text class="ttl on-p" x="330" y="86" text-anchor="middle">SessionMiddleware</text>
+  <text class="sm" x="330" y="110" text-anchor="middle">按 sessionid 取出数据</text>
+  <text class="sm" x="330" y="130" text-anchor="middle">→ request.session（字典）</text>
+  <text class="sm" x="330" y="150" text-anchor="middle">响应时若 modified 则保存</text>
+  <path class="ln" d="M432 115 H490" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="494" y="20" width="250" height="200" rx="12"/>
+  <text class="ttl on-b" x="619" y="44" text-anchor="middle">SESSION_ENGINE（存哪）</text>
+  <text class="sm" x="510" y="72">db（默认）：django_session 表</text>
+  <text class="sm" x="510" y="96">cache：Redis/Memcached，最快</text>
+  <text class="sm" x="510" y="120">cached_db：缓存 + 数据库兜底</text>
+  <text class="sm" x="510" y="144">file：文件系统</text>
+  <text class="sm" x="510" y="168">signed_cookies：直接存 Cookie</text>
+  <text class="sm" x="510" y="196">数据需可 JSON 序列化</text>
+</svg>
+<figcaption>图 8-2　除 signed_cookies 外，Cookie 里只有一个 ID，真实数据在服务器端</figcaption>
+</figure>
+
+<div class="code" data-lang="py">
+<pre>
+request.session['foo'] = 'bar'     # 写
+request.session.get('foo')         # 读
+del request.session['foo']         # 删
+request.session.modified = True    # 修改了嵌套结构时，要手动告诉 Django “已修改”
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>设置</th><th>含义</th><th>默认</th></tr>
+  <tr><td><code>SESSION_COOKIE_AGE</code></td><td>会话 Cookie 有效期（秒）</td><td>1209600（两周）</td></tr>
+  <tr><td><code>SESSION_COOKIE_HTTPONLY</code></td><td>禁止 JavaScript 读取</td><td>True</td></tr>
+  <tr><td><code>SESSION_COOKIE_SECURE</code></td><td>只通过 HTTPS 发送</td><td>False（生产要改 True）</td></tr>
+  <tr><td><code>SESSION_EXPIRE_AT_BROWSER_CLOSE</code></td><td>关浏览器就过期</td><td>False</td></tr>
+  <tr><td><code>SESSION_SAVE_EVERY_REQUEST</code></td><td>每次请求都保存（并刷新过期时间）</td><td>False</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 登录会换一个新会话</div>
+  <p><code>login()</code> 会轮换会话 ID（防会话固定攻击），但会保留原来的数据；<code>logout()</code> 则会清空会话 —— 购物车也就没了。如果需要在登出后保留购物车，得自己在登出前取出、登出后放回。</p>
+</div>
+
+<h2 id="cart">购物车类</h2>
+
+<p>在会话里存一个可以 JSON 序列化的字典。键是商品 ID（JSON 的键只能是字符串），值是数量和<strong>加入时的价格</strong>：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="购物车在会话中的数据结构，以及迭代时如何从数据库补上 Product 对象">
+  <rect class="bx-d" x="20" y="20" width="330" height="180" rx="12"/>
+  <text class="ttl" x="185" y="44" text-anchor="middle">request.session['cart']（存储形态）</text>
+  <text class="mono sm" x="36" y="74">{</text>
+  <text class="mono sm" x="52" y="96">"3": {"quantity": 2, "price": "12.50"},</text>
+  <text class="mono sm" x="52" y="118">"7": {"quantity": 1, "price": "30.00"}</text>
+  <text class="mono sm" x="36" y="140">}</text>
+  <text class="sm" x="36" y="170">价格存成字符串：Decimal 不能直接 JSON 序列化</text>
+  <text class="sm" x="36" y="188">保存加入时的价格：之后涨价不影响这位顾客</text>
+
+  <path class="ln-a" d="M352 110 H408" marker-end="url(#ar-a)"/>
+  <text class="mono sm on-a" x="380" y="100" text-anchor="middle">for item in cart</text>
+
+  <rect class="bx-g" x="412" y="20" width="328" height="180" rx="12"/>
+  <text class="ttl on-g" x="576" y="44" text-anchor="middle">__iter__ 产出（使用形态）</text>
+  <text class="mono sm" x="428" y="74">1 条 SQL: Product.filter(id__in=[3, 7])</text>
+  <text class="mono sm" x="428" y="104">{'quantity': 2,</text>
+  <text class="mono sm" x="428" y="124"> 'price': Decimal('12.50'),</text>
+  <text class="mono sm" x="428" y="144"> 'product': &lt;Product 3&gt;,</text>
+  <text class="mono sm" x="428" y="164"> 'total_price': Decimal('25.00')}</text>
+</svg>
+<figcaption>图 8-3　存储时只存 ID 和数字，使用时再补全对象和小计</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="cart/cart.py">
+<pre>
+from decimal import Decimal
+
+from django.conf import settings
+from shop.models import Product
+
+
+class Cart:
+    def __init__(self, request):
+        self.session = request.session
+        cart = self.session.get(settings.CART_SESSION_ID)     # settings 里 CART_SESSION_ID = 'cart'
+        if not cart:
+            cart = self.session[settings.CART_SESSION_ID] = {}
+        self.cart = cart
+
+    def add(self, product, quantity=1, override_quantity=False):
+        product_id = str(product.id)
+        if product_id not in self.cart:
+            self.cart[product_id] = {'quantity': 0, 'price': str(product.price)}
+        if override_quantity:
+            self.cart[product_id]['quantity'] = quantity
+        else:
+            self.cart[product_id]['quantity'] += quantity
+        self.save()
+
+    def save(self):
+        self.session.modified = True          # 改的是嵌套字典，Django 察觉不到，要手动标记
+
+    def remove(self, product):
+        product_id = str(product.id)
+        if product_id in self.cart:
+            del self.cart[product_id]
+            self.save()
+
+    def __iter__(self):
+        product_ids = self.cart.keys()
+        products = Product.objects.filter(id__in=product_ids)
+        cart = self.cart.copy()
+        for product in products:
+            cart[str(product.id)]['product'] = product
+        for item in cart.values():
+            item['price'] = Decimal(item['price'])
+            item['total_price'] = item['price'] * item['quantity']
+            yield item
+
+    def __len__(self):
+        return sum(item['quantity'] for item in self.cart.values())
+
+    def get_total_price(self):
+        return sum(Decimal(item['price']) * item['quantity'] for item in self.cart.values())
+
+    def clear(self):
+        del self.session[settings.CART_SESSION_ID]
+        self.save()
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 魔术方法让 Cart 用起来像内置类型</div>
+  <p>实现了 <code>__iter__</code>，模板里就能 <code>{% for item in cart %}</code>；实现了 <code>__len__</code>，就能 <code>{{ cart|length }}</code>。这是 Python 的“鸭子类型”。</p>
+</div>
+
+<h3>购物车视图</h3>
+
+<div class="code" data-lang="py" data-file="cart/forms.py 与 cart/views.py">
+<pre>
+PRODUCT_QUANTITY_CHOICES = [(i, str(i)) for i in range(1, 21)]
+
+
+class CartAddProductForm(forms.Form):
+    quantity = forms.TypedChoiceField(choices=PRODUCT_QUANTITY_CHOICES, coerce=int)
+    override = forms.BooleanField(required=False, initial=False, widget=forms.HiddenInput)
+
+
+@require_POST
+def cart_add(request, product_id):
+    cart = Cart(request)
+    product = get_object_or_404(Product, id=product_id)
+    form = CartAddProductForm(request.POST)
+    if form.is_valid():
+        cd = form.cleaned_data
+        cart.add(product=product, quantity=cd['quantity'], override_quantity=cd['override'])
+    return redirect('cart:cart_detail')          # PRG ✓
+
+
+@require_POST
+def cart_remove(request, product_id):
+    cart = Cart(request)
+    product = get_object_or_404(Product, id=product_id)
+    cart.remove(product)
+    return redirect('cart:cart_detail')
+
+
+def cart_detail(request):
+    cart = Cart(request)
+    for item in cart:          # 每一行配一个“修改数量”的表单，override=True 表示覆盖而非累加
+        item['update_quantity_form'] = CartAddProductForm(
+            initial={'quantity': item['quantity'], 'override': True})
+    return render(request, 'cart/detail.html', {'cart': cart})
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="myshop/urls.py">
+<pre>
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('cart/', include('cart.urls', namespace='cart')),
+    path('orders/', include('orders.urls', namespace='orders')),
+    path('', include('shop.urls', namespace='shop')),     # 最宽泛的放最后
+]
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 为什么 shop 的 URL 要放最后</div>
+  <p><code>shop</code> 里有一个 <code>&lt;slug:category_slug&gt;/</code>，它能匹配 <code>cart/</code>、<code>orders/</code> 这样的路径。放在前面的话，访问 <code>/cart/</code> 会被当成“查看名为 cart 的分类” → 404。</p>
+</div>
+
+<h2 id="context-processor">上下文处理器：让购物车无处不在</h2>
+
+<p>页头要在每个页面都显示“购物车：3 件，¥88”。与其在每个视图里传 <code>cart</code>，不如写一个<strong>上下文处理器</strong>：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="每次用 render 渲染模板时，所有上下文处理器依次执行，返回的字典合并进模板上下文">
+  <rect class="bx-a" x="16" y="60" width="150" height="70" rx="10"/>
+  <text class="ttl on-a" x="91" y="86" text-anchor="middle">任意视图</text>
+  <text class="mono sm" x="91" y="108" text-anchor="middle">render(request, …)</text>
+  <path class="ln" d="M168 95 H216" marker-end="url(#ar)"/>
+  <rect class="bx-p" x="220" y="16" width="290" height="158" rx="12"/>
+  <text class="ttl on-p" x="365" y="40" text-anchor="middle">context_processors（每次渲染都执行）</text>
+  <text class="mono sm" x="236" y="66">debug      → debug, sql_queries</text>
+  <text class="mono sm" x="236" y="88">request    → request</text>
+  <text class="mono sm" x="236" y="110">auth       → user, perms</text>
+  <text class="mono sm" x="236" y="132">messages   → messages</text>
+  <text class="mono sm on-a" x="236" y="156">cart.context_processors.cart → cart</text>
+  <path class="ln" d="M512 95 H560" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="564" y="60" width="180" height="70" rx="10"/>
+  <text class="ttl on-g" x="654" y="86" text-anchor="middle">任意模板</text>
+  <text class="mono sm" x="654" y="108" text-anchor="middle">{{ cart|length }}</text>
+</svg>
+<figcaption>图 8-4　上下文处理器 = 自动注入到所有模板的全局变量</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="cart/context_processors.py 与 settings.py">
+<pre>
+from .cart import Cart
+
+
+def cart(request):
+    return {'cart': Cart(request)}
+
+
+TEMPLATES = [{
+    # ...
+    'OPTIONS': {
+        'context_processors': [
+            # ... 默认的四个
+            'cart.context_processors.cart',
+        ],
+    },
+}]
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="shop/templates/shop/base.html（节选）">
+<pre>
+&lt;div class="cart"&gt;
+  {% with total_items=cart|length %}
+    {% if total_items &gt; 0 %}
+      Your cart:
+      &lt;a href="{% url "cart:cart_detail" %}"&gt;
+        {{ total_items }} item{{ total_items|pluralize }}, ${{ cart.get_total_price }}
+      &lt;/a&gt;
+    {% elif not order %}
+      Your cart is empty.
+    {% endif %}
+  {% endwith %}
+&lt;/div&gt;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 上下文处理器 vs 模板标签</div>
+  <p>上下文处理器在<strong>每一次</strong>渲染时都会执行。如果它要查数据库，而又不是每个页面都用得到，就改用自定义模板标签（第 3 章），只在需要的模板里调用。</p>
+</div>
+
+<h2 id="orders">下单</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="订单模型：Order 一对多 OrderItem，OrderItem 外键指向 Product 并保存成交价格">
+  <rect class="bx-p" x="20" y="30" width="220" height="160" rx="12"/>
+  <text class="ttl on-p" x="130" y="54" text-anchor="middle">Order</text>
+  <text class="mono sm" x="36" y="80">first_name / last_name</text>
+  <text class="mono sm" x="36" y="100">email / address</text>
+  <text class="mono sm" x="36" y="120">postal_code / city</text>
+  <text class="mono sm" x="36" y="140">paid = False</text>
+  <text class="mono sm" x="36" y="164">get_total_cost()</text>
+
+  <rect class="bx-a" x="300" y="30" width="200" height="160" rx="12"/>
+  <text class="ttl on-a" x="400" y="54" text-anchor="middle">OrderItem</text>
+  <text class="mono sm" x="316" y="80">order   → Order</text>
+  <text class="mono sm" x="316" y="100">product → Product</text>
+  <text class="mono sm" x="316" y="120">price（成交价快照）</text>
+  <text class="mono sm" x="316" y="140">quantity</text>
+  <text class="mono sm" x="316" y="164">get_cost()</text>
+
+  <rect class="bx-b" x="560" y="60" width="180" height="100" rx="12"/>
+  <text class="ttl on-b" x="650" y="84" text-anchor="middle">shop.Product</text>
+  <text class="sm" x="650" y="110" text-anchor="middle">当前价格可能已变</text>
+  <text class="sm" x="650" y="130" text-anchor="middle">订单里存的是当时的价</text>
+
+  <path class="ln-p" d="M298 110 H242" marker-end="url(#ar-p)"/>
+  <text class="mono sm" x="270" y="100" text-anchor="middle">items</text>
+  <path class="ln-b" d="M502 110 H556" marker-end="url(#ar-b)"/>
+  <text class="mono sm" x="530" y="100" text-anchor="middle">'shop.Product'</text>
+</svg>
+<figcaption>图 8-5　用字符串 <code>'shop.Product'</code> 引用其他应用的模型，可以避免循环导入</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="orders/admin.py">
+<pre>
+class OrderItemInline(admin.TabularInline):     # 在订单编辑页里直接编辑订单项
+    model = OrderItem
+    raw_id_fields = ['product']
+
+
+@admin.register(Order)
+class OrderAdmin(admin.ModelAdmin):
+    list_display = ['id', 'first_name', 'last_name', 'email', 'address',
+                    'postal_code', 'city', 'paid', 'created', 'updated']
+    list_filter = ['paid', 'created', 'updated']
+    inlines = [OrderItemInline]
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="orders/views.py">
+<pre>
+def order_create(request):
+    cart = Cart(request)
+    if request.method == 'POST':
+        form = OrderCreateForm(request.POST)
+        if form.is_valid():
+            order = form.save()
+            for item in cart:
+                OrderItem.objects.create(order=order, product=item['product'],
+                                         price=item['price'], quantity=item['quantity'])
+            cart.clear()
+            order_created.delay(order.id)            # 异步发确认邮件
+            return render(request, 'orders/order/created.html', {'order': order})
+    else:
+        form = OrderCreateForm()
+    return render(request, 'orders/order/create.html', {'cart': cart, 'form': form})
+</pre>
+</div>
+
+<h2 id="celery">用 Celery 执行异步任务</h2>
+
+<p>
+  发邮件可能要好几秒，SMTP 服务器还可能挂掉。让用户在“下单”按钮上干等不是好体验。
+  解决办法是把这类工作交给<strong>后台工作进程</strong>，Web 进程只负责“下个任务单”然后立刻返回。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="Celery 架构：Django 视图作为生产者把任务消息放入 RabbitMQ 队列，一个或多个 Celery worker 取出执行，Flower 监控">
+  <rect class="bx-a" x="16" y="80" width="170" height="90" rx="12"/>
+  <text class="ttl on-a" x="101" y="104" text-anchor="middle">Django（生产者）</text>
+  <text class="mono sm" x="101" y="128" text-anchor="middle">order_created</text>
+  <text class="mono sm" x="101" y="146" text-anchor="middle">.delay(order.id)</text>
+  <path class="ln-a" d="M188 125 H250" marker-end="url(#ar-a)"/>
+  <text class="sm" x="219" y="115" text-anchor="middle">消息</text>
+
+  <rect class="bx-p" x="254" y="60" width="220" height="130" rx="12"/>
+  <text class="ttl on-p" x="364" y="84" text-anchor="middle">RabbitMQ（消息代理）</text>
+  <rect class="bx" x="274" y="104" width="40" height="30" rx="4"/><text class="sm" x="294" y="124" text-anchor="middle">任务</text>
+  <rect class="bx" x="320" y="104" width="40" height="30" rx="4"/><text class="sm" x="340" y="124" text-anchor="middle">任务</text>
+  <rect class="bx" x="366" y="104" width="40" height="30" rx="4"/><text class="sm" x="386" y="124" text-anchor="middle">任务</text>
+  <text class="sm" x="364" y="160" text-anchor="middle">队列：先进先出，可持久化</text>
+  <text class="sm" x="364" y="178" text-anchor="middle">管理界面 :15672</text>
+
+  <path class="ln-p" d="M476 100 L536 60" marker-end="url(#ar-p)"/>
+  <path class="ln-p" d="M476 150 L536 190" marker-end="url(#ar-p)"/>
+  <rect class="bx-g" x="540" y="20" width="200" height="80" rx="10"/>
+  <text class="ttl on-g" x="640" y="44" text-anchor="middle">Celery worker 1</text>
+  <text class="sm" x="640" y="66" text-anchor="middle">取任务 → 查订单</text>
+  <text class="sm" x="640" y="86" text-anchor="middle">→ send_mail()</text>
+  <rect class="bx-g" x="540" y="150" width="200" height="80" rx="10"/>
+  <text class="ttl on-g" x="640" y="174" text-anchor="middle">Celery worker 2…</text>
+  <text class="sm" x="640" y="196" text-anchor="middle">水平扩展只需多开进程</text>
+  <rect class="bx-d" x="254" y="206" width="220" height="44" rx="8"/>
+  <text class="sm" x="364" y="226" text-anchor="middle">Flower :5555</text>
+  <text class="sm" x="364" y="242" text-anchor="middle">监控 worker 与任务状态</text>
+</svg>
+<figcaption>图 8-6　Web 进程与后台进程通过消息队列解耦</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install celery==5.4.0 flower==2.0.1
+docker run -it --rm --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3.13.1-management
+celery -A myshop worker -l info                       # 启动 worker
+celery -A myshop flower --basic-auth=user:pwd         # 启动监控（务必加认证）
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="myshop/celery.py 与 myshop/__init__.py">
+<pre>
+import os
+
+from celery import Celery
+
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'myshop.settings')
+
+app = Celery('myshop')
+app.config_from_object('django.conf:settings', namespace='CELERY')   # 读取 CELERY_ 开头的设置
+app.autodiscover_tasks()                                             # 自动发现各应用的 tasks.py
+
+
+# myshop/__init__.py —— 保证 Django 启动时就加载 Celery 应用
+from .celery import app as celery_app
+
+__all__ = ['celery_app']
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="orders/tasks.py">
+<pre>
+from celery import shared_task
+from django.core.mail import send_mail
+
+from .models import Order
+
+
+@shared_task
+def order_created(order_id):                   # 只传 ID，执行时再查最新数据
+    order = Order.objects.get(id=order_id)
+    subject = f'Order nr. {order.id}'
+    message = (f'Dear {order.first_name},\n\n'
+               f'You have successfully placed an order.'
+               f'Your order ID is {order.id}.')
+    return send_mail(subject, message, 'admin@myshop.com', [order.email])
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么只传 ID</div>
+  <p>任务参数要序列化进消息。传整个对象既可能序列化失败，又会让 worker 拿到“排队那一刻”的旧数据。传 ID，让 worker 执行时从数据库取最新状态。测试或本地不想起 worker 时，可以设 <code>CELERY_TASK_ALWAYS_EAGER = True</code> 让任务同步执行。</p>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 8 章代码点评 <small>Chapter08/myshop</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 金额、价格快照、PRG、异步任务只传 ID</h4>
+    <p>全部金额使用 <code>DecimalField</code>/<code>Decimal</code>；订单项保存成交价；购物车增删都是 POST + 重定向；Celery 任务只接收 ID。这些都是电商代码的基本功。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 订单创建不在事务里，任务可能早于提交执行 <span class="src">Chapter08/myshop/orders/views.py:14</span></h4>
+    <p>
+      ① 创建 Order 和多个 OrderItem 是一个整体，如果中途出错，会留下一个没有明细的“半截订单”，应放进 <code>transaction.atomic()</code>；
+      ② 在事务里调用 <code>.delay()</code>，worker 可能在事务提交<strong>之前</strong>就开始执行，<code>Order.objects.get(id=…)</code> 查不到订单而失败。
+      Django 提供 <code>transaction.on_commit()</code>，Celery 5.4 更是直接提供了 <code>delay_on_commit()</code>：
+    </p>
+    <figure>
+    <svg class="dgm" viewBox="0 0 760 120" role="img" aria-label="delay 在事务提交前发出消息，worker 读不到订单；on_commit 在提交后才发送">
+      <rect class="bx-r" x="20" y="10" width="350" height="100" rx="10"/>
+      <text class="ttl on-r" x="195" y="32" text-anchor="middle">delay() 放在事务中</text>
+      <text class="sm" x="36" y="56">INSERT order … → 发出任务 → worker 立刻执行</text>
+      <text class="sm" x="36" y="76">worker: SELECT order → DoesNotExist ✗</text>
+      <text class="sm" x="36" y="96">… 之后事务才 COMMIT</text>
+      <rect class="bx-g" x="390" y="10" width="350" height="100" rx="10"/>
+      <text class="ttl on-g" x="565" y="32" text-anchor="middle">delay_on_commit() / on_commit</text>
+      <text class="sm" x="406" y="56">INSERT order … → COMMIT</text>
+      <text class="sm" x="406" y="76">→ 此时才发出任务</text>
+      <text class="sm" x="406" y="96">worker 一定能读到订单 ✓（回滚则不发）</text>
+    </svg>
+    </figure>
+<div class="code" data-lang="py"><pre>
+from django.db import transaction
+
+
+def order_create(request):
+    cart = Cart(request)
+    if not len(cart):
+        return redirect('cart:cart_detail')              # 空购物车不能下单
+    if request.method == 'POST':
+        form = OrderCreateForm(request.POST)
+        if form.is_valid():
+            with transaction.atomic():
+                order = form.save()
+                OrderItem.objects.bulk_create([
+                    OrderItem(order=order, product=item['product'],
+                              price=item['price'], quantity=item['quantity'])
+                    for item in cart if 'product' in item      # 跳过已被删除的商品
+                ])
+                order_created.delay_on_commit(order.id)
+            cart.clear()
+            request.session['order_id'] = order.id
+            return redirect('orders:order_created')           # PRG
+    ...
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 删除商品会级联删除历史订单项 <span class="src">orders/models.py:36</span></h4>
+    <p>
+      <code>OrderItem.product</code> 用了 <code>on_delete=models.CASCADE</code>：运营在后台删掉一个下架商品，所有包含它的<strong>历史订单明细</strong>都会消失，订单金额对不上，财务数据被破坏。
+      订单是法律和财务凭证，应该用 <code>PROTECT</code>（有订单的商品不能删，只能设为 <code>available=False</code>），并在订单项上冗余保存商品名称等快照信息。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> <code>Cart.__iter__</code> 会污染会话数据 <span class="src">cart/cart.py:25</span></h4>
+    <p>
+      <code>self.cart.copy()</code> 是<strong>浅拷贝</strong>，内层的每个 item 字典仍然是会话里的那个对象。于是迭代时写入的 <code>product</code>（模型实例）、<code>Decimal</code> 价格、
+      <code>cart_detail</code> 里塞进去的表单对象，全都进了会话字典。只要同一请求里会话被标记为已修改（或开启 <code>SESSION_SAVE_EVERY_REQUEST</code>），保存时就会因为无法 JSON 序列化而报错。
+      另外，购物车里的商品若已被删除，它的 item 没有 <code>'product'</code> 键，下单时 <code>item['product']</code> 直接 <code>KeyError</code>。
+    </p>
+<div class="code" data-lang="py"><pre>
+def __iter__(self):
+    products = Product.objects.in_bulk(map(int, self.cart))   # {id: product}
+    for product_id, data in self.cart.items():
+        product = products.get(int(product_id))
+        if product is None:
+            continue                                   # 商品已不存在：跳过（或顺手从购物车移除）
+        price = Decimal(data['price'])
+        yield {                                        # 产出新字典，绝不修改会话里的数据
+            'product': product,
+            'quantity': data['quantity'],
+            'price': price,
+            'total_price': price * data['quantity'],
+        }
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 每个匿名访客都会被写入一条会话</h4>
+    <p><code>Cart.__init__</code> 在购物车不存在时写入空字典，会话随之被标记为已修改。因为上下文处理器在每次渲染时都创建 Cart，结果是<strong>每个访客（包括爬虫）</strong>第一次访问任何页面都会在 <code>django_session</code> 表插入一行并收到 <code>Set-Cookie</code>，还会让页面无法被 CDN 缓存。只在真正加入商品时才写会话即可：<code>self.cart = self.session.get(settings.CART_SESSION_ID, {})</code>，在 <code>save()</code> 里再写回。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 其他细节</h4>
+    <p>
+      ① <code>Index(fields=['id', 'slug'])</code> 没有意义 —— <code>id</code> 是主键，本身就有唯一索引，按 id 查询永远不会用到这个联合索引；
+      ② <code>cart_add</code> 没有检查 <code>available=True</code>，下架商品也能通过 POST 加入购物车；
+      ③ 邮件发件人 <code>'admin@myshop.com'</code> 写死，应使用 <code>settings.DEFAULT_FROM_EMAIL</code>；任务也没有重试策略，可以加 <code>@shared_task(autoretry_for=(SMTPException,), retry_backoff=True, max_retries=5)</code>；
+      ④ <code>CELERY_BROKER_URL</code> 没有配置，依赖默认的 <code>amqp://guest@localhost//</code>，应当从环境变量读取；
+      ⑤ 模板里写死了 <code>$</code> 货币符号（第 11 章会本地化）。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 业务逻辑放哪里 <span class="tag ts">TSD：Fat models / services</span></h4>
+    <p>
+      “把购物车变成订单”是核心业务规则，现在散落在视图里。TSD 建议把这类逻辑放进模型方法或一个独立的 service 函数，例如 <code>orders/services.py</code> 里的 <code>create_order_from_cart(cart, data)</code>：
+      视图只负责表单和跳转，service 负责事务、校验库存、创建订单、触发任务，测试时可以绕过 HTTP 直接调用。
+    </p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>金额用 <code>DecimalField</code>；订单项保存成交价快照。</li>
+  <li>会话数据在服务器端，Cookie 里只有 ID；修改嵌套结构后要设置 <code>session.modified = True</code>。</li>
+  <li>用一个类封装购物车逻辑，实现 <code>__iter__</code>/<code>__len__</code> 让它在模板里好用。</li>
+  <li>上下文处理器给所有模板注入变量，但每次渲染都会执行。</li>
+  <li>Celery + 消息代理把耗时或可能失败的工作移出请求；任务只传 ID，在事务提交后再发送。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>往购物车加一个商品，然后在 Admin 里删掉这个商品，再去结账，复现 <code>KeyError</code>；按点评修复 <code>__iter__</code>。</li>
+    <li>把 <code>order_create</code> 改成事务 + <code>delay_on_commit</code> + 重定向到成功页。</li>
+    <li>把 <code>OrderItem.product</code> 改成 <code>PROTECT</code>，尝试在 Admin 里删除一个有订单的商品，观察提示。</li>
+    <li>设置 <code>CELERY_TASK_ALWAYS_EAGER = True</code>，不启动 worker 也能在控制台看到确认邮件。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

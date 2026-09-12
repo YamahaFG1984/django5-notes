@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Django 5 实战笔记 · 四个项目，从入门到上线</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="0">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<div class="hero">
+  <span class="chapter-eyebrow">面向初学者的 17 章学习笔记 + 附录</span>
+  <h1>Django 5 实战笔记：四个项目，从入门到上线</h1>
+  <p class="sub">
+    这套笔记整理自《Django 5 By Example》（第 5 版）及其配套代码仓库。每一章都用大量图解把概念讲清楚，
+    再逐段解读仓库里的代码；章末有一段<strong>代码点评</strong>，按照 <strong>Django 5.2 LTS</strong> 的最佳实践和
+    《Two Scoops of Django》的做法，指出教学代码在真实项目中需要补上的地方。
+  </p>
+  <p style="margin-top:14px">
+    <span class="pill">Django 5.2</span><span class="pill">PostgreSQL</span><span class="pill">Redis</span>
+    <span class="pill">Celery + RabbitMQ</span><span class="pill">Stripe</span><span class="pill">Django REST framework</span>
+    <span class="pill">Channels / WebSocket</span><span class="pill">Docker + Nginx</span>
+  </p>
+</div>
+
+<h2 id="what">四个项目，一条路线</h2>
+
+<p>全书不是零散的知识点罗列，而是完整地做出四个网站。每个项目都在前一个的基础上引入新的技术：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="四个项目的路线图：博客（第1到3章）、图片书签社交网站（第4到7章）、在线商店（第8到11章）、在线学习平台（第12到17章），每个项目下列出主要技术">
+  <path class="ln-d" d="M40 60 H720"/>
+  <circle class="bx-b" cx="100" cy="60" r="14"/><text class="mono sm on-b" x="100" y="65" text-anchor="middle">1</text>
+  <circle class="bx-g" cx="285" cy="60" r="14"/><text class="mono sm on-g" x="285" y="65" text-anchor="middle">2</text>
+  <circle class="bx-a" cx="470" cy="60" r="14"/><text class="mono sm on-a" x="470" y="65" text-anchor="middle">3</text>
+  <circle class="bx-p" cx="655" cy="60" r="14"/><text class="mono sm on-p" x="655" y="65" text-anchor="middle">4</text>
+  <text class="sm" x="100" y="30" text-anchor="middle">第 1–3 章</text>
+  <text class="sm" x="285" y="30" text-anchor="middle">第 4–7 章</text>
+  <text class="sm" x="470" y="30" text-anchor="middle">第 8–11 章</text>
+  <text class="sm" x="655" y="30" text-anchor="middle">第 12–17 章</text>
+
+  <rect class="bx-b" x="16" y="90" width="168" height="196" rx="12"/>
+  <text class="ttl on-b" x="100" y="116" text-anchor="middle">博客</text>
+  <text class="sm" x="100" y="144" text-anchor="middle">模型、迁移、ORM</text>
+  <text class="sm" x="100" y="166" text-anchor="middle">Admin 后台</text>
+  <text class="sm" x="100" y="188" text-anchor="middle">视图、模板、表单</text>
+  <text class="sm" x="100" y="210" text-anchor="middle">邮件、评论、标签</text>
+  <text class="sm" x="100" y="232" text-anchor="middle">Sitemap、RSS</text>
+  <text class="sm" x="100" y="254" text-anchor="middle">PostgreSQL 全文搜索</text>
+
+  <rect class="bx-g" x="201" y="90" width="168" height="196" rx="12"/>
+  <text class="ttl on-g" x="285" y="116" text-anchor="middle">图片书签社交网站</text>
+  <text class="sm" x="285" y="144" text-anchor="middle">认证框架、注册</text>
+  <text class="sm" x="285" y="166" text-anchor="middle">自定义认证后端</text>
+  <text class="sm" x="285" y="188" text-anchor="middle">社交登录（Google）</text>
+  <text class="sm" x="285" y="210" text-anchor="middle">书签小工具、fetch</text>
+  <text class="sm" x="285" y="232" text-anchor="middle">关注、活动流、信号</text>
+  <text class="sm" x="285" y="254" text-anchor="middle">Redis 计数与排行</text>
+
+  <rect class="bx-a" x="386" y="90" width="168" height="196" rx="12"/>
+  <text class="ttl on-a" x="470" y="116" text-anchor="middle">在线商店</text>
+  <text class="sm" x="470" y="144" text-anchor="middle">会话购物车</text>
+  <text class="sm" x="470" y="166" text-anchor="middle">Celery 异步任务</text>
+  <text class="sm" x="470" y="188" text-anchor="middle">Stripe 支付、Webhook</text>
+  <text class="sm" x="470" y="210" text-anchor="middle">CSV / PDF 导出</text>
+  <text class="sm" x="470" y="232" text-anchor="middle">优惠券、推荐引擎</text>
+  <text class="sm" x="470" y="254" text-anchor="middle">国际化与本地化</text>
+
+  <rect class="bx-p" x="571" y="90" width="173" height="196" rx="12"/>
+  <text class="ttl on-p" x="657" y="116" text-anchor="middle">在线学习平台</text>
+  <text class="sm" x="657" y="144" text-anchor="middle">模型继承、自定义字段</text>
+  <text class="sm" x="657" y="166" text-anchor="middle">CBV + Mixin、权限</text>
+  <text class="sm" x="657" y="188" text-anchor="middle">缓存框架</text>
+  <text class="sm" x="657" y="210" text-anchor="middle">REST API（DRF）</text>
+  <text class="sm" x="657" y="232" text-anchor="middle">WebSocket 聊天室</text>
+  <text class="sm" x="657" y="254" text-anchor="middle">Docker 生产部署</text>
+</svg>
+<figcaption>图 0-1　全书路线图：从单应用的博客，到带支付、异步任务、API 和实时通信的完整平台</figcaption>
+</figure>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="技术栈地图：Django 位于中心，周围连接 PostgreSQL、Redis、RabbitMQ 与 Celery、Stripe、Channels 与 Daphne、DRF、Nginx 与 uWSGI">
+  <rect class="bx-g" x="290" y="95" width="180" height="60" rx="14"/>
+  <text class="ttl on-g" x="380" y="122" text-anchor="middle">Django 5.2</text>
+  <text class="sm" x="380" y="142" text-anchor="middle">模型 · 视图 · 模板 · Admin</text>
+
+  <rect class="bx-b" x="30" y="20" width="170" height="46" rx="10"/><text class="lbl" x="115" y="48" text-anchor="middle">PostgreSQL（第 3 章起）</text>
+  <rect class="bx-r" x="30" y="102" width="170" height="46" rx="10"/><text class="lbl" x="115" y="130" text-anchor="middle">Redis（第 7、10、14、16 章）</text>
+  <rect class="bx-a" x="30" y="184" width="170" height="46" rx="10"/><text class="lbl" x="115" y="212" text-anchor="middle">Celery + RabbitMQ（第 8 章）</text>
+  <rect class="bx-p" x="560" y="20" width="170" height="46" rx="10"/><text class="lbl" x="645" y="48" text-anchor="middle">Stripe（第 9、10 章）</text>
+  <rect class="bx-b" x="560" y="102" width="170" height="46" rx="10"/><text class="lbl" x="645" y="130" text-anchor="middle">DRF（第 15 章）</text>
+  <rect class="bx-a" x="560" y="184" width="170" height="46" rx="10"/><text class="lbl" x="645" y="212" text-anchor="middle">Channels（第 16 章）</text>
+  <rect class="bx-d" x="290" y="192" width="180" height="42" rx="10"/><text class="lbl" x="380" y="218" text-anchor="middle">Docker · Nginx（第 17 章）</text>
+
+  <path class="ln-d" d="M202 43 L288 104"/>
+  <path class="ln-d" d="M202 125 H288"/>
+  <path class="ln-d" d="M202 207 L288 146"/>
+  <path class="ln-d" d="M558 43 L472 104"/>
+  <path class="ln-d" d="M558 125 H472"/>
+  <path class="ln-d" d="M558 207 L472 146"/>
+  <path class="ln-d" d="M380 157 V190"/>
+</svg>
+<figcaption>图 0-2　你会接触到的技术栈，以及它们首次出现的章节</figcaption>
+</figure>
+
+<h2 id="who">写给谁</h2>
+
+<ul>
+  <li><strong>学过 Python 基础，想系统学习 Web 后端</strong>的人。每个概念都先讲“为什么需要它”，再讲怎么用。</li>
+  <li><strong>正在读《Django 5 By Example》</strong>的人。每章对应原书一章，可以对照阅读，也可以当复习提纲。</li>
+  <li><strong>已经会写 Django，想知道“教学代码”和“生产代码”差在哪里</strong>的人 —— 直接看每章末尾的点评和<a href="ch18.html">附录</a>。</li>
+</ul>
+
+<div class="box note">
+  <div class="t">&#9432; 需要什么前置知识</div>
+  <p>会写 Python 函数和类、会用命令行、知道 HTML 大概长什么样就够了。数据库、HTTP、Docker 等概念都会在用到时用图解释。</p>
+</div>
+
+<h2 id="how">每一章的结构</h2>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#127919;</span><h4>本章目标</h4><p>开头列出要掌握的知识点，读完可以回来自查。</p></div>
+  <div class="card"><span class="ic">&#128506;</span><h4>图解</h4><p>请求流程、数据模型、组件关系都画成图，先建立整体印象。</p></div>
+  <div class="card"><span class="ic">&#128196;</span><h4>代码解读</h4><p>关键代码来自配套仓库，并在注释里说明每一行在做什么。</p></div>
+  <div class="card"><span class="ic">&#128269;</span><h4>代码点评</h4><p>对照 Django 5.2 与 Two Scoops，指出问题并给出改进写法。</p></div>
+  <div class="card"><span class="ic">&#9997;</span><h4>动手练习</h4><p>每章 3–4 个小练习，多数就是“把点评里的问题修掉”。</p></div>
+</div>
+
+<h3 id="legend">点评标签说明</h3>
+
+<div class="tw">
+<table>
+  <tr><th>标签</th><th>含义</th></tr>
+  <tr><td><span class="tag good">做得好</span></td><td>值得学习、可以直接沿用的写法</td></tr>
+  <tr><td><span class="tag bad">有问题</span></td><td>会导致安全漏洞、数据错误或 500 的缺陷，并附修复代码</td></tr>
+  <tr><td><span class="tag warn">建议改进</span></td><td>能工作，但有更好、更现代或更易维护的写法</td></tr>
+  <tr><td><span class="tag info">补充知识</span></td><td>相关的背景知识、版本差异或替代方案</td></tr>
+  <tr><td><span class="tag ts">TSD：…</span></td><td>对应《Two Scoops of Django》中的某个主题</td></tr>
+</table>
+</div>
+
+<h2 id="setup">准备环境</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+# Python 3.12+；每个章节目录都是一个独立的项目快照
+cd Django-5-By-Example-main/Chapter01
+python -m venv .venv
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
+python -m pip install -r requirements.txt
+cd mysite
+python manage.py migrate
+python manage.py runserver
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 关于版本</div>
+  <p>原书基于 Django 5.0 编写，配套仓库的依赖已指向 Django 5.2（LTS）。笔记里凡是 5.1、5.2 带来的变化（比如 <code>{% querystring %}</code>、<code>LoginRequiredMiddleware</code>、复合主键、shell 自动导入模型），都会在对应章节特别说明。</p>
+</div>
+
+<h2 id="toc">目录</h2>
+
+<div id="toc-grid"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 10 章 · 扩展商店 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="10">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 10 章 · 项目三：在线商店</span>
+<h1>扩展商店</h1>
+<p class="lede">
+  这一章给商店加两个提升销量的功能：<strong>优惠券</strong>（从购物车一路贯穿到订单、Stripe 收银台和 PDF 发票），
+  以及一个基于 Redis 有序集合的<strong>“买了这个的人也买了”</strong>推荐引擎。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>设计带有效期和折扣率的优惠券模型，使用字段验证器</li>
+    <li>把优惠券 ID 存入会话，在购物车中计算折扣</li>
+    <li>在订单上保存优惠券外键和折扣“快照”</li>
+    <li>把折扣同步给 Stripe Checkout</li>
+    <li>用 Redis 有序集合记录“一起购买”的次数，用 ZUNIONSTORE 聚合多商品推荐</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="coupon-model">优惠券模型</h2>
+
+<div class="code" data-lang="py" data-file="coupons/models.py">
+<pre>
+from django.core.validators import MaxValueValidator, MinValueValidator
+from django.db import models
+
+
+class Coupon(models.Model):
+    code = models.CharField(max_length=50, unique=True)
+    valid_from = models.DateTimeField()
+    valid_to = models.DateTimeField()
+    discount = models.IntegerField(
+        validators=[MinValueValidator(0), MaxValueValidator(100)],   # 百分比 0～100
+        help_text='Percentage value (0 to 100)',
+    )
+    active = models.BooleanField()
+
+    def __str__(self):
+        return self.code
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 验证器在哪一层生效</div>
+  <p><code>validators</code> 在 <code>ModelForm</code>/Admin 校验和 <code>full_clean()</code> 时执行，<strong>不会</strong>变成数据库约束。直接 <code>Coupon.objects.create(discount=150)</code> 照样能存进去。需要数据库兜底时用 <code>CheckConstraint</code>（见点评）。</p>
+</div>
+
+<h2 id="apply">把优惠券用到购物车</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="优惠券贯穿全流程：购物车页输入券码，coupon_apply 校验后把 ID 存会话，Cart 计算折扣，下单时保存优惠券与折扣快照，支付时创建 Stripe 优惠券，发票里显示折扣">
+  <rect class="bx" x="16" y="20" width="150" height="60" rx="10"/>
+  <text class="sm" x="91" y="44" text-anchor="middle">购物车页</text>
+  <text class="sm" x="91" y="64" text-anchor="middle">输入 SUMMER</text>
+  <path class="ln" d="M168 50 H206" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="210" y="10" width="220" height="80" rx="10"/>
+  <text class="mono sm on-a" x="320" y="32" text-anchor="middle">coupon_apply（POST）</text>
+  <text class="sm" x="320" y="54" text-anchor="middle">code 不区分大小写、active、</text>
+  <text class="sm" x="320" y="72" text-anchor="middle">valid_from ≤ now ≤ valid_to</text>
+  <path class="ln" d="M432 50 H470" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="474" y="20" width="270" height="60" rx="10"/>
+  <text class="mono sm" x="609" y="44" text-anchor="middle">session['coupon_id'] = 3</text>
+  <text class="sm" x="609" y="64" text-anchor="middle">找不到则置为 None</text>
+
+  <path class="ln-a" d="M609 82 V116" marker-end="url(#ar-a)"/>
+  <rect class="bx-g" x="474" y="120" width="270" height="70" rx="10"/>
+  <text class="ttl on-g" x="609" y="144" text-anchor="middle">Cart.coupon / get_discount()</text>
+  <text class="sm" x="609" y="166" text-anchor="middle">小计 × 折扣率 → 折后总价</text>
+
+  <path class="ln" d="M472 155 H434" marker-end="url(#ar)"/>
+  <rect class="bx-p" x="210" y="120" width="220" height="70" rx="10"/>
+  <text class="ttl on-p" x="320" y="144" text-anchor="middle">order_create</text>
+  <text class="sm" x="320" y="166" text-anchor="middle">order.coupon + order.discount</text>
+
+  <path class="ln" d="M320 192 V220" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="120" y="224" width="200" height="46" rx="10"/>
+  <text class="sm on-b" x="220" y="244" text-anchor="middle">Stripe Coupon</text>
+  <text class="sm" x="220" y="262" text-anchor="middle">percent_off, duration=once</text>
+  <rect class="bx" x="340" y="224" width="200" height="46" rx="10"/>
+  <text class="sm" x="440" y="244" text-anchor="middle">Admin 详情 / PDF 发票</text>
+  <text class="sm" x="440" y="262" text-anchor="middle">显示小计、折扣、合计</text>
+</svg>
+<figcaption>图 10-1　一个券码要在六个地方保持一致，这正是电商代码容易出错的地方</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="coupons/views.py">
+<pre>
+from django.utils import timezone
+
+
+@require_POST
+def coupon_apply(request):
+    now = timezone.now()                          # 时区感知的“现在”
+    form = CouponApplyForm(request.POST)
+    if form.is_valid():
+        code = form.cleaned_data['code']
+        try:
+            coupon = Coupon.objects.get(
+                code__iexact=code,                # 不区分大小写的精确匹配
+                valid_from__lte=now,
+                valid_to__gte=now,
+                active=True,
+            )
+            request.session['coupon_id'] = coupon.id
+        except Coupon.DoesNotExist:
+            request.session['coupon_id'] = None
+    return redirect('cart:cart_detail')
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="cart/cart.py（新增部分）">
+<pre>
+from coupons.models import Coupon
+
+
+class Cart:
+    def __init__(self, request):
+        # ...
+        self.coupon_id = self.session.get('coupon_id')
+
+    @property
+    def coupon(self):
+        if self.coupon_id:
+            try:
+                return Coupon.objects.get(id=self.coupon_id)
+            except Coupon.DoesNotExist:
+                pass
+        return None
+
+    def get_discount(self):
+        if self.coupon:
+            return (self.coupon.discount / Decimal(100)) * self.get_total_price()
+        return Decimal(0)
+
+    def get_total_price_after_discount(self):
+        return self.get_total_price() - self.get_discount()
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="cart/templates/cart/detail.html（节选）">
+<pre>
+{% if cart.coupon %}
+  &lt;tr class="subtotal"&gt;
+    &lt;td&gt;Subtotal&lt;/td&gt;&lt;td colspan="4"&gt;&lt;/td&gt;
+    &lt;td class="num"&gt;${{ cart.get_total_price|floatformat:2 }}&lt;/td&gt;
+  &lt;/tr&gt;
+  &lt;tr&gt;
+    &lt;td&gt;"{{ cart.coupon.code }}" coupon ({{ cart.coupon.discount }}% off)&lt;/td&gt;&lt;td colspan="4"&gt;&lt;/td&gt;
+    &lt;td class="num neg"&gt;- ${{ cart.get_discount|floatformat:2 }}&lt;/td&gt;
+  &lt;/tr&gt;
+{% endif %}
+&lt;tr class="total"&gt;
+  &lt;td&gt;Total&lt;/td&gt;&lt;td colspan="4"&gt;&lt;/td&gt;
+  &lt;td class="num"&gt;${{ cart.get_total_price_after_discount|floatformat:2 }}&lt;/td&gt;
+&lt;/tr&gt;
+
+&lt;form action="{% url "coupons:apply" %}" method="post"&gt;
+  {{ coupon_apply_form }}
+  &lt;input type="submit" value="Apply"&gt;
+  {% csrf_token %}
+&lt;/form&gt;
+</pre>
+</div>
+
+<p><code>|floatformat:2</code> 把数字格式化为两位小数（同时会按当前语言本地化，第 11 章会看到效果）。</p>
+
+<h2 id="orders">把优惠券存进订单</h2>
+
+<div class="code" data-lang="py" data-file="orders/models.py">
+<pre>
+class Order(models.Model):
+    # ...
+    coupon = models.ForeignKey(Coupon, related_name='orders', null=True, blank=True,
+                               on_delete=models.SET_NULL)     # 券删了，订单还在
+    discount = models.IntegerField(default=0,
+                                   validators=[MinValueValidator(0), MaxValueValidator(100)])
+
+    def get_total_cost_before_discount(self):
+        return sum(item.get_cost() for item in self.items.all())
+
+    def get_discount(self):
+        total_cost = self.get_total_cost_before_discount()
+        if self.discount:
+            return total_cost * (self.discount / Decimal(100))
+        return Decimal(0)
+
+    def get_total_cost(self):
+        return self.get_total_cost_before_discount() - self.get_discount()
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; 为什么要单独存 <code>discount</code></div>
+  <p>折扣率明明在 Coupon 上，为什么订单还要再存一份？因为运营可能明天把 SUMMER 从 20% 改成 10%，甚至删掉它。<strong>订单是历史事实，必须保存下单那一刻的数值</strong> —— 和 OrderItem 保存成交价是同一个道理。</p>
+</div>
+
+<div class="code" data-lang="py" data-file="orders/views.py（order_create 中）">
+<pre>
+order = form.save(commit=False)
+if cart.coupon:
+    order.coupon = cart.coupon
+    order.discount = cart.coupon.discount
+order.save()
+</pre>
+</div>
+
+<h3>让 Stripe 也知道折扣</h3>
+
+<div class="code" data-lang="py" data-file="payment/views.py（payment_process 中）">
+<pre>
+if order.coupon:
+    stripe_coupon = stripe.Coupon.create(
+        name=order.coupon.code,
+        percent_off=order.discount,
+        duration='once',                  # 一次性支付
+    )
+    session_data['discounts'] = [{'coupon': stripe_coupon.id}]
+</pre>
+</div>
+
+<p>之后在 Admin 订单详情页和 PDF 发票模板里加上“小计 / 优惠 / 合计”三行即可，写法和购物车模板相同。</p>
+
+<h2 id="recommender">推荐引擎：买了这个的人也买了</h2>
+
+<p>
+  思路很朴素：<strong>同一张订单里出现的商品两两“加一分”</strong>。某商品的推荐列表，就是和它同单次数最多的那些商品。
+  Redis 的有序集合天生适合这种“成员 + 分数，按分数排序”的数据。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="每个商品一个有序集合 product:id:purchased_with，同单购买的其他商品作为成员，分数是同单次数">
+  <text class="ttl" x="20" y="24">历史订单</text>
+  <rect class="bx" x="20" y="36" width="210" height="28" rx="6"/><text class="sm" x="30" y="55">① 红茶 + 黑茶</text>
+  <rect class="bx" x="20" y="70" width="210" height="28" rx="6"/><text class="sm" x="30" y="89">② 黑茶 + 绿茶</text>
+  <rect class="bx" x="20" y="104" width="210" height="28" rx="6"/><text class="sm" x="30" y="123">③ 红茶 + 黑茶 + 茶粉</text>
+  <rect class="bx" x="20" y="138" width="210" height="28" rx="6"/><text class="sm" x="30" y="157">④ 绿茶 + 茶粉</text>
+  <rect class="bx" x="20" y="172" width="210" height="28" rx="6"/><text class="sm" x="30" y="191">⑤ 黑茶 + 茶粉</text>
+  <rect class="bx" x="20" y="206" width="210" height="28" rx="6"/><text class="sm" x="30" y="225">⑥ 红茶 + 绿茶</text>
+
+  <path class="ln-a" d="M232 135 H284" marker-end="url(#ar-a)"/>
+  <text class="mono sm on-a" x="258" y="125" text-anchor="middle">ZINCRBY</text>
+
+  <rect class="bx-g" x="288" y="20" width="220" height="120" rx="10"/>
+  <text class="mono sm on-g" x="398" y="42" text-anchor="middle">product:黑茶:purchased_with</text>
+  <text class="mono sm" x="304" y="68">红茶   score 2</text>
+  <text class="mono sm" x="304" y="90">茶粉   score 2</text>
+  <text class="mono sm" x="304" y="112">绿茶   score 1</text>
+  <text class="sm" x="304" y="132">→ 黑茶页推荐：红茶、茶粉、绿茶</text>
+
+  <rect class="bx-b" x="524" y="20" width="220" height="120" rx="10"/>
+  <text class="mono sm on-b" x="634" y="42" text-anchor="middle">product:红茶:purchased_with</text>
+  <text class="mono sm" x="540" y="68">黑茶   score 2</text>
+  <text class="mono sm" x="540" y="90">茶粉   score 1</text>
+  <text class="mono sm" x="540" y="112">绿茶   score 1</text>
+
+  <rect class="bx-d" x="288" y="156" width="456" height="130" rx="10"/>
+  <text class="ttl" x="516" y="180" text-anchor="middle">购物车里有“黑茶 + 红茶”时</text>
+  <text class="mono sm" x="304" y="206">ZUNIONSTORE tmp 黑茶集合 红茶集合   → 分数相加</text>
+  <text class="mono sm" x="304" y="228">  茶粉 2+1=3，绿茶 1+1=2，红茶 2，黑茶 2</text>
+  <text class="mono sm" x="304" y="250">ZREM tmp 黑茶 红茶                → 去掉已在购物车的</text>
+  <text class="mono sm" x="304" y="272">ZRANGE tmp 0 -1 DESC → [茶粉, 绿茶]；DEL tmp</text>
+</svg>
+<figcaption>图 10-2　单商品推荐直接读自己的集合；多商品推荐先把多个集合的分数合并</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="shop/recommender.py">
+<pre>
+import redis
+from django.conf import settings
+
+from .models import Product
+
+r = redis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=settings.REDIS_DB)
+
+
+class Recommender:
+    def get_product_key(self, id):
+        return f'product:{id}:purchased_with'
+
+    def products_bought(self, products):
+        product_ids = [p.id for p in products]
+        for product_id in product_ids:
+            for with_id in product_ids:
+                if product_id != with_id:
+                    r.zincrby(self.get_product_key(product_id), 1, with_id)
+
+    def suggest_products_for(self, products, max_results=6):
+        product_ids = [p.id for p in products]
+        if len(products) == 1:
+            suggestions = r.zrange(self.get_product_key(product_ids[0]), 0, -1, desc=True)[:max_results]
+        else:
+            flat_ids = ''.join([str(id) for id in product_ids])
+            tmp_key = f'tmp_{flat_ids}'
+            keys = [self.get_product_key(id) for id in product_ids]
+            r.zunionstore(tmp_key, keys)             # 合并并累加分数
+            r.zrem(tmp_key, *product_ids)             # 排除购物车里已有的
+            suggestions = r.zrange(tmp_key, 0, -1, desc=True)[:max_results]
+            r.delete(tmp_key)
+        suggested_products_ids = [int(id) for id in suggestions]
+        suggested_products = list(Product.objects.filter(id__in=suggested_products_ids))
+        suggested_products.sort(key=lambda x: suggested_products_ids.index(x.id))
+        return suggested_products
+
+    def clear_purchases(self):
+        for id in Product.objects.values_list('id', flat=True):
+            r.delete(self.get_product_key(id))
+</pre>
+</div>
+
+<p>付款成功（Webhook）时记录“同单购买”，商品详情页和购物车页展示推荐：</p>
+
+<div class="code" data-lang="py" data-file="payment/webhooks.py、shop/views.py、cart/views.py（节选）">
+<pre>
+# Webhook：订单已付款
+product_ids = order.items.values_list('product_id')
+products = Product.objects.filter(id__in=product_ids)
+Recommender().products_bought(products)
+
+# 商品详情
+recommended_products = Recommender().suggest_products_for([product], 4)
+
+# 购物车
+cart_products = [item['product'] for item in cart]
+recommended_products = (Recommender().suggest_products_for(cart_products, max_results=4)
+                        if cart_products else [])
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么在“付款后”而不是“下单时”记录</div>
+  <p>下单不代表真的买了（可能放弃支付）。以付款成功为准，推荐数据更可信。这类“基于共现的推荐”简单有效，数据量大了以后可以换成协同过滤等更复杂的算法，但接口不必变。</p>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 10 章代码点评 <small>Chapter10/myshop</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 订单保存折扣快照，外键用 SET_NULL</h4>
+    <p>优惠券被删除或修改都不影响历史订单金额；推荐数据在付款后才记录。这两个设计决策都体现了“订单是不可变的历史事实”。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 优惠券只在“应用时”校验，结账时不再检查 <span class="src">Chapter10/myshop/cart/cart.py:84</span></h4>
+    <p>
+      <code>coupon_apply</code> 检查了有效期和 <code>active</code>，但 <code>Cart.coupon</code> 只按 ID 取券。用户在券过期前一分钟应用，一周后照样能用它下单；运营把券停用了也拦不住。
+      结算相关的每一步都应该重新校验：
+    </p>
+<div class="code" data-lang="py"><pre>
+# coupons/models.py
+class CouponQuerySet(models.QuerySet):
+    def valid(self, at=None):
+        at = at or timezone.now()
+        return self.filter(active=True, valid_from__lte=at, valid_to__gte=at)
+
+
+class Coupon(models.Model):
+    ...
+    objects = CouponQuerySet.as_manager()
+
+
+# cart/cart.py
+from functools import cached_property
+
+@cached_property                          # 同一请求内只查一次
+def coupon(self):
+    if not self.coupon_id:
+        return None
+    return Coupon.objects.valid().filter(pk=self.coupon_id).first()
+</pre></div>
+    <p>顺带解决了另一个问题：原来的 <code>@property</code> 每访问一次就查一次数据库，而模板里 <code>cart.coupon</code>、<code>cart.coupon.code</code>、<code>cart.get_discount</code> 会访问它五六次，加上上下文处理器在每个页面都会触发。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 大小写不同的券码会让应用券时 500 <span class="src">coupons/models.py:6</span></h4>
+    <p><code>code</code> 的 <code>unique=True</code> 区分大小写，所以后台可以同时存在 <code>SUMMER</code> 和 <code>summer</code>；而查询用的是 <code>code__iexact</code>，两条都匹配时 <code>get()</code> 抛出 <code>MultipleObjectsReturned</code>。用函数唯一约束统一口径，顺便让数据库保证其他业务规则：</p>
+<div class="code" data-lang="py"><pre>
+from django.db.models.functions import Lower
+
+
+class Coupon(models.Model):
+    ...
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(Lower('code'), name='coupon_code_ci_unique'),
+            models.CheckConstraint(condition=models.Q(valid_to__gt=models.F('valid_from')),
+                                   name='coupon_valid_range'),
+            models.CheckConstraint(condition=models.Q(discount__gte=0, discount__lte=100),
+                                   name='coupon_discount_0_100'),
+        ]
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 推荐引擎的临时键会冲突 <span class="src">shop/recommender.py:32</span></h4>
+    <p>
+      临时键由商品 ID 直接拼接：购物车 <code>[1, 23]</code> 和 <code>[12, 3]</code> 都得到 <code>tmp_123</code>。两个用户同时浏览购物车时，一个请求可能读到另一个请求合并的结果，甚至在对方读取前把键删掉。
+      Redis 6.2 起有 <code>ZUNION</code>，直接返回合并结果而不落地存储，可以彻底去掉临时键：
+    </p>
+<div class="code" data-lang="py"><pre>
+def suggest_products_for(self, products, max_results=6):
+    ids = [p.id for p in products]
+    keys = [self.get_product_key(i) for i in ids]
+    scored = r.zunion(keys, withscores=True)                # [(b'7', 3.0), (b'9', 2.0), ...]
+    ranked = sorted(scored, key=lambda kv: kv[1], reverse=True)
+    exclude = {str(i).encode() for i in ids}
+    top_ids = [int(m) for m, _ in ranked if m not in exclude][:max_results]
+    products = Product.objects.in_bulk(top_ids)
+    return [products[i] for i in top_ids if i in products]
+</pre></div>
+    <p>单商品分支同样应该让 Redis 只返回前 N 个：<code>r.zrange(key, 0, max_results - 1, desc=True)</code>，而不是取回整个集合再切片。<code>products_bought</code> 里的 n² 次网络往返可以用 <code>r.pipeline()</code> 合并成一次。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> Webhook 里做的事越来越多</h4>
+    <p>
+      现在 Webhook 同步地：更新订单、写 Redis 推荐、触发发票任务。结合第 9 章说的“事件可能重复投递”，重复事件会让推荐分数翻倍；Redis 暂时不可用会让 Webhook 返回 500 进而被 Stripe 反复重试。
+      Webhook 应该只做“验签 + 幂等地记录状态”，其余工作（推荐、发票）交给一个 Celery 任务，并且只在订单第一次被标记为已付款时触发。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 每次支付都新建一个 Stripe 优惠券</h4>
+    <p>用户每点一次“Pay now”（包括取消后重试）都会在 Stripe 账户里创建一个新的 Coupon 对象，时间长了会堆积成千上万个。可以在本地 Coupon 上保存一个 <code>stripe_coupon_id</code>，首次创建后复用；或者干脆把折扣直接体现在每个 line item 的 <code>unit_amount</code> 上。另外，本地按“总价 × 百分比”算折扣、Stripe 按自己的规则算，分位上的四舍五入可能不同，最终以 Stripe 实收金额（Webhook 里的 <code>amount_total</code>）为准对账。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 券码可以被暴力枚举</h4>
+    <p><code>coupon_apply</code> 不需要登录也没有限流，券码又往往是 SUMMER、VIP10 这类可猜测的单词。应加限流（如按 IP/会话每分钟 5 次），并给优惠券加“总使用次数/每人使用次数”限制（需要记录使用情况）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 小的整洁性问题</h4>
+    <p><code>cart_detail</code> 里迭代了两次购物车（每次都会查一次商品表）；<code>active = models.BooleanField()</code> 没有默认值，用代码创建时必须显式传值；<code>order.items.values_list('product_id')</code> 可以更直接地写成 <code>Product.objects.filter(order_items__order=order)</code>。Redis 主机、端口在 settings 里写死，应与第 7 章一样改为 <code>REDIS_URL</code> 环境变量。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>字段验证器只在表单/<code>full_clean()</code> 中生效；业务规则尽量同时用数据库约束兜底。</li>
+  <li>优惠券 ID 存在会话里，折扣由 Cart 计算；关键金额在订单上保存快照。</li>
+  <li>凡是影响金额的数据，在结算的每一步都要重新校验。</li>
+  <li>Redis 有序集合 + <code>ZINCRBY</code>/<code>ZUNIONSTORE</code>（或 <code>ZUNION</code>）可以实现简单实用的共现推荐。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>创建一个 1 分钟后过期的优惠券并应用，等过期后去结账，观察折扣是否仍然生效；按点评修复。</li>
+    <li>在 Admin 中创建 <code>SUMMER</code> 与 <code>summer</code> 两张券，应用 <code>Summer</code> 复现 500；加上函数唯一约束后重新迁移。</li>
+    <li>用 <code>ZUNION</code> 重写 <code>suggest_products_for</code>，并用 <code>r.pipeline()</code> 优化 <code>products_bought</code>。</li>
+    <li>选做：给优惠券增加 <code>max_uses</code> 字段，在订单付款成功时原子地扣减次数（提示：<code>F('uses') + 1</code>）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

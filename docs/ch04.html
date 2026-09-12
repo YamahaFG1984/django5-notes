@@ -1,0 +1,670 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 4 章 · 构建社交网站 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="4">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 4 章 · 项目二：图片书签社交网站</span>
+<h1>构建社交网站</h1>
+<p class="lede">
+  第二个项目是一个“图片书签”社交网站：用户可以从任何网站收藏图片、互相关注、点赞、查看好友动态。
+  这一章先打地基 —— <strong>用户系统</strong>：登录、登出、改密码、找回密码、注册、个人资料。
+  你会发现 Django 的认证框架已经把 90% 的活干完了。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解认证框架的组成：User/Group/Permission 模型、会话、中间件</li>
+    <li>分清 <code>authenticate()</code> 与 <code>login()</code></li>
+    <li>使用内置的登录、登出、改密码、重置密码视图，并覆盖它们的模板</li>
+    <li>理解模板查找顺序和 <code>INSTALLED_APPS</code> 顺序的关系</li>
+    <li>实现用户注册，理解密码哈希</li>
+    <li>用一对一的 Profile 模型扩展用户，处理图片上传（媒体文件）</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="project">项目蓝图</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="bookmarks 项目在第 4 到 7 章逐步完成的功能">
+  <rect class="bx-a" x="16" y="30" width="170" height="110" rx="10"/>
+  <text class="ttl on-a" x="101" y="54" text-anchor="middle">第 4 章 · 本章</text>
+  <text class="sm" x="30" y="80">登录 / 登出</text>
+  <text class="sm" x="30" y="100">改密码 / 找回密码</text>
+  <text class="sm" x="30" y="120">注册 / 个人资料</text>
+  <rect class="bx" x="206" y="30" width="170" height="110" rx="10"/>
+  <text class="ttl" x="291" y="54" text-anchor="middle">第 5 章</text>
+  <text class="sm" x="220" y="80">消息提示</text>
+  <text class="sm" x="220" y="100">邮箱登录</text>
+  <text class="sm" x="220" y="120">Google 登录</text>
+  <rect class="bx" x="396" y="30" width="170" height="110" rx="10"/>
+  <text class="ttl" x="481" y="54" text-anchor="middle">第 6 章</text>
+  <text class="sm" x="410" y="80">书签小工具</text>
+  <text class="sm" x="410" y="100">缩略图、点赞</text>
+  <text class="sm" x="410" y="120">无限滚动</text>
+  <rect class="bx" x="586" y="30" width="158" height="110" rx="10"/>
+  <text class="ttl" x="665" y="54" text-anchor="middle">第 7 章</text>
+  <text class="sm" x="600" y="80">关注系统</text>
+  <text class="sm" x="600" y="100">动态流、信号</text>
+  <text class="sm" x="600" y="120">Redis 浏览排行</text>
+  <path class="ln" d="M188 85 H202" marker-end="url(#ar)"/>
+  <path class="ln" d="M378 85 H392" marker-end="url(#ar)"/>
+  <path class="ln" d="M568 85 H582" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 4-1　bookmarks 项目的四章路线</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m venv env/bookmarks &amp;&amp; source env/bookmarks/bin/activate
+python -m pip install "Django~=5.2"
+django-admin startproject bookmarks
+cd bookmarks
+django-admin startapp account
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="bookmarks/settings.py">
+<pre>
+INSTALLED_APPS = [
+    'account.apps.AccountConfig',     # ← 故意放在最前面，原因见下文
+    'django.contrib.admin',
+    'django.contrib.auth',
+    # ...
+]
+</pre>
+</div>
+
+<h2 id="auth">认证框架由什么组成</h2>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128100;</span><h4>模型</h4><p><code>User</code>（用户名、密码、邮箱、姓名、<code>is_active</code>…）、<code>Group</code>（用户组）、<code>Permission</code>（权限标记）。</p></div>
+  <div class="card"><span class="ic">&#129521;</span><h4>中间件</h4><p><code>SessionMiddleware</code> 维护会话；<code>AuthenticationMiddleware</code> 根据会话把用户挂到 <code>request.user</code> 上。</p></div>
+  <div class="card"><span class="ic">&#128273;</span><h4>视图与表单</h4><p>登录、登出、改密码、重置密码的现成类视图，以及 <code>AuthenticationForm</code> 等表单。</p></div>
+</div>
+
+<h3>先手写一个登录视图</h3>
+
+<p>为了看清原理，书里先自己写了一遍登录：</p>
+
+<div class="code" data-lang="py" data-file="account/views.py">
+<pre>
+from django.contrib.auth import authenticate, login
+from django.http import HttpResponse
+
+
+def user_login(request):
+    if request.method == 'POST':
+        form = LoginForm(request.POST)
+        if form.is_valid():
+            cd = form.cleaned_data
+            user = authenticate(request, username=cd['username'], password=cd['password'])
+            if user is not None:
+                if user.is_active:
+                    login(request, user)
+                    return HttpResponse('Authenticated successfully')
+                return HttpResponse('Disabled account')
+            return HttpResponse('Invalid login')
+    else:
+        form = LoginForm()
+    return render(request, 'account/login.html', {'form': form})
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="authenticate 负责核对凭据返回 User，login 负责把用户写进会话并设置 Cookie">
+  <rect class="bx" x="16" y="80" width="130" height="60" rx="10"/>
+  <text class="ttl" x="81" y="106" text-anchor="middle">用户名 + 密码</text>
+  <text class="sm" x="81" y="126" text-anchor="middle">来自表单</text>
+  <path class="ln" d="M148 110 H196" marker-end="url(#ar)"/>
+
+  <rect class="bx-b" x="200" y="20" width="230" height="180" rx="12"/>
+  <text class="ttl on-b" x="315" y="44" text-anchor="middle">authenticate()</text>
+  <text class="sm" x="216" y="70">“你是谁？”—— 只核对，不登录</text>
+  <text class="sm" x="216" y="96">依次询问 AUTHENTICATION_BACKENDS</text>
+  <text class="sm" x="216" y="120">把输入的密码哈希后与库里比较</text>
+  <text class="sm on-g" x="216" y="150">成功 → 返回 User 对象</text>
+  <text class="sm on-r" x="216" y="172">失败 → 返回 None</text>
+
+  <path class="ln-a" d="M432 110 H480" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="484" y="20" width="260" height="180" rx="12"/>
+  <text class="ttl on-a" x="614" y="44" text-anchor="middle">login(request, user)</text>
+  <text class="sm" x="500" y="70">“记住你”—— 建立登录状态</text>
+  <text class="sm" x="500" y="96">把 user.pk 和后端名写入会话</text>
+  <text class="sm" x="500" y="120">轮换会话 ID（防会话固定攻击）</text>
+  <text class="sm" x="500" y="146">响应带 Set-Cookie: sessionid=…</text>
+  <text class="sm" x="500" y="172">之后每个请求 request.user 都是他</text>
+</svg>
+<figcaption>图 4-2　认证（authenticate）≠ 登录（login）</figcaption>
+</figure>
+
+<h2 id="builtin-views">使用内置认证视图</h2>
+
+<p>手写只是为了理解。实际项目直接用 <code>django.contrib.auth.views</code> 里的现成视图，最省事的是一行 include：</p>
+
+<div class="code" data-lang="py" data-file="account/urls.py">
+<pre>
+from django.urls import include, path
+
+from . import views
+
+urlpatterns = [
+    path('', include('django.contrib.auth.urls')),   # 一次性引入下表所有视图
+    path('', views.dashboard, name='dashboard'),
+    path('register/', views.register, name='register'),
+    path('edit/', views.edit, name='edit'),
+]
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>URL 名</th><th>视图</th><th>要提供的模板（在 <code>templates/registration/</code> 下）</th></tr>
+  <tr><td><code>login</code></td><td>LoginView</td><td><code>login.html</code></td></tr>
+  <tr><td><code>logout</code></td><td>LogoutView（<strong>只接受 POST</strong>）</td><td><code>logged_out.html</code></td></tr>
+  <tr><td><code>password_change</code></td><td>PasswordChangeView</td><td><code>password_change_form.html</code></td></tr>
+  <tr><td><code>password_change_done</code></td><td>PasswordChangeDoneView</td><td><code>password_change_done.html</code></td></tr>
+  <tr><td><code>password_reset</code></td><td>PasswordResetView</td><td><code>password_reset_form.html</code> + <code>password_reset_email.html</code></td></tr>
+  <tr><td><code>password_reset_done</code></td><td>PasswordResetDoneView</td><td><code>password_reset_done.html</code></td></tr>
+  <tr><td><code>password_reset_confirm</code></td><td>PasswordResetConfirmView</td><td><code>password_reset_confirm.html</code></td></tr>
+  <tr><td><code>password_reset_complete</code></td><td>PasswordResetCompleteView</td><td><code>password_reset_complete.html</code></td></tr>
+</table>
+</div>
+
+<h3>为什么 account 要排在 admin 前面</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="模板加载器按 INSTALLED_APPS 顺序查找，先找到的模板生效">
+  <text class="sm" x="20" y="24">渲染 registration/logged_out.html 时，模板加载器按 INSTALLED_APPS 顺序逐个应用查找：</text>
+  <rect class="bx-g" x="20" y="40" width="220" height="60" rx="10"/>
+  <text class="ttl on-g" x="130" y="64" text-anchor="middle">① account/templates/</text>
+  <text class="sm" x="130" y="86" text-anchor="middle">找到了 → 用它 &#10003;</text>
+  <rect class="bx-d" x="270" y="40" width="220" height="60" rx="10"/>
+  <text class="ttl" x="380" y="64" text-anchor="middle">② admin/templates/</text>
+  <text class="sm" x="380" y="86" text-anchor="middle">也有同名文件，但不会被用到</text>
+  <rect class="bx-d" x="520" y="40" width="220" height="60" rx="10"/>
+  <text class="ttl" x="630" y="64" text-anchor="middle">③ …</text>
+  <path class="ln" d="M242 70 H266" marker-end="url(#ar)"/>
+  <path class="ln" d="M492 70 H516" marker-end="url(#ar)"/>
+  <rect class="bx-r" x="20" y="120" width="720" height="50" rx="10"/>
+  <text class="sm on-r" x="380" y="142" text-anchor="middle">如果 admin 排在前面，登出后看到的会是 Django 管理后台风格的“已登出”页面</text>
+  <text class="sm" x="380" y="160" text-anchor="middle">另一种做法：在 TEMPLATES['DIRS'] 里放项目级模板目录，它优先于所有应用目录</text>
+</svg>
+<figcaption>图 4-3　同名模板“先到先得”</figcaption>
+</figure>
+
+<h3>登录模板与 <code>next</code> 参数</h3>
+
+<div class="code" data-lang="html" data-file="account/templates/registration/login.html">
+<pre>
+{% extends "base.html" %}
+
+{% block title %}Log-in{% endblock %}
+
+{% block content %}
+  &lt;h1&gt;Log-in&lt;/h1&gt;
+  {% if form.errors %}
+    &lt;p&gt;Your username and password didn't match. Please try again.&lt;/p&gt;
+  {% else %}
+    &lt;p&gt;Please, use the following form to log-in.
+       If you don't have an account &lt;a href="{% url "register" %}"&gt;register here&lt;/a&gt;.&lt;/p&gt;
+  {% endif %}
+  &lt;div class="login-form"&gt;
+    &lt;form action="{% url 'login' %}" method="post"&gt;
+      {{ form.as_p }}
+      {% csrf_token %}
+      &lt;input type="hidden" name="next" value="{{ next }}" /&gt;
+      &lt;p&gt;&lt;input type="submit" value="Log-in"&gt;&lt;/p&gt;
+    &lt;/form&gt;
+    &lt;p&gt;&lt;a href="{% url "password_reset" %}"&gt;Forgotten your password?&lt;/a&gt;&lt;/p&gt;
+  &lt;/div&gt;
+{% endblock %}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="login_required 把未登录用户重定向到登录页并带上 next 参数，登录后跳回原页面">
+  <rect class="bx" x="16" y="50" width="150" height="56" rx="10"/>
+  <text class="sm" x="91" y="74" text-anchor="middle">未登录访问</text>
+  <text class="mono sm" x="91" y="92" text-anchor="middle">/account/edit/</text>
+  <path class="ln-r" d="M168 78 H216" marker-end="url(#ar-r)"/>
+  <text class="mono sm on-r" x="192" y="68" text-anchor="middle">302</text>
+  <rect class="bx-a" x="220" y="50" width="250" height="56" rx="10"/>
+  <text class="sm on-a" x="345" y="74" text-anchor="middle">@login_required 重定向到</text>
+  <text class="mono sm" x="345" y="92" text-anchor="middle">/account/login/?next=/account/edit/</text>
+  <path class="ln" d="M472 78 H520" marker-end="url(#ar)"/>
+  <text class="sm" x="496" y="68" text-anchor="middle">登录</text>
+  <rect class="bx-g" x="524" y="50" width="220" height="56" rx="10"/>
+  <text class="sm on-g" x="634" y="74" text-anchor="middle">有 next → 回到 /account/edit/</text>
+  <text class="sm" x="634" y="92" text-anchor="middle">没有 → LOGIN_REDIRECT_URL</text>
+  <text class="sm" x="380" y="140" text-anchor="middle">LoginView 会校验 next 是否是本站地址，防止被利用成“开放重定向”跳到钓鱼网站</text>
+</svg>
+<figcaption>图 4-4　<code>next</code> 让用户登录后回到原来想去的页面</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="bookmarks/settings.py 与 account/views.py">
+<pre>
+LOGIN_REDIRECT_URL = 'dashboard'   # 可以写 URL 名字
+LOGIN_URL = 'login'
+LOGOUT_URL = 'logout'
+
+
+@login_required
+def dashboard(request):
+    return render(request, 'account/dashboard.html', {'section': 'dashboard'})
+</pre>
+</div>
+
+<p>基础模板里根据登录状态显示菜单。注意登出是一个 <strong>POST 表单</strong>：Django 5.0 起 <code>LogoutView</code> 不再接受 GET（防止被一张图片链接“强制登出”）。</p>
+
+<div class="code" data-lang="html" data-file="account/templates/base.html（节选）">
+<pre>
+&lt;span class="user"&gt;
+  {% if request.user.is_authenticated %}
+    Hello {{ request.user.first_name|default:request.user.username }},
+    &lt;form action="{% url "logout" %}" method="post"&gt;
+      &lt;button type="submit"&gt;Logout&lt;/button&gt;
+      {% csrf_token %}
+    &lt;/form&gt;
+  {% else %}
+    &lt;a href="{% url "login" %}"&gt;Log-in&lt;/a&gt;
+  {% endif %}
+&lt;/span&gt;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; request.user 永远存在</div>
+  <p>未登录时它是一个 <code>AnonymousUser</code> 对象，而不是 None。判断是否登录用只读属性 <code>is_authenticated</code>。菜单高亮用的 <code>section</code> 变量是每个视图自己传进模板的。</p>
+</div>
+
+<h3>找回密码的完整流程</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="密码重置流程：输入邮箱，发送带令牌的链接，打开链接设置新密码，完成">
+  <rect class="bx" x="16" y="30" width="160" height="70" rx="10"/>
+  <text class="ttl" x="96" y="54" text-anchor="middle">① password_reset</text>
+  <text class="sm" x="96" y="76" text-anchor="middle">输入注册邮箱</text>
+  <path class="ln" d="M178 65 H206" marker-end="url(#ar)"/>
+  <rect class="bx" x="210" y="30" width="160" height="70" rx="10"/>
+  <text class="ttl" x="290" y="54" text-anchor="middle">② …_done</text>
+  <text class="sm" x="290" y="76" text-anchor="middle">“邮件已发送”</text>
+
+  <rect class="bx-a" x="400" y="20" width="344" height="90" rx="10"/>
+  <text class="ttl on-a" x="572" y="42" text-anchor="middle">邮件（password_reset_email.html）</text>
+  <text class="mono sm" x="414" y="68">https://site/account/password-reset/</text>
+  <text class="mono sm on-a" x="414" y="88">MQ/ardx0u-b4973cfa2c70d652a1…/</text>
+  <text class="sm" x="414" y="104">uidb64（用户 ID 的 base64）/ token（一次性令牌）</text>
+  <path class="ln-a" d="M372 60 H396" marker-end="url(#ar-a)"/>
+
+  <path class="ln-a" d="M572 112 V146" marker-end="url(#ar-a)"/>
+  <rect class="bx-b" x="400" y="150" width="344" height="80" rx="10"/>
+  <text class="ttl on-b" x="572" y="174" text-anchor="middle">③ password_reset_confirm</text>
+  <text class="sm" x="414" y="198">validlink 为真 → 显示设置新密码的表单</text>
+  <text class="sm" x="414" y="218">令牌用过或过期（PASSWORD_RESET_TIMEOUT）→ 无效</text>
+  <path class="ln-g" d="M398 190 H290 V234" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="16" y="150" width="250" height="80" rx="10"/>
+  <text class="ttl on-g" x="141" y="174" text-anchor="middle">④ password_reset_complete</text>
+  <text class="sm" x="141" y="198" text-anchor="middle">“密码已设置，可以登录了”</text>
+  <text class="sm" x="141" y="218" text-anchor="middle">旧令牌立即失效</text>
+</svg>
+<figcaption>图 4-5　令牌由用户状态（密码哈希、最后登录时间等）计算得出，所以用过一次就失效，无需存数据库</figcaption>
+</figure>
+
+<p>开发时不必配 SMTP，把邮件打印到终端即可：</p>
+
+<div class="code" data-lang="py" data-file="bookmarks/settings.py">
+<pre>
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 重置页面不会暴露“邮箱是否注册过”</div>
+  <p>无论你输入的邮箱存不存在，<code>PasswordResetView</code> 都显示同样的“已发送”页面，防止攻击者借此探测哪些邮箱注册了你的网站。</p>
+</div>
+
+<h2 id="register">用户注册</h2>
+
+<div class="code" data-lang="py" data-file="account/forms.py">
+<pre>
+from django import forms
+from django.contrib.auth import get_user_model
+
+
+class UserRegistrationForm(forms.ModelForm):
+    password = forms.CharField(label='Password', widget=forms.PasswordInput)
+    password2 = forms.CharField(label='Repeat password', widget=forms.PasswordInput)
+
+    class Meta:
+        model = get_user_model()               # 不要直接写 User
+        fields = ['username', 'first_name', 'email']
+
+    def clean_password2(self):                 # clean_&lt;字段名&gt;()：单字段校验
+        cd = self.cleaned_data
+        if cd['password'] != cd['password2']:
+            raise forms.ValidationError("Passwords don't match.")
+        return cd['password2']
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="account/views.py">
+<pre>
+def register(request):
+    if request.method == 'POST':
+        user_form = UserRegistrationForm(request.POST)
+        if user_form.is_valid():
+            new_user = user_form.save(commit=False)
+            new_user.set_password(user_form.cleaned_data['password'])   # 哈希后再存！
+            new_user.save()
+            Profile.objects.create(user=new_user)                        # 同时建资料
+            return render(request, 'account/register_done.html', {'new_user': new_user})
+    else:
+        user_form = UserRegistrationForm()
+    return render(request, 'account/register.html', {'user_form': user_form})
+</pre>
+</div>
+
+<h3>Django 怎样存密码</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="密码经过加盐和多轮 PBKDF2 哈希后以 算法$迭代次数$盐$哈希 的格式存储">
+  <rect class="bx" x="16" y="40" width="130" height="56" rx="10"/>
+  <text class="mono" x="81" y="72" text-anchor="middle">"s3cret!"</text>
+  <path class="ln" d="M148 68 H196" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="200" y="24" width="190" height="88" rx="10"/>
+  <text class="ttl on-a" x="295" y="48" text-anchor="middle">PBKDF2-SHA256</text>
+  <text class="sm" x="295" y="70" text-anchor="middle">+ 随机盐（每人不同）</text>
+  <text class="sm" x="295" y="90" text-anchor="middle">× 1,000,000 轮（5.2 默认）</text>
+  <path class="ln" d="M392 68 H440" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="444" y="24" width="300" height="88" rx="10"/>
+  <text class="ttl on-b" x="594" y="48" text-anchor="middle">auth_user.password 列</text>
+  <text class="mono sm" x="458" y="74">pbkdf2_sha256$1000000$</text>
+  <text class="mono sm" x="458" y="94">Xq3…salt…$Hk9…hash…=</text>
+  <text class="sm" x="380" y="140" text-anchor="middle">格式：算法 $ 迭代次数 $ 盐 $ 哈希。登录时用同样的算法、盐、次数重算一遍比较。</text>
+  <text class="sm" x="380" y="162" text-anchor="middle">哈希是单向的，数据库泄露也拿不到原密码；迭代越多，暴力破解越慢。</text>
+  <text class="sm" x="380" y="184" text-anchor="middle">PASSWORD_HASHERS 的第一项用于新密码，其余项用来校验旧格式并在登录时自动升级。</text>
+</svg>
+<figcaption>图 4-6　永远用 <code>set_password()</code>，永远不要把明文写进 <code>user.password</code></figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 更强的哈希算法</div>
+  <p>Django 文档和 TSD 都推荐生产环境使用 <strong>Argon2</strong>：<code>pip install "django[argon2]"</code>，然后把 <code>Argon2PasswordHasher</code> 放到 <code>PASSWORD_HASHERS</code> 第一位。老用户下次登录时密码会被自动迁移到新算法。</p>
+</div>
+
+<h2 id="profile">扩展用户：Profile 模型</h2>
+
+<p>内置 <code>User</code> 只有少量字段。想加“生日”“头像”，最简单的办法是建一个与用户<strong>一对一</strong>的资料模型：</p>
+
+<div class="code" data-lang="py" data-file="account/models.py">
+<pre>
+from django.conf import settings
+from django.db import models
+
+
+class Profile(models.Model):
+    user = models.OneToOneField(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    date_of_birth = models.DateField(blank=True, null=True)
+    photo = models.ImageField(upload_to='users/%Y/%m/%d/', blank=True)
+
+    def __str__(self):
+        return f'Profile of {self.user.username}'
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="扩展用户的两种方式：一对一 Profile 与自定义用户模型">
+  <rect class="bx-b" x="20" y="20" width="340" height="170" rx="12"/>
+  <text class="ttl on-b" x="190" y="44" text-anchor="middle">方式一：一对一 Profile（本书）</text>
+  <rect class="bx" x="40" y="62" width="120" height="56" rx="8"/>
+  <text class="sm" x="100" y="86" text-anchor="middle">auth.User</text>
+  <text class="sm" x="100" y="104" text-anchor="middle">username…</text>
+  <rect class="bx-a" x="220" y="62" width="120" height="56" rx="8"/>
+  <text class="sm on-a" x="280" y="86" text-anchor="middle">Profile</text>
+  <text class="sm" x="280" y="104" text-anchor="middle">user_id UNIQUE</text>
+  <path class="ln-a" d="M218 90 H162" marker-end="url(#ar-a)"/>
+  <text class="sm" x="40" y="142">user.profile / profile.user</text>
+  <text class="sm on-r" x="40" y="164">多一次 JOIN；Profile 可能不存在</text>
+
+  <rect class="bx-g" x="400" y="20" width="340" height="170" rx="12"/>
+  <text class="ttl on-g" x="570" y="44" text-anchor="middle">方式二：自定义用户模型（推荐起步就做）</text>
+  <text class="mono sm" x="420" y="74">class User(AbstractUser):</text>
+  <text class="mono sm" x="440" y="94">email = EmailField(unique=True)</text>
+  <text class="mono sm" x="440" y="114">date_of_birth = DateField(…)</text>
+  <text class="mono sm" x="420" y="138">AUTH_USER_MODEL = 'account.User'</text>
+  <text class="sm on-r" x="420" y="164">项目中途再切换非常痛苦</text>
+</svg>
+<figcaption>图 4-7　两种扩展方式并不互斥：自定义 User 放核心字段，Profile 放非核心资料</figcaption>
+</figure>
+
+<h3>媒体文件：用户上传的文件</h3>
+
+<div class="code" data-lang="py" data-file="bookmarks/settings.py 与 bookmarks/urls.py">
+<pre>
+MEDIA_URL = 'media/'                 # 访问上传文件的 URL 前缀
+MEDIA_ROOT = BASE_DIR / 'media'      # 上传文件保存到磁盘的位置
+
+from django.conf import settings
+from django.conf.urls.static import static
+
+if settings.DEBUG:                   # 只在开发时让 Django 顺便提供媒体文件
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="上传的图片保存到 MEDIA_ROOT，数据库只保存相对路径，通过 MEDIA_URL 访问">
+  <rect class="bx" x="16" y="50" width="150" height="60" rx="10"/>
+  <text class="sm" x="91" y="76" text-anchor="middle">表单上传 photo.jpg</text>
+  <text class="sm" x="91" y="94" text-anchor="middle">enctype=multipart</text>
+  <path class="ln" d="M168 80 H214" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="218" y="20" width="250" height="56" rx="10"/>
+  <text class="sm on-a" x="343" y="44" text-anchor="middle">磁盘：MEDIA_ROOT/</text>
+  <text class="mono sm" x="343" y="64" text-anchor="middle">users/2024/01/10/photo.jpg</text>
+  <rect class="bx-b" x="218" y="90" width="250" height="56" rx="10"/>
+  <text class="sm on-b" x="343" y="114" text-anchor="middle">数据库 photo 列（varchar 100）</text>
+  <text class="mono sm" x="343" y="134" text-anchor="middle">'users/2024/01/10/photo.jpg'</text>
+  <path class="ln" d="M470 80 H518" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="522" y="50" width="222" height="60" rx="10"/>
+  <text class="sm on-g" x="633" y="74" text-anchor="middle">{{ profile.photo.url }}</text>
+  <text class="mono sm" x="633" y="94" text-anchor="middle">/media/users/2024/…</text>
+  <text class="sm" x="380" y="170" text-anchor="middle">生产环境由 Nginx 或对象存储（S3 等）提供 /media/，Django 不参与（第 17 章）</text>
+</svg>
+<figcaption>图 4-8　文件在磁盘，路径在数据库，URL 由 MEDIA_URL 拼出</figcaption>
+</figure>
+
+<p><code>ImageField</code> 需要 <strong>Pillow</strong> 库来校验图片：<code>python -m pip install Pillow</code>。</p>
+
+<h3>一个页面，两个表单</h3>
+
+<div class="code" data-lang="py" data-file="account/views.py">
+<pre>
+@login_required
+def edit(request):
+    if request.method == 'POST':
+        user_form = UserEditForm(instance=request.user, data=request.POST)
+        profile_form = ProfileEditForm(
+            instance=request.user.profile,
+            data=request.POST,
+            files=request.FILES,           # 上传的文件在 request.FILES 里
+        )
+        if user_form.is_valid() and profile_form.is_valid():
+            user_form.save()
+            profile_form.save()
+    else:
+        user_form = UserEditForm(instance=request.user)
+        profile_form = ProfileEditForm(instance=request.user.profile)
+    return render(request, 'account/edit.html',
+                  {'user_form': user_form, 'profile_form': profile_form})
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="account/templates/account/edit.html">
+<pre>
+&lt;form method="post" enctype="multipart/form-data"&gt;   {# 没有这个 enctype，文件传不上来 #}
+  {{ user_form.as_p }}
+  {{ profile_form.as_p }}
+  {% csrf_token %}
+  &lt;p&gt;&lt;input type="submit" value="Save changes"&gt;&lt;/p&gt;
+&lt;/form&gt;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; <code>instance=</code> 的作用</div>
+  <p>传入已有对象时，ModelForm 用它的值作为初始值，<code>save()</code> 时执行 UPDATE 而不是 INSERT。两个表单放在同一个 <code>&lt;form&gt;</code> 里一起提交，只要字段名不冲突就没问题。</p>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 4 章代码点评 <small>Chapter04/bookmarks</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 优先使用内置认证视图，<code>get_user_model()</code> / <code>AUTH_USER_MODEL</code></h4>
+    <p>认证是安全敏感代码，能用框架的就别自己写 —— 内置视图处理了开放重定向校验、会话轮换、令牌生成、防用户枚举等细节。登出用 POST 表单、媒体文件只在 DEBUG 下由 Django 提供，也都正确。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 新项目没有使用自定义用户模型 <span class="tag ts">TSD：用户模型</span></h4>
+    <p>
+      Django 官方文档原话是：<em>“如果你在开始一个新项目，强烈建议设置自定义用户模型，即使默认的 User 已经够用。”</em>
+      TSD 的建议完全一致。原因是 <code>AUTH_USER_MODEL</code> 在第一次 <code>migrate</code> 之后几乎无法再改（所有外键都指向 <code>auth_user</code> 表）。
+      本项目后面需要“邮箱唯一”（第 5 章）、“关注关系”（第 7 章甚至用了猴子补丁往 User 上加字段），这些用自定义模型都能干净地实现。开项目第一步就应该：
+    </p>
+<div class="code" data-lang="py"><pre>
+# account/models.py —— 在第一次 migrate 之前！
+from django.contrib.auth.models import AbstractUser
+from django.db import models
+
+
+class User(AbstractUser):
+    email = models.EmailField('email address', unique=True)
+
+
+# settings.py
+AUTH_USER_MODEL = 'account.User'
+
+# account/admin.py
+from django.contrib.auth.admin import UserAdmin
+admin.site.register(User, UserAdmin)
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 注册表单绕过了密码强度校验 <span class="src">Chapter04/bookmarks/account/forms.py:12</span></h4>
+    <p>
+      <code>settings.AUTH_PASSWORD_VALIDATORS</code> 配置了“最短 8 位、不能是常见密码、不能全数字”等规则，但这些规则<strong>不会自动生效</strong> ——
+      只有 <code>UserCreationForm</code>、<code>SetPasswordForm</code> 等内置表单会调用它们。自定义的 <code>UserRegistrationForm</code> 直接 <code>set_password()</code>，
+      用户可以注册密码为 <code>1</code> 的账号。另外 <code>clean_password2</code> 里 <code>cd['password']</code> 在第一个密码框留空时会抛 <code>KeyError</code>（该字段校验失败就不会出现在 <code>cleaned_data</code> 里），导致 500 错误。
+    </p>
+<div class="code" data-lang="py"><pre>
+from django.contrib.auth import password_validation
+
+
+class UserRegistrationForm(forms.ModelForm):
+    # ...
+    def clean_password2(self):
+        password = self.cleaned_data.get('password')
+        password2 = self.cleaned_data.get('password2')
+        if password and password2 and password != password2:
+            raise forms.ValidationError("Passwords don't match.")
+        return password2
+
+    def _post_clean(self):
+        super()._post_clean()          # 先构造出 self.instance
+        password = self.cleaned_data.get('password2')
+        if password:
+            try:
+                password_validation.validate_password(password, self.instance)
+            except forms.ValidationError as error:
+                self.add_error('password2', error)
+</pre></div>
+    <p>更简单的做法：直接继承 <code>django.contrib.auth.forms.BaseUserCreationForm</code>（或 <code>UserCreationForm</code>），它已经包含两次输入比对和强度校验。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 没有 Profile 的用户访问编辑页会 500 <span class="src">Chapter04/bookmarks/account/views.py:84</span></h4>
+    <p>
+      Profile 只在 <code>register</code> 视图里创建。通过 <code>createsuperuser</code> 或 Admin 创建的用户没有 Profile，
+      访问 <code>/account/edit/</code> 时 <code>request.user.profile</code> 抛出 <code>RelatedObjectDoesNotExist</code>。
+      书里说“第 7 章可以用信号解决”，但更直接的办法是在使用处兜底：
+    </p>
+<div class="code" data-lang="py"><pre>
+profile, _ = Profile.objects.get_or_create(user=request.user)
+profile_form = ProfileEditForm(instance=profile, data=request.POST, files=request.FILES)
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 注册和编辑成功后都没有重定向</h4>
+    <p>和第 2 章一样缺少 PRG：<code>register</code> 成功后直接渲染“欢迎”页，刷新会重复提交（此时会因用户名重复而报错）；<code>edit</code> 保存后停留在原页面。更好的体验是注册成功后直接 <code>login(request, new_user)</code> 并 <code>redirect('dashboard')</code>。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 删除不再使用的代码</h4>
+    <p><code>user_login</code> 视图、<code>LoginForm</code>、<code>account/login.html</code> 模板和 <code>urls.py</code> 里几十行被注释掉的 URL 都已经被内置视图取代，只是为教学保留。真实项目里死代码会误导维护者，应该删除（Git 历史里永远找得到）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 上传文件没有大小和类型限制</h4>
+    <p><code>ImageField</code> 只校验“是 Pillow 能打开的图片”，不限制大小。可以在表单里校验 <code>photo.size</code>，并设置 <code>DATA_UPLOAD_MAX_MEMORY_SIZE</code>/<code>FILE_UPLOAD_MAX_MEMORY_SIZE</code>；同时在 Nginx 上配置 <code>client_max_body_size</code>。上传目录也不要允许执行脚本。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> Django 5.1 的 <code>LoginRequiredMiddleware</code></h4>
+    <p>社交网站几乎每个页面都需要登录。与其给每个视图加 <code>@login_required</code>（忘加一个就是漏洞），不如反过来“默认需要登录，公开页面显式豁免”：</p>
+<div class="code" data-lang="py"><pre>
+MIDDLEWARE = [
+    # ... 放在 AuthenticationMiddleware 之后
+    'django.contrib.auth.middleware.LoginRequiredMiddleware',
+]
+
+from django.contrib.auth.decorators import login_not_required
+
+@login_not_required
+def register(request):
+    ...
+</pre></div>
+    <p>内置的 LoginView、密码重置视图已经标记为豁免。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li><code>authenticate()</code> 核对凭据，<code>login()</code> 建立会话；<code>request.user</code> 由认证中间件设置。</li>
+  <li><code>include('django.contrib.auth.urls')</code> 一次引入全部认证视图，只需在 <code>registration/</code> 下提供模板。</li>
+  <li>同名模板按 <code>INSTALLED_APPS</code> 顺序“先到先得”。</li>
+  <li>密码必须经 <code>set_password()</code> 哈希存储；自定义注册表单要记得调用密码校验器。</li>
+  <li>扩展用户可用一对一 Profile；新项目应从第一天起使用自定义用户模型。</li>
+  <li>上传文件需要 <code>MEDIA_URL</code>/<code>MEDIA_ROOT</code>、<code>enctype="multipart/form-data"</code> 和 <code>request.FILES</code>。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 <code>createsuperuser</code> 建一个用户，登录后访问 <code>/account/edit/</code>，复现 500 错误；再用 <code>get_or_create</code> 修复。</li>
+    <li>尝试用密码 <code>123</code> 注册，确认书中代码能注册成功；按点评改写表单后再试。</li>
+    <li>新建一个空项目，在第一次 <code>migrate</code> 之前配置自定义用户模型（<code>email</code> 唯一），并让 Admin 正常工作。</li>
+    <li>在 shell 里查看一个用户的 <code>password</code> 字段，辨认出算法、迭代次数、盐和哈希四部分。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

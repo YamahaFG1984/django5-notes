@@ -1,0 +1,831 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 3 章 · 扩展博客 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="3">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 3 章 · 项目一：博客</span>
+<h1>扩展博客</h1>
+<p class="lede">
+  博客项目的最后一章。我们接入第一个第三方应用做标签，用聚合查询推荐相似文章，
+  写自己的模板标签和过滤器，给搜索引擎提供站点地图、给读者提供 RSS，
+  最后把数据库迁到 PostgreSQL，做一个支持词干、权重和模糊匹配的全文搜索。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>集成 <code>django-taggit</code>，理解它背后的“泛型关系”</li>
+    <li>用 <code>annotate()</code> + <code>Count()</code> 写出“按共同标签数排序”的推荐查询</li>
+    <li>编写 <code>simple_tag</code>、<code>inclusion_tag</code> 和自定义过滤器</li>
+    <li>理解模板自动转义和 <code>mark_safe</code> 的安全边界</li>
+    <li>用 sitemap 框架和 syndication 框架生成 <code>sitemap.xml</code> 和 RSS</li>
+    <li>用 Docker 跑 PostgreSQL，用 <code>dumpdata</code>/<code>loaddata</code> 迁移数据</li>
+    <li>用 <code>SearchVector</code>、<code>SearchQuery</code>、<code>SearchRank</code>、<code>TrigramSimilarity</code> 做搜索</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="taggit">用 django-taggit 做标签</h2>
+
+<p>
+  标签是一种“非层级”的分类：一篇文章可以有多个标签，一个标签也可以属于多篇文章。
+  与其自己造轮子，不如装一个成熟的可复用应用：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install django-taggit==5.0.1
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="mysite/settings.py 与 blog/models.py">
+<pre>
+INSTALLED_APPS = [
+    # Django 自带应用在前
+    'django.contrib.admin',
+    # ...
+    'taggit',                   # 第三方应用在中间
+    'blog.apps.BlogConfig',     # 自己的应用在最后
+]
+
+from taggit.managers import TaggableManager
+
+class Post(models.Model):
+    # ...
+    tags = TaggableManager()
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="taggit 数据模型：TaggedItem 通过 content_type 和 object_id 泛型地指向任意模型，并外键指向 Tag">
+  <rect class="bx-a" x="20" y="60" width="170" height="110" rx="10"/>
+  <text class="ttl on-a" x="105" y="84" text-anchor="middle">blog.Post</text>
+  <text class="mono sm" x="36" y="110">id = 7</text>
+  <text class="mono sm" x="36" y="130">title = …</text>
+  <text class="mono sm" x="36" y="150">tags（管理器，非真实列）</text>
+
+  <rect class="bx-b" x="280" y="40" width="210" height="150" rx="10"/>
+  <text class="ttl on-b" x="385" y="64" text-anchor="middle">taggit.TaggedItem</text>
+  <text class="mono sm" x="296" y="92">id</text>
+  <text class="mono sm" x="296" y="116">tag_id → Tag</text>
+  <text class="mono sm on-b" x="296" y="140">content_type_id → "blog.post"</text>
+  <text class="mono sm on-b" x="296" y="164">object_id = 7</text>
+
+  <rect class="bx-g" x="580" y="60" width="160" height="110" rx="10"/>
+  <text class="ttl on-g" x="660" y="84" text-anchor="middle">taggit.Tag</text>
+  <text class="mono sm" x="596" y="112">id</text>
+  <text class="mono sm" x="596" y="134">name = 'jazz'</text>
+  <text class="mono sm" x="596" y="156">slug = 'jazz'</text>
+
+  <path class="ln-b" d="M278 150 C 240 150, 230 120, 192 118" marker-end="url(#ar-b)"/>
+  <path class="ln-g" d="M492 110 H576" marker-end="url(#ar-g)"/>
+
+  <rect class="bx-d" x="200" y="206" width="380" height="34" rx="8"/>
+  <text class="sm" x="390" y="228" text-anchor="middle">content_type + object_id = “泛型外键”：能指向任何模型的任何一行（第 7 章详解）</text>
+</svg>
+<figcaption>图 3-1　标签和文章之间隔着一张中间表，这张表可以服务所有模型</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="python manage.py shell">
+<pre>
+>>> post = Post.objects.get(id=1)
+>>> post.tags.add('music', 'jazz', 'django')
+>>> post.tags.all()
+&lt;QuerySet [&lt;Tag: jazz&gt;, &lt;Tag: music&gt;, &lt;Tag: django&gt;]&gt;
+>>> post.tags.remove('django')
+</pre>
+</div>
+
+<h3>按标签筛选文章</h3>
+
+<p>让同一个视图服务两个 URL：一个是全部文章，一个是某标签下的文章。</p>
+
+<div class="code" data-lang="py" data-file="blog/views.py 与 blog/urls.py">
+<pre>
+from taggit.models import Tag
+
+
+def post_list(request, tag_slug=None):
+    post_list = Post.published.all()
+    tag = None
+    if tag_slug:
+        tag = get_object_or_404(Tag, slug=tag_slug)
+        post_list = post_list.filter(tags__in=[tag])     # 多对多关系的过滤
+    # ... 分页同上一章 ...
+    return render(request, 'blog/post/list.html', {'posts': posts, 'tag': tag})
+
+
+urlpatterns = [
+    path('', views.post_list, name='post_list'),
+    path('tag/&lt;slug:tag_slug&gt;/', views.post_list, name='post_list_by_tag'),
+    # ...
+]
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="blog/templates/blog/post/list.html（节选）">
+<pre>
+{% if tag %}
+  &lt;h2&gt;Posts tagged with "{{ tag.name }}"&lt;/h2&gt;
+{% endif %}
+{% for post in posts %}
+  &lt;p class="tags"&gt;
+    Tags:
+    {% for tag in post.tags.all %}
+      &lt;a href="{% url "blog:post_list_by_tag" tag.slug %}"&gt;{{ tag.name }}&lt;/a&gt;{% if not forloop.last %}, {% endif %}
+    {% endfor %}
+  &lt;/p&gt;
+{% endfor %}
+</pre>
+</div>
+
+<h2 id="similar">按相似度推荐文章</h2>
+
+<p>“相似”的定义：<strong>共同标签越多越相似</strong>；共同标签一样多时，越新的越靠前。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="相似文章推荐：取当前文章标签，找含这些标签的其他文章，按共同标签数和发布时间排序">
+  <rect class="bx-a" x="20" y="20" width="200" height="70" rx="10"/>
+  <text class="ttl on-a" x="120" y="44" text-anchor="middle">当前文章</text>
+  <text class="sm" x="120" y="68" text-anchor="middle">标签：jazz · music · piano</text>
+
+  <rect class="bx" x="300" y="16" width="240" height="40" rx="8"/>
+  <text class="sm" x="316" y="40">文章 B：jazz · music · piano</text>
+  <rect class="bx" x="300" y="64" width="240" height="40" rx="8"/>
+  <text class="sm" x="316" y="88">文章 C：jazz · blues</text>
+  <rect class="bx" x="300" y="112" width="240" height="40" rx="8"/>
+  <text class="sm" x="316" y="136">文章 D：music · jazz（更新）</text>
+  <rect class="bx-d" x="300" y="160" width="240" height="40" rx="8"/>
+  <text class="sm" x="316" y="184">文章 E：python（无交集 → 被过滤）</text>
+
+  <text class="mono sm" x="560" y="40">same_tags = 3</text>
+  <text class="mono sm" x="560" y="88">same_tags = 1</text>
+  <text class="mono sm" x="560" y="136">same_tags = 2</text>
+
+  <path class="ln-a" d="M222 55 H296" marker-end="url(#ar-a)"/>
+  <rect class="bx-g" x="20" y="214" width="720" height="44" rx="10"/>
+  <text class="sm on-g" x="380" y="241" text-anchor="middle">order_by('-same_tags', '-publish')[:4]  →  B(3) · D(2) · C(1)</text>
+</svg>
+<figcaption>图 3-2　“共同标签数”是用 GROUP BY + COUNT 算出来的注解字段</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="blog/views.py（post_detail 中）">
+<pre>
+from django.db.models import Count
+
+post_tags_ids = post.tags.values_list('id', flat=True)    # [1, 2, 3]，而不是 [(1,), (2,), (3,)]
+similar_posts = Post.published.filter(tags__in=post_tags_ids).exclude(id=post.id)
+similar_posts = similar_posts.annotate(
+    same_tags=Count('tags')                               # 给每篇文章加一个计算字段
+).order_by('-same_tags', '-publish')[:4]
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; aggregate 与 annotate 的区别</div>
+  <p>
+    <code>aggregate()</code> 对整个 QuerySet 算出<strong>一个</strong>结果（如“全部文章的平均评论数”），返回字典；
+    <code>annotate()</code> 给<strong>每一行</strong>附加一个计算值，返回的还是 QuerySet。聚合函数有 <code>Count</code>、<code>Sum</code>、<code>Avg</code>、<code>Max</code>、<code>Min</code>。
+    taggit 自带的 <code>post.tags.similar_objects()</code> 也能做类似的事。
+  </p>
+</div>
+
+<h2 id="templatetags">自定义模板标签和过滤器</h2>
+
+<p>
+  内置标签不够用、又想在<strong>任何页面</strong>都能用某段逻辑（比如侧边栏的“最新文章”）时，就写自定义模板标签。
+  它们必须放在应用的 <code>templatetags/</code> 包里，模板中用 <code>{% load 模块名 %}</code> 加载。
+</p>
+
+<div class="code" data-lang="text" data-file="目录结构">
+<pre>
+blog/
+├── templatetags/
+│   ├── __init__.py      ← 必须有，才是 Python 包
+│   └── blog_tags.py     ← 模板里写 {% load blog_tags %}
+</pre>
+</div>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128290;</span><h4>simple_tag</h4><p>返回一个值，直接输出：<code>{% total_posts %}</code>；也能存进变量：<code>{% get_most_commented_posts as mcp %}</code></p></div>
+  <div class="card"><span class="ic">&#129513;</span><h4>inclusion_tag</h4><p>返回一个字典，用它渲染一小段模板再插入：<code>{% show_latest_posts 3 %}</code></p></div>
+  <div class="card"><span class="ic">&#128295;</span><h4>filter</h4><p>加工一个值：<code>{{ post.body|markdown }}</code>，接受 0 或 1 个参数</p></div>
+</div>
+
+<div class="code" data-lang="py" data-file="blog/templatetags/blog_tags.py">
+<pre>
+import markdown
+from django import template
+from django.db.models import Count
+from django.utils.safestring import mark_safe
+
+from ..models import Post
+
+register = template.Library()          # 变量名必须叫 register
+
+
+@register.simple_tag
+def total_posts():
+    return Post.published.count()
+
+
+@register.inclusion_tag('blog/post/latest_posts.html')
+def show_latest_posts(count=5):
+    latest_posts = Post.published.order_by('-publish')[:count]
+    return {'latest_posts': latest_posts}      # 作为 latest_posts.html 的上下文
+
+
+@register.simple_tag
+def get_most_commented_posts(count=5):
+    return Post.published.annotate(
+        total_comments=Count('comments')
+    ).order_by('-total_comments')[:count]
+
+
+@register.filter(name='markdown')      # 模板里叫 markdown，函数名避开与模块重名
+def markdown_format(text):
+    return mark_safe(markdown.markdown(text))
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="inclusion_tag 的工作方式：模板调用标签，函数返回字典，渲染子模板，结果插回原位置">
+  <rect class="bx-b" x="20" y="20" width="220" height="180" rx="10"/>
+  <text class="ttl on-b" x="130" y="44" text-anchor="middle">base.html 侧边栏</text>
+  <text class="mono sm" x="36" y="74">{% load blog_tags %}</text>
+  <text class="mono sm" x="36" y="100">I've written</text>
+  <text class="mono sm on-a" x="36" y="120">{% total_posts %} posts</text>
+  <text class="mono sm on-a" x="36" y="150">{% show_latest_posts 3 %}</text>
+  <text class="mono sm" x="36" y="180">…</text>
+
+  <path class="ln-a" d="M242 146 H300" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="304" y="110" width="200" height="72" rx="10"/>
+  <text class="mono sm on-a" x="404" y="134" text-anchor="middle">show_latest_posts(3)</text>
+  <text class="mono sm" x="404" y="156" text-anchor="middle">→ {'latest_posts': qs}</text>
+  <text class="sm" x="404" y="174" text-anchor="middle">查询最新 3 篇</text>
+
+  <path class="ln-g" d="M506 146 H560" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="564" y="100" width="176" height="92" rx="10"/>
+  <text class="mono sm on-g" x="652" y="124" text-anchor="middle">latest_posts.html</text>
+  <text class="mono sm" x="580" y="148">&lt;ul&gt;&lt;li&gt;…&lt;/li&gt;&lt;/ul&gt;</text>
+  <text class="sm" x="652" y="174" text-anchor="middle">渲染结果插回侧边栏</text>
+
+  <path class="ln-d" d="M652 98 V40 H244"/>
+  <text class="sm" x="450" y="34" text-anchor="middle">HTML 片段替换标签所在位置</text>
+</svg>
+<figcaption>图 3-3　inclusion_tag = 一个自带数据的小模板，任何页面都能调用</figcaption>
+</figure>
+
+<div class="box warn">
+  <div class="t">&#9888; 新建 templatetags 模块后要重启开发服务器</div>
+  <p>否则会看到 “'blog_tags' is not a registered tag library” 的报错。</p>
+</div>
+
+<h3>自动转义与 mark_safe</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="Django 默认转义所有变量；mark_safe 关闭转义，只能用于可信内容">
+  <rect class="bx-g" x="20" y="20" width="350" height="170" rx="12"/>
+  <text class="ttl on-g" x="195" y="44" text-anchor="middle">默认：自动转义</text>
+  <text class="mono sm" x="36" y="74">body = '&lt;script&gt;steal()&lt;/script&gt;'</text>
+  <text class="mono sm" x="36" y="100">{{ body }}</text>
+  <text class="sm" x="36" y="126">输出：</text>
+  <text class="mono sm" x="36" y="146">&amp;lt;script&amp;gt;steal()&amp;lt;/script&amp;gt;</text>
+  <text class="sm on-g" x="36" y="174">浏览器显示成文字，不会执行 &#10003;</text>
+
+  <rect class="bx-r" x="390" y="20" width="350" height="170" rx="12"/>
+  <text class="ttl on-r" x="565" y="44" text-anchor="middle">mark_safe：你担保它是安全的</text>
+  <text class="mono sm" x="406" y="74">mark_safe(markdown(body))</text>
+  <text class="sm" x="406" y="100">输出原样 HTML —— 正是我们想要的</text>
+  <text class="sm" x="406" y="126">但如果 body 里本来就有 &lt;script&gt;……</text>
+  <text class="sm on-r" x="406" y="150">Markdown 默认会原样保留 HTML 标签</text>
+  <text class="sm on-r" x="406" y="174">→ 脚本被执行（XSS）&#10007;</text>
+</svg>
+<figcaption>图 3-4　转义是 Django 默认给你的安全网，mark_safe 等于主动撤掉它</figcaption>
+</figure>
+
+<p>
+  书里说“存 Markdown 比存 HTML 更安全”，这句话只对了一半：Python-Markdown <strong>不会过滤原始 HTML</strong>，
+  所以对<strong>不可信的作者</strong>来说它和直接存 HTML 一样危险。点评部分给出了加上 HTML 清洗的写法。
+  另外列表页的截断要改用 <code>truncatewords_html</code>，它不会把 HTML 标签截成一半。
+</p>
+
+<h2 id="sitemap">站点地图与 RSS</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="搜索引擎爬虫读取 sitemap.xml，RSS 阅读器读取 feed，两者都基于 Post.published 生成">
+  <rect class="bx" x="20" y="30" width="150" height="56" rx="10"/>
+  <text class="ttl" x="95" y="56" text-anchor="middle">搜索引擎爬虫</text>
+  <text class="sm" x="95" y="74" text-anchor="middle">Google / Bing</text>
+  <rect class="bx" x="20" y="114" width="150" height="56" rx="10"/>
+  <text class="ttl" x="95" y="140" text-anchor="middle">RSS 阅读器</text>
+  <text class="sm" x="95" y="158" text-anchor="middle">Fluent Reader 等</text>
+
+  <path class="ln" d="M172 58 H240" marker-end="url(#ar)"/>
+  <path class="ln" d="M172 142 H240" marker-end="url(#ar)"/>
+
+  <rect class="bx-b" x="244" y="30" width="220" height="56" rx="10"/>
+  <text class="mono sm on-b" x="354" y="54" text-anchor="middle">/sitemap.xml</text>
+  <text class="sm" x="354" y="74" text-anchor="middle">PostSitemap（contrib.sitemaps）</text>
+  <rect class="bx-a" x="244" y="114" width="220" height="56" rx="10"/>
+  <text class="mono sm on-a" x="354" y="138" text-anchor="middle">/blog/feed/</text>
+  <text class="sm" x="354" y="158" text-anchor="middle">LatestPostsFeed（syndication）</text>
+
+  <path class="ln" d="M466 58 L540 94" marker-end="url(#ar)"/>
+  <path class="ln" d="M466 142 L540 106" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="544" y="72" width="196" height="56" rx="10"/>
+  <text class="mono sm on-g" x="642" y="96" text-anchor="middle">Post.published</text>
+  <text class="sm" x="642" y="116" text-anchor="middle">+ get_absolute_url()</text>
+</svg>
+<figcaption>图 3-5　两个框架都靠 <code>items()</code> 取数据、靠 <code>get_absolute_url()</code> 生成链接</figcaption>
+</figure>
+
+<h3>站点地图</h3>
+
+<p>先启用 <code>django.contrib.sites</code> 和 <code>django.contrib.sitemaps</code>，设置 <code>SITE_ID = 1</code>，然后 <code>migrate</code>：</p>
+
+<div class="code" data-lang="py" data-file="blog/sitemaps.py">
+<pre>
+from django.contrib.sitemaps import Sitemap
+
+from .models import Post
+
+
+class PostSitemap(Sitemap):
+    changefreq = 'weekly'      # 更新频率提示
+    priority = 0.9             # 相对重要度，最大 1.0
+
+    def items(self):
+        return Post.published.all()
+
+    def lastmod(self, obj):
+        return obj.updated
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="mysite/urls.py">
+<pre>
+from django.contrib.sitemaps.views import sitemap
+from blog.sitemaps import PostSitemap
+
+sitemaps = {'posts': PostSitemap}
+
+urlpatterns = [
+    # ...
+    path('sitemap.xml', sitemap, {'sitemaps': sitemaps},
+         name='django.contrib.sitemaps.views.sitemap'),
+]
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么 URL 里是 example.com？</div>
+  <p>站点地图用 sites 框架里 <code>SITE_ID=1</code> 那条 <code>Site</code> 记录的域名来拼完整 URL。在 Admin 的 Sites 里把它改成 <code>localhost:8000</code>（开发）或你的真实域名（生产）。</p>
+</div>
+
+<h3>RSS 订阅</h3>
+
+<div class="code" data-lang="py" data-file="blog/feeds.py">
+<pre>
+import markdown
+from django.contrib.syndication.views import Feed
+from django.template.defaultfilters import truncatewords_html
+from django.urls import reverse_lazy
+
+from .models import Post
+
+
+class LatestPostsFeed(Feed):
+    title = 'My blog'
+    link = reverse_lazy('blog:post_list')   # 类属性在 URL 配置加载前就求值，必须用 lazy 版本
+    description = 'New posts of my blog.'
+
+    def items(self):
+        return Post.published.all()[:5]
+
+    def item_title(self, item):
+        return item.title
+
+    def item_description(self, item):
+        return truncatewords_html(markdown.markdown(item.body), 30)
+
+    def item_pubdate(self, item):
+        return item.publish
+
+# blog/urls.py
+path('feed/', LatestPostsFeed(), name='post_feed'),
+</pre>
+</div>
+
+<h2 id="postgres">换用 PostgreSQL</h2>
+
+<p>
+  SQLite 足够开发用，但它的全文搜索能力有限，Django 也不内置支持。
+  <code>django.contrib.postgres</code> 提供了 PostgreSQL 专属的强大功能，所以我们把数据库换掉：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="数据迁移：从 SQLite dumpdata 导出 JSON，切换设置，migrate 建表，loaddata 导入">
+  <rect class="bx" x="16" y="60" width="120" height="56" rx="10"/>
+  <text class="ttl" x="76" y="86" text-anchor="middle">SQLite</text>
+  <text class="sm" x="76" y="104" text-anchor="middle">现有数据</text>
+  <path class="ln" d="M138 88 H182" marker-end="url(#ar)"/>
+  <text class="mono sm" x="160" y="52" text-anchor="middle">① dumpdata</text>
+  <rect class="bx-d" x="186" y="60" width="140" height="56" rx="10"/>
+  <text class="mono sm" x="256" y="86" text-anchor="middle">mysite_data.json</text>
+  <text class="sm" x="256" y="104" text-anchor="middle">fixture 文件</text>
+  <path class="ln" d="M328 88 H372" marker-end="url(#ar)"/>
+  <text class="sm" x="350" y="52" text-anchor="middle">② 改 DATABASES</text>
+  <rect class="bx-b" x="376" y="60" width="170" height="56" rx="10"/>
+  <text class="ttl on-b" x="461" y="86" text-anchor="middle">PostgreSQL（空）</text>
+  <text class="sm" x="461" y="104" text-anchor="middle">Docker 容器</text>
+  <path class="ln-b" d="M548 88 H592" marker-end="url(#ar-b)"/>
+  <text class="mono sm" x="570" y="52" text-anchor="middle">③ migrate</text>
+  <rect class="bx-g" x="596" y="60" width="148" height="56" rx="10"/>
+  <text class="ttl on-g" x="670" y="86" text-anchor="middle">建好表</text>
+  <text class="mono sm" x="670" y="104" text-anchor="middle">④ loaddata</text>
+  <text class="sm" x="380" y="150" text-anchor="middle">fixture 是 Django 的数据序列化格式（JSON / XML / YAML），也常用来准备初始数据和测试数据</text>
+</svg>
+<figcaption>图 3-6　四步把数据从 SQLite 搬到 PostgreSQL</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+# 用 Docker 启动 PostgreSQL
+docker pull postgres:16.2
+docker run --name=blog_db -e POSTGRES_DB=blog -e POSTGRES_USER=blog \
+    -e POSTGRES_PASSWORD=xxxxx -p 5432:5432 -d postgres:16.2
+python -m pip install psycopg==3.1.18        # PostgreSQL 驱动
+
+# ① 导出（遇到编码错误时加 -Xutf8）
+python -Xutf8 manage.py dumpdata --indent=2 --output=mysite_data.json
+# ② 修改 settings.py 和 .env（见下）
+# ③ 在新库里建表
+python manage.py migrate
+# ④ 导入
+python manage.py loaddata mysite_data.json
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="mysite/settings.py">
+<pre>
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.postgresql',
+        'NAME': config('DB_NAME'),
+        'USER': config('DB_USER'),
+        'PASSWORD': config('DB_PASSWORD'),
+        'HOST': config('DB_HOST'),
+    }
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 书中命令的一个笔误</div>
+  <p>原书的 <code>docker run</code> 写成了 <code>-e POSRGRES_DB=blog</code>（少了个 T），这样数据库名不会生效，会退回到用用户名 <code>blog</code> 作为库名 —— 恰好也叫 blog，所以没出错。自己改名字时要注意。</p>
+</div>
+
+<h2 id="search">全文搜索</h2>
+
+<p>
+  <code>title__icontains='django'</code> 只是字符串包含，搜 “musical” 找不到 “music”，也没法按相关度排序。
+  全文搜索会把文本拆成词、还原词根、去掉停用词，然后做匹配和打分。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="PostgreSQL 全文搜索：文档被处理成 tsvector，查询被处理成 tsquery，匹配后用 SearchRank 打分">
+  <rect class="bx" x="20" y="20" width="250" height="60" rx="10"/>
+  <text class="sm" x="36" y="44">文档：title + body</text>
+  <text class="mono sm" x="36" y="66">"The musical legend of Django"</text>
+  <path class="ln-a" d="M272 50 H326" marker-end="url(#ar-a)"/>
+  <text class="mono sm" x="300" y="40" text-anchor="middle">SearchVector</text>
+  <rect class="bx-a" x="330" y="20" width="410" height="60" rx="10"/>
+  <text class="sm" x="346" y="44">tsvector：分词 → 词干化 → 去停用词（the、of）</text>
+  <text class="mono sm on-a" x="346" y="66">'django':5  'legend':3  'music':2</text>
+
+  <rect class="bx" x="20" y="110" width="250" height="60" rx="10"/>
+  <text class="sm" x="36" y="134">用户输入</text>
+  <text class="mono sm" x="36" y="156">"music"</text>
+  <path class="ln-b" d="M272 140 H326" marker-end="url(#ar-b)"/>
+  <text class="mono sm" x="300" y="130" text-anchor="middle">SearchQuery</text>
+  <rect class="bx-b" x="330" y="110" width="410" height="60" rx="10"/>
+  <text class="sm" x="346" y="134">tsquery：同样做词干化</text>
+  <text class="mono sm on-b" x="346" y="156">'music'   → 能匹配 musical / musicality</text>
+
+  <path class="ln-g" d="M535 172 V206" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="200" y="210" width="540" height="56" rx="10"/>
+  <text class="sm on-g" x="216" y="234">.filter(search=search_query)  → 匹配（@@ 运算符）</text>
+  <text class="sm on-g" x="216" y="254">SearchRank(vector, query)     → 相关度分数：出现越多、越靠近，分越高</text>
+</svg>
+<figcaption>图 3-7　全文搜索 = 两边都做“语言学处理”，再匹配、打分</figcaption>
+</figure>
+
+<p>先把 <code>'django.contrib.postgres'</code> 加进 <code>INSTALLED_APPS</code>。最简单的用法是 <code>search</code> 查找：</p>
+
+<div class="code" data-lang="py">
+<pre>
+Post.objects.filter(title__search='django')                        # 单字段
+
+from django.contrib.postgres.search import SearchVector
+Post.objects.annotate(search=SearchVector('title', 'body')).filter(search='django')   # 多字段
+</pre>
+</div>
+
+<h3>搜索视图</h3>
+
+<p>搜索表单用 <strong>GET</strong> 提交：结果页 URL 带着 <code>?query=…</code>，可以收藏、分享、刷新。</p>
+
+<div class="code" data-lang="py" data-file="blog/views.py（排序 + 权重版本）">
+<pre>
+from django.contrib.postgres.search import SearchQuery, SearchRank, SearchVector
+
+
+def post_search(request):
+    form = SearchForm()
+    query = None
+    results = []
+    if 'query' in request.GET:
+        form = SearchForm(request.GET)
+        if form.is_valid():
+            query = form.cleaned_data['query']
+            search_vector = SearchVector('title', weight='A') + SearchVector('body', weight='B')
+            search_query = SearchQuery(query)          # 可加 config='spanish' 切换语言
+            results = (
+                Post.published.annotate(
+                    search=search_vector,
+                    rank=SearchRank(search_vector, search_query),
+                )
+                .filter(rank__gte=0.3)
+                .order_by('-rank')
+            )
+    return render(request, 'blog/post/search.html',
+                  {'form': form, 'query': query, 'results': results})
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>权重</th><th>A</th><th>B</th><th>C</th><th>D</th></tr>
+  <tr><td>对应分值</td><td>1.0</td><td>0.4</td><td>0.2</td><td>0.1</td></tr>
+  <tr><td>本例用途</td><td>标题</td><td>正文</td><td>—</td><td>—</td></tr>
+</table>
+</div>
+
+<h3>三元组相似度：容忍拼写错误</h3>
+
+<p>
+  三元组（trigram）是连续的三个字符。两个字符串共享的三元组越多就越相似 —— 所以用户把 django 打成 yango 也能搜到。
+  需要先在数据库启用 <code>pg_trgm</code> 扩展，Django 提供了专门的迁移操作：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="django 和 yango 的三元组对比，共享 ang 和 ngo 等三元组">
+  <text class="mono sm" x="20" y="34">"django" →</text>
+  <rect class="bx" x="110" y="18" width="52" height="24" rx="5"/><text class="mono sm" x="136" y="35" text-anchor="middle">"  d"</text>
+  <rect class="bx" x="168" y="18" width="52" height="24" rx="5"/><text class="mono sm" x="194" y="35" text-anchor="middle">" dj"</text>
+  <rect class="bx" x="226" y="18" width="52" height="24" rx="5"/><text class="mono sm" x="252" y="35" text-anchor="middle">dja</text>
+  <rect class="bx" x="284" y="18" width="52" height="24" rx="5"/><text class="mono sm" x="310" y="35" text-anchor="middle">jan</text>
+  <rect class="bx-g" x="342" y="18" width="52" height="24" rx="5"/><text class="mono sm on-g" x="368" y="35" text-anchor="middle">ang</text>
+  <rect class="bx-g" x="400" y="18" width="52" height="24" rx="5"/><text class="mono sm on-g" x="426" y="35" text-anchor="middle">ngo</text>
+  <rect class="bx-g" x="458" y="18" width="52" height="24" rx="5"/><text class="mono sm on-g" x="484" y="35" text-anchor="middle">"go "</text>
+
+  <text class="mono sm" x="20" y="84">"yango"  →</text>
+  <rect class="bx" x="110" y="68" width="52" height="24" rx="5"/><text class="mono sm" x="136" y="85" text-anchor="middle">"  y"</text>
+  <rect class="bx" x="168" y="68" width="52" height="24" rx="5"/><text class="mono sm" x="194" y="85" text-anchor="middle">" ya"</text>
+  <rect class="bx" x="226" y="68" width="52" height="24" rx="5"/><text class="mono sm" x="252" y="85" text-anchor="middle">yan</text>
+  <rect class="bx-g" x="342" y="68" width="52" height="24" rx="5"/><text class="mono sm on-g" x="368" y="85" text-anchor="middle">ang</text>
+  <rect class="bx-g" x="400" y="68" width="52" height="24" rx="5"/><text class="mono sm on-g" x="426" y="85" text-anchor="middle">ngo</text>
+  <rect class="bx-g" x="458" y="68" width="52" height="24" rx="5"/><text class="mono sm on-g" x="484" y="85" text-anchor="middle">"go "</text>
+
+  <rect class="bx-g" x="540" y="18" width="200" height="74" rx="10"/>
+  <text class="ttl on-g" x="640" y="44" text-anchor="middle">共享 3 个</text>
+  <text class="sm" x="640" y="66" text-anchor="middle">相似度 = 共享数 / 并集数</text>
+  <text class="mono sm" x="640" y="84" text-anchor="middle">3 / 10 = 0.3 &gt; 0.1 &#10003;</text>
+  <text class="sm" x="20" y="130">pg_trgm 会在词两端补空格，所以 “  d” “ dj” 这样的边界三元组也算在内。</text>
+  <text class="sm" x="20" y="152">适合：人名、商品名、标题这类短字符串的模糊搜索。</text>
+</svg>
+<figcaption>图 3-8　三元组相似度对拼写错误很宽容</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+python manage.py makemigrations --name=trigram_ext --empty blog
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="blog/migrations/0005_trigram_ext.py">
+<pre>
+from django.contrib.postgres.operations import TrigramExtension
+from django.db import migrations
+
+
+class Migration(migrations.Migration):
+    dependencies = [('blog', '0004_post_tags')]
+    operations = [TrigramExtension()]        # 执行 CREATE EXTENSION pg_trgm
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="blog/views.py（仓库最终版本）">
+<pre>
+from django.contrib.postgres.search import TrigramSimilarity
+
+results = (
+    Post.published.annotate(similarity=TrigramSimilarity('title', query))
+    .filter(similarity__gt=0.1)
+    .order_by('-similarity')
+)
+</pre>
+</div>
+
+<h2 id="ai-task">仓库里的 AI 练习：把标签页加进站点地图</h2>
+
+<p>
+  书在本章末尾建议借助 ChatGPT 完成一个扩展任务，提示词在 <code>Chapter03/prompts/task.md</code>：
+  <em>“把每个标签的文章列表页也加到 sitemap.xml 里”</em>。参考答案如下：
+</p>
+
+<div class="code" data-lang="py" data-file="blog/sitemaps.py">
+<pre>
+from django.contrib.sitemaps import Sitemap
+from django.urls import reverse
+from taggit.models import Tag
+
+from .models import Post
+
+
+class TagSitemap(Sitemap):
+    changefreq = 'weekly'
+    priority = 0.6
+
+    def items(self):
+        # 只收录至少有一篇已发布文章的标签
+        return Tag.objects.filter(post__status=Post.Status.PUBLISHED).distinct()
+
+    def location(self, tag):
+        return reverse('blog:post_list_by_tag', args=[tag.slug])
+
+# mysite/urls.py
+sitemaps = {'posts': PostSitemap, 'tags': TagSitemap}
+</pre>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 3 章代码点评 <small>Chapter03/mysite</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 开发环境也用 PostgreSQL <span class="tag ts">TSD：数据库</span></h4>
+    <p>TSD 明确反对“本地 SQLite、线上 PostgreSQL”：两者在类型、约束、排序规则、全文搜索上都有差别，很多 bug 只在线上出现。本章之后整个项目都跑在 PostgreSQL 上，还用迁移 <code>TrigramExtension()</code> 把扩展纳入版本管理，这些都很专业。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> <code>INSTALLED_APPS</code> 分组、<code>reverse_lazy</code>、<code>truncatewords_html</code></h4>
+    <p>Django → 第三方 → 本地的分组顺序与 TSD 一致；Feed 的类属性用 <code>reverse_lazy</code> 避免导入期解析 URL；截断 HTML 用 <code>_html</code> 版本。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> <code>markdown</code> 过滤器 + <code>mark_safe</code> 存在 XSS 风险 <span class="src">Chapter03/mysite/blog/templatetags/blog_tags.py:31</span></h4>
+    <p>
+      Python-Markdown 会把正文里的 <code>&lt;script&gt;</code>、<code>&lt;img onerror=…&gt;</code> 原样输出，<code>mark_safe</code> 又关掉了转义。
+      只要有一个作者账号被盗或者将来开放了投稿，就能在所有读者浏览器里执行脚本。
+      正确做法是<strong>渲染后再用白名单清洗</strong>。<code>bleach</code> 已停止维护，推荐 <code>nh3</code>：
+    </p>
+<div class="code" data-lang="py"><pre>
+import markdown
+import nh3
+
+
+@register.filter(name='markdown')
+def markdown_format(text):
+    html = markdown.markdown(text, extensions=['fenced_code', 'tables'])
+    return mark_safe(nh3.clean(html))        # 只保留安全的标签和属性
+</pre></div>
+    <p>更进一步：渲染结果可以在保存时算好并缓存到一个字段里，避免每次请求都解析 Markdown。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> “最多评论”把已屏蔽的评论也算进去了 <span class="src">blog_tags.py:24</span></h4>
+    <p><code>Count('comments')</code> 统计所有评论，包括 <code>active=False</code> 的垃圾评论。聚合函数支持 <code>filter</code> 参数：</p>
+<div class="code" data-lang="py"><pre>
+from django.db.models import Count, Q
+
+Post.published.annotate(
+    total_comments=Count('comments', filter=Q(comments__active=True))
+).order_by('-total_comments')[:count]
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 列表页存在 N+1 查询 <span class="src">blog/templates/blog/post/list.html</span></h4>
+    <p>
+      列表循环里每篇文章都访问 <code>post.author</code>（外键）和 <code>post.tags.all</code>（多对多），每页 3 篇就多出 6 条 SQL，每页 20 篇就是 40 条。
+      用 <code>select_related</code>（外键，JOIN 一次取回）和 <code>prefetch_related</code>（多对多，额外一条 IN 查询）解决：
+    </p>
+    <figure>
+    <svg class="dgm" viewBox="0 0 760 130" role="img" aria-label="N+1 查询与预取的对比">
+      <rect class="bx-r" x="20" y="14" width="350" height="100" rx="10"/>
+      <text class="ttl on-r" x="195" y="38" text-anchor="middle">现在：1 + 2N 条 SQL</text>
+      <text class="mono sm" x="36" y="62">SELECT … FROM blog_post LIMIT 3</text>
+      <text class="mono sm" x="36" y="82">SELECT … FROM auth_user WHERE id=… ×3</text>
+      <text class="mono sm" x="36" y="102">SELECT … FROM taggit_tag … ×3</text>
+      <rect class="bx-g" x="390" y="14" width="350" height="100" rx="10"/>
+      <text class="ttl on-g" x="565" y="38" text-anchor="middle">预取后：固定 2 条 SQL</text>
+      <text class="mono sm" x="406" y="62">SELECT … blog_post JOIN auth_user</text>
+      <text class="mono sm" x="406" y="82">SELECT … taggit_tag WHERE object_id IN (…)</text>
+      <text class="sm on-g" x="406" y="102">与每页数量无关</text>
+    </svg>
+    </figure>
+<div class="code" data-lang="py"><pre>
+post_list = Post.published.select_related('author').prefetch_related('tags')
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 侧边栏每次请求都跑三条统计查询</h4>
+    <p><code>total_posts</code>、<code>show_latest_posts</code>、<code>get_most_commented_posts</code> 放在 <code>base.html</code> 里，意味着<strong>每一个页面</strong>都要执行它们，其中“最多评论”还是 JOIN + GROUP BY。这类变化不频繁的数据很适合用模板片段缓存（第 14 章）：</p>
+<div class="code" data-lang="html"><pre>
+{% load cache %}
+{% cache 600 blog_sidebar %}
+  &lt;h3&gt;Latest posts&lt;/h3&gt;
+  {% show_latest_posts 3 %}
+  ...
+{% endcache %}
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 搜索没有索引，查询参数没有长度限制</h4>
+    <p>
+      <code>TrigramSimilarity</code> 和 <code>SearchVector</code> 在没有索引时都要全表扫描并逐行计算。数据多了以后需要建 GIN 索引；
+      同时 <code>SearchForm.query</code> 应加 <code>max_length</code>，避免超长输入拖慢数据库：
+    </p>
+<div class="code" data-lang="py"><pre>
+from django.contrib.postgres.indexes import GinIndex
+
+
+class Post(models.Model):
+    class Meta:
+        indexes = [
+            models.Index(fields=['-publish']),
+            GinIndex(name='post_title_trgm', fields=['title'], opclasses=['gin_trgm_ops']),
+        ]
+
+
+class SearchForm(forms.Form):
+    query = forms.CharField(max_length=100)
+</pre></div>
+    <p>全文搜索更进一步可以加一个 <code>SearchVectorField</code> 列（配合 5.0 的 <code>GeneratedField</code> 或触发器自动维护）并对它建 GIN 索引。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> docker-compose 里写死了凭据 <span class="src">Chapter03/docker-compose.yml:5</span></h4>
+    <p>
+      第 2 章用的是 <code>env_file: .env</code>，第 3 章反而改成在 <code>environment:</code> 里直接写 <code>EMAIL_HOST_PASSWORD: 'xxxxxxxxxxxx'</code>。
+      虽然这里是占位符，但这种写法会诱导人把真密码提交进仓库。建议保持 <code>env_file</code>，仓库里只放一个 <code>.env.example</code>。
+      另外 Dockerfile 额外 <code>pip install psycopg[binary]</code>，而 <code>requirements.txt</code> 里是不带 binary 的 <code>psycopg==3.1.18</code>，依赖应该只在一处声明：写成 <code>psycopg[binary]==3.1.18</code>。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 分页模板又退回了 <code>?page=</code></h4>
+    <p>第 2 章仓库代码的 <code>pagination.html</code> 已经用 <code>{% querystring %}</code>，第 3 章又改回 <code>?page={{ … }}</code>（与书一致）。如果以后给搜索结果加分页，<code>?page=2</code> 会丢掉 <code>query</code> 参数。建议保留 <code>{% querystring %}</code> 版本。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>第三方应用通过 <code>pip install</code> + <code>INSTALLED_APPS</code> 接入；taggit 用泛型关系给任意模型打标签。</li>
+  <li><code>annotate()</code> 给每行加计算字段，配合 <code>Count</code> 能写出推荐类查询。</li>
+  <li>模板标签有 <code>simple_tag</code>、<code>inclusion_tag</code> 和过滤器三种；<code>mark_safe</code> 只能用在清洗过的内容上。</li>
+  <li>sitemap 和 feed 框架都只需要实现 <code>items()</code> 等少数方法。</li>
+  <li>PostgreSQL 的全文搜索支持词干、停用词、排名、权重；三元组相似度能容忍拼写错误。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>装上 <code>django-debug-toolbar</code>（第 7 章会正式介绍），打开文章列表页数一数 SQL 条数；加上 <code>select_related/prefetch_related</code> 后再数一次。</li>
+    <li>写一篇正文包含 <code>&lt;script&gt;alert(1)&lt;/script&gt;</code> 的文章，观察弹窗；接入 <code>nh3</code> 后再试。</li>
+    <li>实现上面的 <code>TagSitemap</code>，访问 <code>/sitemap.xml</code> 检查输出。</li>
+    <li>把搜索改成“全文搜索优先，结果为空时回退到三元组搜索”，并给结果加上分页（用 <code>{% querystring %}</code>）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

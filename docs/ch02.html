@@ -1,0 +1,836 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 2 章 · 博客进阶：社交功能 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="2">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 2 章 · 项目一：博客</span>
+<h1>博客进阶：社交功能</h1>
+<p class="lede">
+  上一章的博客能看，但还很“素”。这一章给它加上几乎每个博客平台都有的功能：
+  搜索引擎友好的网址、分页、通过邮件分享文章、读者评论。
+  顺带学会 Django 的两大核心工具 —— <strong>表单</strong>和<strong>类视图</strong>。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 <code>get_absolute_url()</code> 给模型定义规范 URL</li>
+    <li>设计“日期 + slug”形式的 SEO 友好 URL</li>
+    <li>用 <code>Paginator</code> 做分页，并处理非法页码</li>
+    <li>认识类视图（CBV），用 <code>ListView</code> 重写列表页</li>
+    <li>掌握 <code>Form</code> 与 <code>ModelForm</code> 的完整处理流程</li>
+    <li>配置 SMTP 发邮件，并把凭据放到环境变量里</li>
+    <li>做一个带审核开关的评论系统，理解 CSRF 保护</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="canonical">规范 URL：一个对象只有一个“正式地址”</h2>
+
+<p>
+  同一篇文章会出现在很多页面上：首页列表、标签页、搜索结果……但它只应有一个<strong>规范 URL（canonical URL）</strong>，
+  也就是它“自己的”页面。Django 的约定是在模型上实现 <code>get_absolute_url()</code> 返回这个地址。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="多个页面展示同一篇文章，但都链接到同一个规范 URL">
+  <rect class="bx" x="20" y="20" width="160" height="44" rx="8"/>
+  <text class="sm" x="100" y="47" text-anchor="middle">首页列表 /blog/</text>
+  <rect class="bx" x="20" y="82" width="160" height="44" rx="8"/>
+  <text class="sm" x="100" y="109" text-anchor="middle">标签页 /blog/tag/jazz/</text>
+  <rect class="bx" x="20" y="144" width="160" height="44" rx="8"/>
+  <text class="sm" x="100" y="171" text-anchor="middle">搜索结果、RSS、站点地图</text>
+
+  <path class="ln" d="M182 42 C 260 42, 270 100, 318 104" marker-end="url(#ar)"/>
+  <path class="ln" d="M182 104 H318" marker-end="url(#ar)"/>
+  <path class="ln" d="M182 166 C 260 166, 270 108, 318 104" marker-end="url(#ar)"/>
+
+  <rect class="bx-a" x="322" y="72" width="200" height="64" rx="10"/>
+  <text class="mono sm on-a" x="422" y="98" text-anchor="middle">post.get_absolute_url()</text>
+  <text class="sm" x="422" y="118" text-anchor="middle">内部调用 reverse()</text>
+
+  <path class="ln-a" d="M524 104 H566" marker-end="url(#ar-a)"/>
+  <rect class="bx-g" x="570" y="72" width="170" height="64" rx="10"/>
+  <text class="ttl on-g" x="655" y="98" text-anchor="middle">唯一的正式地址</text>
+  <text class="mono sm" x="655" y="118" text-anchor="middle">/blog/2024/1/1/slug/</text>
+</svg>
+<figcaption>图 2-1　所有地方都通过 <code>get_absolute_url()</code> 生成链接，改 URL 格式只需改一处</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="blog/models.py">
+<pre>
+from django.urls import reverse
+
+
+class Post(models.Model):
+    # ...
+    def get_absolute_url(self):
+        return reverse('blog:post_detail', args=[self.id])
+</pre>
+</div>
+
+<p>模板里把 <code>{% url 'blog:post_detail' post.id %}</code> 换成 <code>{{ post.get_absolute_url }}</code>。好处是：模板不再需要知道“详情页要几个参数”。Admin 也会用它，在编辑页右上角显示“在站点上查看”按钮。</p>
+
+<h2 id="seo">SEO 友好的 URL</h2>
+
+<p>把 <code>/blog/1/</code> 改成 <code>/blog/2024/1/1/who-was-django-reinhardt/</code>：人一看就知道是什么内容，搜索引擎也更喜欢。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="SEO URL 的各段分别由路径转换器捕获">
+  <text class="mono" x="20" y="40">/blog/</text>
+  <rect class="bx-b" x="76" y="20" width="56" height="30" rx="6"/><text class="mono on-b" x="104" y="40" text-anchor="middle">2024</text>
+  <text class="mono" x="136" y="40">/</text>
+  <rect class="bx-b" x="148" y="20" width="30" height="30" rx="6"/><text class="mono on-b" x="163" y="40" text-anchor="middle">1</text>
+  <text class="mono" x="182" y="40">/</text>
+  <rect class="bx-b" x="194" y="20" width="30" height="30" rx="6"/><text class="mono on-b" x="209" y="40" text-anchor="middle">1</text>
+  <text class="mono" x="228" y="40">/</text>
+  <rect class="bx-a" x="240" y="20" width="236" height="30" rx="6"/><text class="mono on-a" x="358" y="40" text-anchor="middle">who-was-django-reinhardt</text>
+  <text class="mono" x="480" y="40">/</text>
+
+  <path class="ln-d" d="M104 52 V88"/><text class="mono sm" x="104" y="104" text-anchor="middle">&lt;int:year&gt;</text>
+  <path class="ln-d" d="M163 52 V118"/><text class="mono sm" x="163" y="134" text-anchor="middle">&lt;int:month&gt;</text>
+  <path class="ln-d" d="M209 52 V88"/><text class="mono sm" x="226" y="104" text-anchor="middle">&lt;int:day&gt;</text>
+  <path class="ln-d" d="M358 52 V88"/><text class="mono sm" x="358" y="104" text-anchor="middle">&lt;slug:post&gt;</text>
+
+  <rect class="bx-d" x="520" y="14" width="220" height="140" rx="10"/>
+  <text class="ttl" x="630" y="38" text-anchor="middle">视图收到的参数</text>
+  <text class="mono sm" x="536" y="64">year  = 2024   (int)</text>
+  <text class="mono sm" x="536" y="86">month = 1      (int)</text>
+  <text class="mono sm" x="536" y="108">day   = 1      (int)</text>
+  <text class="mono sm" x="536" y="130">post  = 'who-was-…' (str)</text>
+</svg>
+<figcaption>图 2-2　路径转换器既负责“匹配”，也负责“类型转换”</figcaption>
+</figure>
+
+<p>要用“日期 + slug”唯一定位一篇文章，就必须保证同一天没有两篇 slug 相同的文章：</p>
+
+<div class="code" data-lang="py" data-file="blog/models.py">
+<pre>
+slug = models.SlugField(max_length=250, unique_for_date='publish')
+
+def get_absolute_url(self):
+    return reverse('blog:post_detail', args=[
+        self.publish.year, self.publish.month, self.publish.day, self.slug,
+    ])
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="blog/urls.py 与 views.py">
+<pre>
+path('&lt;int:year&gt;/&lt;int:month&gt;/&lt;int:day&gt;/&lt;slug:post&gt;/', views.post_detail, name='post_detail'),
+
+def post_detail(request, year, month, day, post):
+    post = get_object_or_404(
+        Post,
+        status=Post.Status.PUBLISHED,
+        slug=post,
+        publish__year=year,
+        publish__month=month,
+        publish__day=day,
+    )
+    ...
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; <code>unique_for_date</code> 只在表单/Admin 校验，数据库不管</div>
+  <p>
+    它由 <code>ModelForm</code> 的校验逻辑执行，所以迁移不会产生任何 SQL。
+    如果你在 shell 里直接 <code>Post.objects.create(...)</code>，照样能插入重复数据。点评部分给出了数据库级约束的写法。
+  </p>
+</div>
+
+<h2 id="pagination">分页</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="Paginator 把 QuerySet 切成若干页，page 方法返回某一页的 Page 对象">
+  <rect class="bx-b" x="20" y="20" width="220" height="180" rx="10"/>
+  <text class="ttl on-b" x="130" y="44" text-anchor="middle">QuerySet（7 篇文章）</text>
+  <text class="mono sm" x="40" y="72">post 1</text><text class="mono sm" x="40" y="92">post 2</text>
+  <text class="mono sm" x="40" y="112">post 3</text><text class="mono sm" x="40" y="132">post 4</text>
+  <text class="mono sm" x="40" y="152">post 5</text><text class="mono sm" x="40" y="172">post 6</text>
+  <text class="mono sm" x="140" y="72">post 7</text>
+
+  <path class="ln" d="M242 110 H296" marker-end="url(#ar)"/>
+  <text class="mono sm" x="270" y="100" text-anchor="middle">Paginator(qs, 3)</text>
+
+  <rect class="bx" x="300" y="30" width="110" height="50" rx="8"/><text class="sm" x="355" y="60" text-anchor="middle">第 1 页：1-3</text>
+  <rect class="bx-a" x="300" y="90" width="110" height="50" rx="8"/><text class="sm on-a" x="355" y="120" text-anchor="middle">第 2 页：4-6</text>
+  <rect class="bx" x="300" y="150" width="110" height="50" rx="8"/><text class="sm" x="355" y="180" text-anchor="middle">第 3 页：7</text>
+
+  <path class="ln-a" d="M412 115 H466" marker-end="url(#ar-a)"/>
+  <text class="mono sm" x="440" y="105" text-anchor="middle">?page=2</text>
+
+  <rect class="bx-g" x="470" y="30" width="270" height="170" rx="10"/>
+  <text class="ttl on-g" x="605" y="54" text-anchor="middle">Page 对象（page_obj）</text>
+  <text class="mono sm" x="486" y="80">page.number            → 2</text>
+  <text class="mono sm" x="486" y="100">page.has_previous()    → True</text>
+  <text class="mono sm" x="486" y="120">page.previous_page_number → 1</text>
+  <text class="mono sm" x="486" y="140">page.has_next()        → True</text>
+  <text class="mono sm" x="486" y="160">page.paginator.num_pages → 3</text>
+  <text class="mono sm" x="486" y="180">for post in page: …    （可迭代）</text>
+</svg>
+<figcaption>图 2-3　Paginator 只查当前页需要的数据（LIMIT/OFFSET）</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="blog/views.py">
+<pre>
+from django.core.paginator import EmptyPage, PageNotAnInteger, Paginator
+
+
+def post_list(request):
+    post_list = Post.published.all()
+    paginator = Paginator(post_list, 3)        # 每页 3 篇
+    page_number = request.GET.get('page', 1)
+    try:
+        posts = paginator.page(page_number)
+    except PageNotAnInteger:                   # ?page=asdf
+        posts = paginator.page(1)
+    except EmptyPage:                          # ?page=99
+        posts = paginator.page(paginator.num_pages)
+    return render(request, 'blog/post/list.html', {'posts': posts})
+</pre>
+</div>
+
+<p>分页链接做成一个可复用的小模板，用 <code>{% include "pagination.html" with page=posts %}</code> 引入：</p>
+
+<div class="code" data-lang="html" data-file="blog/templates/pagination.html（仓库 Chapter02 版本）">
+<pre>
+&lt;div class="pagination"&gt;
+  &lt;span class="step-links"&gt;
+    {% if page.has_previous %}
+      &lt;a href="{% querystring page=page.previous_page_number %}"&gt;Previous&lt;/a&gt;
+    {% endif %}
+    &lt;span class="current"&gt;
+      Page {{ page.number }} of {{ page.paginator.num_pages }}.
+    &lt;/span&gt;
+    {% if page.has_next %}
+      &lt;a href="{% querystring page=page.next_page_number %}"&gt;Next&lt;/a&gt;
+    {% endif %}
+  &lt;/span&gt;
+&lt;/div&gt;
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; <code>{% querystring %}</code> 比 <code>?page=</code> 好在哪（Django 5.1+）</div>
+  <p>
+    书里写的是 <code>href="?page={{ ... }}"</code>，它会<strong>丢掉当前 URL 上的其他参数</strong>：
+    比如 <code>/search/?query=django&amp;page=1</code> 点“下一页”就变成了 <code>?page=2</code>，搜索词没了。
+    仓库代码已升级为 <code>{% querystring page=... %}</code>，它在保留其他参数的同时只替换 <code>page</code>。
+  </p>
+</div>
+
+<h2 id="cbv">类视图（Class-Based Views）</h2>
+
+<p>
+  视图只要是“接收请求、返回响应的可调用对象”就行，所以也可以是类。Django 提供了一系列通用类视图，
+  把“列表”“详情”“创建”“编辑”这些常见套路封装好了，你只需要填配置。
+</p>
+
+<div class="vs">
+  <div class="old"><div class="h">函数视图（FBV）：流程显式写出来</div>
+<div class="code" data-lang="py"><pre>
+def post_list(request):
+    qs = Post.published.all()
+    paginator = Paginator(qs, 3)
+    page = request.GET.get('page', 1)
+    try:
+        posts = paginator.page(page)
+    except PageNotAnInteger:
+        posts = paginator.page(1)
+    except EmptyPage:
+        posts = paginator.page(paginator.num_pages)
+    return render(request, 'blog/post/list.html',
+                  {'posts': posts})
+</pre></div></div>
+  <div class="new"><div class="h">类视图（CBV）：只写“和默认不同的部分”</div>
+<div class="code" data-lang="py"><pre>
+from django.views.generic import ListView
+
+
+class PostListView(ListView):
+    queryset = Post.published.all()
+    context_object_name = 'posts'
+    paginate_by = 3
+    template_name = 'blog/post/list.html'
+
+# urls.py
+path('', views.PostListView.as_view(),
+     name='post_list'),
+</pre></div></div>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="ListView 内部流程：dispatch 按方法分派，get 调用 get_queryset、分页、get_context_data，最后渲染模板">
+  <rect class="bx" x="16" y="70" width="110" height="56" rx="8"/>
+  <text class="mono sm" x="71" y="94" text-anchor="middle">as_view()</text>
+  <text class="sm" x="71" y="112" text-anchor="middle">变成函数</text>
+  <rect class="bx" x="150" y="70" width="110" height="56" rx="8"/>
+  <text class="mono sm" x="205" y="94" text-anchor="middle">dispatch()</text>
+  <text class="sm" x="205" y="112" text-anchor="middle">按 GET/POST 分派</text>
+  <rect class="bx-a" x="284" y="70" width="130" height="56" rx="8"/>
+  <text class="mono sm on-a" x="349" y="94" text-anchor="middle">get_queryset()</text>
+  <text class="sm" x="349" y="112" text-anchor="middle">← queryset 属性</text>
+  <rect class="bx-a" x="438" y="70" width="140" height="56" rx="8"/>
+  <text class="mono sm on-a" x="508" y="94" text-anchor="middle">paginate_queryset()</text>
+  <text class="sm" x="508" y="112" text-anchor="middle">← paginate_by</text>
+  <rect class="bx-a" x="602" y="70" width="142" height="56" rx="8"/>
+  <text class="mono sm on-a" x="673" y="94" text-anchor="middle">get_context_data()</text>
+  <text class="sm" x="673" y="112" text-anchor="middle">posts / page_obj</text>
+  <path class="ln" d="M128 98 H146" marker-end="url(#ar)"/>
+  <path class="ln" d="M262 98 H280" marker-end="url(#ar)"/>
+  <path class="ln" d="M416 98 H434" marker-end="url(#ar)"/>
+  <path class="ln" d="M580 98 H598" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M673 128 V160 H360" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="200" y="146" width="156" height="36" rx="8"/>
+  <text class="sm on-g" x="278" y="169" text-anchor="middle">渲染 template_name</text>
+  <text class="sm" x="380" y="38" text-anchor="middle">每一步都是可以覆盖的方法 —— 想改哪步就重写哪个方法</text>
+</svg>
+<figcaption>图 2-4　ListView 的“流水线”：你设置的属性会在对应步骤被用到</figcaption>
+</figure>
+
+<ul>
+  <li><code>queryset</code>：要列出的数据。只写 <code>model = Post</code> 时等价于 <code>Post.objects.all()</code>。</li>
+  <li><code>context_object_name</code>：模板里的变量名，默认叫 <code>object_list</code>。</li>
+  <li><code>paginate_by</code>：每页条数。当前页对象放在模板变量 <code>page_obj</code> 里，所以模板要改成 <code>with page=page_obj</code>。</li>
+  <li><code>template_name</code>：默认是 <code>blog/post_list.html</code>（应用名/模型名_list.html）。</li>
+  <li>非法页码时 <code>ListView</code> 直接返回 <strong>404</strong>，而不是像我们手写的那样回退到某一页。</li>
+</ul>
+
+<h2 id="forms">表单：邮件分享文章</h2>
+
+<p>Django 有两种表单基类：</p>
+<ul>
+  <li><code>Form</code>：自己声明字段和校验规则，适合和模型无关的表单（登录、搜索、联系我们）。</li>
+  <li><code>ModelForm</code>：根据模型自动生成字段，还能直接 <code>save()</code> 成模型对象。</li>
+</ul>
+
+<div class="code" data-lang="py" data-file="blog/forms.py">
+<pre>
+from django import forms
+
+
+class EmailPostForm(forms.Form):
+    name = forms.CharField(max_length=25)
+    email = forms.EmailField()                 # 自动校验邮箱格式
+    to = forms.EmailField()
+    comments = forms.CharField(required=False, widget=forms.Textarea)   # 换控件
+</pre>
+</div>
+
+<h3>一个视图同时负责“显示表单”和“处理提交”</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="表单处理流程：GET 显示空表单，POST 绑定数据并校验，失败带错误重新显示，成功读取 cleaned_data 执行操作">
+  <rect class="bx" x="20" y="110" width="110" height="56" rx="10"/>
+  <text class="ttl" x="75" y="136" text-anchor="middle">请求</text>
+  <text class="mono sm" x="75" y="154" text-anchor="middle">post_share</text>
+
+  <path class="ln" d="M132 124 L196 64" marker-end="url(#ar)"/>
+  <text class="mono sm" x="150" y="84">GET</text>
+  <rect class="bx-b" x="200" y="30" width="180" height="56" rx="10"/>
+  <text class="ttl on-b" x="290" y="54" text-anchor="middle">未绑定表单</text>
+  <text class="mono sm" x="290" y="74" text-anchor="middle">EmailPostForm()</text>
+
+  <path class="ln" d="M132 152 L196 204" marker-end="url(#ar)"/>
+  <text class="mono sm" x="146" y="196">POST</text>
+  <rect class="bx-a" x="200" y="180" width="180" height="56" rx="10"/>
+  <text class="ttl on-a" x="290" y="204" text-anchor="middle">绑定表单</text>
+  <text class="mono sm" x="290" y="224" text-anchor="middle">EmailPostForm(request.POST)</text>
+
+  <path class="ln-a" d="M382 208 H436" marker-end="url(#ar-a)"/>
+  <rect class="bx-d" x="440" y="182" width="120" height="52" rx="26"/>
+  <text class="mono sm" x="500" y="213" text-anchor="middle">is_valid()?</text>
+
+  <path class="ln-g" d="M562 196 L610 150" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="592" y="182">是</text>
+  <rect class="bx-g" x="612" y="100" width="132" height="76" rx="10"/>
+  <text class="ttl on-g" x="678" y="124" text-anchor="middle">cleaned_data</text>
+  <text class="sm" x="678" y="146" text-anchor="middle">发邮件</text>
+  <text class="sm" x="678" y="164" text-anchor="middle">sent = True</text>
+
+  <path class="ln-r" d="M562 222 L610 256" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="572" y="262">否</text>
+  <rect class="bx-r" x="612" y="236" width="132" height="44" rx="10"/>
+  <text class="sm on-r" x="678" y="256" text-anchor="middle">form.errors</text>
+  <text class="sm" x="678" y="272" text-anchor="middle">带错误重新渲染</text>
+
+  <path class="ln-d" d="M382 58 H470 V120 H600"/>
+  <text class="sm" x="420" y="112">render(share.html)</text>
+</svg>
+<figcaption>图 2-5　表单三态：未绑定（空表单）、绑定且无效（显示错误）、绑定且有效（执行操作）</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="blog/views.py">
+<pre>
+from django.core.mail import send_mail
+
+
+def post_share(request, post_id):
+    post = get_object_or_404(Post, id=post_id, status=Post.Status.PUBLISHED)
+    sent = False
+
+    if request.method == 'POST':
+        form = EmailPostForm(request.POST)
+        if form.is_valid():
+            cd = form.cleaned_data                      # 校验并“清洗”后的数据
+            post_url = request.build_absolute_uri(post.get_absolute_url())
+            subject = f"{cd['name']} ({cd['email']}) recommends you read {post.title}"
+            message = f"Read {post.title} at {post_url}\n\n{cd['name']}'s comments: {cd['comments']}"
+            send_mail(subject=subject, message=message,
+                      from_email=None,                  # None → 使用 DEFAULT_FROM_EMAIL
+                      recipient_list=[cd['to']])
+            sent = True
+    else:
+        form = EmailPostForm()
+
+    return render(request, 'blog/post/share.html', {'post': post, 'form': form, 'sent': sent})
+</pre>
+</div>
+
+<ul>
+  <li><code>request.build_absolute_uri()</code> 把相对路径补成带协议和域名的完整 URL —— 邮件里必须是完整链接。</li>
+  <li><code>cleaned_data</code> 不仅“验过”，还“洗过”：比如 <code>EmailField</code> 会去掉首尾空格。表单无效时它只包含有效的字段。</li>
+</ul>
+
+<div class="code" data-lang="html" data-file="blog/templates/blog/post/share.html">
+<pre>
+{% extends "blog/base.html" %}
+
+{% block title %}Share a post{% endblock %}
+
+{% block content %}
+  {% if sent %}
+    &lt;h1&gt;E-mail successfully sent&lt;/h1&gt;
+    &lt;p&gt;"{{ post.title }}" was successfully sent to {{ form.cleaned_data.to }}.&lt;/p&gt;
+  {% else %}
+    &lt;h1&gt;Share "{{ post.title }}" by e-mail&lt;/h1&gt;
+    &lt;form method="post"&gt;
+      {{ form.as_p }}
+      {% csrf_token %}
+      &lt;input type="submit" value="Send e-mail"&gt;
+    &lt;/form&gt;
+  {% endif %}
+{% endblock %}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; novalidate</div>
+  <p>现代浏览器会根据 <code>required</code>、<code>type="email"</code> 自己先校验一遍。想测试 Django 的服务端校验时，给 <code>&lt;form&gt;</code> 加 <code>novalidate</code> 关掉浏览器校验（仓库代码里就加了）。测完记得去掉 —— 但记住：<strong>浏览器校验只是体验优化，服务端校验才是安全保障</strong>。</p>
+</div>
+
+<h3>CSRF：为什么每个 POST 表单都要 <code>{% csrf_token %}</code></h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="CSRF 攻击：恶意网站让浏览器带着用户的 Cookie 向目标站点提交表单；CSRF 令牌让服务器能识别伪造请求">
+  <rect class="bx-r" x="20" y="20" width="340" height="200" rx="12"/>
+  <text class="ttl on-r" x="190" y="44" text-anchor="middle">没有 CSRF 保护</text>
+  <text class="sm" x="36" y="72">1. 你已登录 myblog.com（浏览器存着会话 Cookie）</text>
+  <text class="sm" x="36" y="96">2. 你打开了 evil.com</text>
+  <text class="sm" x="36" y="120">3. evil.com 页面里藏着一个自动提交的表单：</text>
+  <text class="mono sm" x="48" y="140">&lt;form action="myblog.com/…/comment/"&gt;</text>
+  <text class="sm" x="36" y="164">4. 浏览器会自动带上你的 Cookie</text>
+  <text class="sm on-r" x="36" y="192">→ 服务器以为是你本人发的评论</text>
+
+  <rect class="bx-g" x="400" y="20" width="340" height="200" rx="12"/>
+  <text class="ttl on-g" x="570" y="44" text-anchor="middle">Django 的 CSRF 保护</text>
+  <text class="sm" x="416" y="72">{% csrf_token %} 在表单里放一个隐藏字段：</text>
+  <text class="mono sm" x="428" y="92">csrfmiddlewaretoken=26JjKo…</text>
+  <text class="sm" x="416" y="120">CsrfViewMiddleware 检查每个 POST：</text>
+  <text class="sm" x="428" y="140">表单里的令牌 和 Cookie 里的密钥 是否匹配</text>
+  <text class="sm" x="416" y="168">evil.com 读不到你站点的令牌，伪造不了</text>
+  <text class="sm on-g" x="416" y="192">→ 伪造请求得到 403 Forbidden</text>
+</svg>
+<figcaption>图 2-6　CSRF 令牌证明“这个表单确实是从我自己的页面提交的”</figcaption>
+</figure>
+
+<h2 id="email">发送邮件与环境变量</h2>
+
+<p>Django 通过这些设置连接 SMTP 服务器：</p>
+
+<div class="tw">
+<table>
+  <tr><th>设置</th><th>含义</th><th>默认</th></tr>
+  <tr><td><code>EMAIL_HOST</code> / <code>EMAIL_PORT</code></td><td>SMTP 服务器地址与端口</td><td>localhost / 25</td></tr>
+  <tr><td><code>EMAIL_HOST_USER</code> / <code>EMAIL_HOST_PASSWORD</code></td><td>SMTP 账号密码</td><td>空</td></tr>
+  <tr><td><code>EMAIL_USE_TLS</code> / <code>EMAIL_USE_SSL</code></td><td>STARTTLS（587）/ 隐式 TLS（465）</td><td>False</td></tr>
+  <tr><td><code>DEFAULT_FROM_EMAIL</code></td><td>默认发件人</td><td>webmaster@localhost</td></tr>
+  <tr><td><code>EMAIL_BACKEND</code></td><td>发信后端</td><td>SMTP 后端</td></tr>
+</table>
+</div>
+
+<p>账号密码不能写进代码。书里用 <code>python-decouple</code> 从 <code>.env</code> 文件或环境变量读取：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="配置来源：环境变量或 .env 文件经 decouple 的 config 函数进入 settings">
+  <rect class="bx-d" x="20" y="24" width="210" height="60" rx="10"/>
+  <text class="mono sm" x="125" y="50" text-anchor="middle">.env（不提交 Git）</text>
+  <text class="mono sm" x="125" y="70" text-anchor="middle">EMAIL_HOST_PASSWORD=…</text>
+  <rect class="bx-d" x="20" y="100" width="210" height="60" rx="10"/>
+  <text class="sm" x="125" y="126" text-anchor="middle">真实环境变量</text>
+  <text class="sm" x="125" y="146" text-anchor="middle">（服务器 / Docker / CI）</text>
+  <path class="ln" d="M232 54 L300 84" marker-end="url(#ar)"/>
+  <path class="ln" d="M232 130 L300 100" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="304" y="62" width="180" height="56" rx="10"/>
+  <text class="mono sm on-a" x="394" y="86" text-anchor="middle">config('KEY')</text>
+  <text class="sm" x="394" y="106" text-anchor="middle">环境变量优先</text>
+  <path class="ln-a" d="M486 90 H540" marker-end="url(#ar-a)"/>
+  <rect class="bx-b" x="544" y="62" width="196" height="56" rx="10"/>
+  <text class="mono sm on-b" x="642" y="86" text-anchor="middle">settings.py</text>
+  <text class="sm" x="642" y="106" text-anchor="middle">同一份代码，多套环境</text>
+</svg>
+<figcaption>图 2-7　配置与代码分离：安全、灵活、易维护</figcaption>
+</figure>
+
+<div class="code" data-lang="env" data-file=".env（记得加进 .gitignore）">
+<pre>
+EMAIL_HOST_USER=your_account@gmail.com
+EMAIL_HOST_PASSWORD=xxxxxxxxxxxxxxxx
+DEFAULT_FROM_EMAIL=My Blog &lt;your_account@gmail.com&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="mysite/settings.py">
+<pre>
+from decouple import config
+
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_HOST_USER = config('EMAIL_HOST_USER')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD')
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL')
+
+# 没有 SMTP 服务器时，把邮件打印到终端：
+# EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 用 Gmail 发信需要“应用专用密码”</div>
+  <p>
+    先在 Google 账号里开启两步验证，再到 <code>myaccount.google.com/apppasswords</code> 生成一个 16 位的应用专用密码，填到 <code>EMAIL_HOST_PASSWORD</code>。
+    正式项目建议用 SendGrid、Amazon SES 等专业服务，<code>django-anymail</code> 可以统一接入它们。
+  </p>
+</div>
+
+<div class="code" data-lang="py" data-file="python manage.py shell">
+<pre>
+>>> from django.core.mail import send_mail
+>>> send_mail('Django mail', 'This e-mail was sent with Django.',
+...           'your_account@gmail.com', ['your_account@gmail.com'], fail_silently=False)
+1        # 返回成功发送的封数
+</pre>
+</div>
+
+<h2 id="comments">评论系统</h2>
+
+<p>评论系统需要四样东西：评论模型、评论表单、处理提交的视图、在详情页显示评论和表单的模板。</p>
+
+<div class="code" data-lang="py" data-file="blog/models.py">
+<pre>
+class Comment(models.Model):
+    post = models.ForeignKey(Post, on_delete=models.CASCADE, related_name='comments')
+    name = models.CharField(max_length=80)
+    email = models.EmailField()
+    body = models.TextField()
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+    active = models.BooleanField(default=True)     # 用来在后台屏蔽不当评论
+
+    class Meta:
+        ordering = ['created']
+        indexes = [models.Index(fields=['created'])]
+
+    def __str__(self):
+        return f'Comment by {self.name} on {self.post}'
+</pre>
+</div>
+
+<p>
+  不写 <code>related_name</code> 时，反向访问名默认是 <code>comment_set</code>；写了之后就是 <code>post.comments.all()</code>。
+  记得 <code>makemigrations</code> + <code>migrate</code>，并在 <code>admin.py</code> 注册 <code>CommentAdmin</code>。
+</p>
+
+<h3>ModelForm：从模型生成表单</h3>
+
+<div class="code" data-lang="py" data-file="blog/forms.py">
+<pre>
+class CommentForm(forms.ModelForm):
+    class Meta:
+        model = Comment
+        fields = ['name', 'email', 'body']     # 显式列出允许用户填写的字段
+</pre>
+</div>
+
+<h3>处理评论提交</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="评论提交流程：详情页的表单 POST 到 post_comment，save(commit=False) 后补上 post 再保存">
+  <rect class="bx" x="16" y="80" width="150" height="70" rx="10"/>
+  <text class="ttl" x="91" y="106" text-anchor="middle">详情页</text>
+  <text class="sm" x="91" y="126" text-anchor="middle">评论列表 + 空表单</text>
+  <path class="ln" d="M168 114 H212" marker-end="url(#ar)"/>
+  <text class="mono sm" x="190" y="104" text-anchor="middle">POST</text>
+
+  <rect class="bx-a" x="216" y="20" width="310" height="190" rx="12"/>
+  <text class="ttl on-a" x="371" y="44" text-anchor="middle">@require_POST  post_comment()</text>
+  <text class="mono sm" x="232" y="72">form = CommentForm(data=request.POST)</text>
+  <text class="mono sm" x="232" y="98">if form.is_valid():</text>
+  <text class="mono sm" x="248" y="122">comment = form.save(commit=False)</text>
+  <text class="sm" x="258" y="140">↑ 建好对象但先不存库</text>
+  <text class="mono sm" x="248" y="162">comment.post = post   # 补上外键</text>
+  <text class="mono sm" x="248" y="186">comment.save()        # 这才 INSERT</text>
+
+  <path class="ln-g" d="M528 90 H580" marker-end="url(#ar-g)"/>
+  <rect class="bx-g" x="584" y="60" width="160" height="60" rx="10"/>
+  <text class="sm on-g" x="664" y="86" text-anchor="middle">成功：comment.html</text>
+  <text class="sm" x="664" y="104" text-anchor="middle">“评论已添加”</text>
+  <path class="ln-r" d="M528 160 H580" marker-end="url(#ar-r)"/>
+  <rect class="bx-r" x="584" y="130" width="160" height="60" rx="10"/>
+  <text class="sm on-r" x="664" y="156" text-anchor="middle">失败：同一模板</text>
+  <text class="sm" x="664" y="174" text-anchor="middle">带错误重新显示表单</text>
+</svg>
+<figcaption>图 2-8　<code>commit=False</code>：先拿到对象，补齐用户不该填的字段，再保存</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="blog/views.py">
+<pre>
+from django.views.decorators.http import require_POST
+
+
+@require_POST                      # 非 POST 请求返回 405 Method Not Allowed
+def post_comment(request, post_id):
+    post = get_object_or_404(Post, id=post_id, status=Post.Status.PUBLISHED)
+    comment = None
+    form = CommentForm(data=request.POST)
+    if form.is_valid():
+        comment = form.save(commit=False)
+        comment.post = post
+        comment.save()
+    return render(request, 'blog/post/comment.html',
+                  {'post': post, 'form': form, 'comment': comment})
+</pre>
+</div>
+
+<p>详情视图里取出有效评论并准备一个空表单：</p>
+
+<div class="code" data-lang="py">
+<pre>
+comments = post.comments.filter(active=True)
+form = CommentForm()
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="blog/templates/blog/post/detail.html（节选）">
+<pre>
+{% with comments.count as total_comments %}
+  &lt;h2&gt;{{ total_comments }} comment{{ total_comments|pluralize }}&lt;/h2&gt;
+{% endwith %}
+
+{% for comment in comments %}
+  &lt;div class="comment"&gt;
+    &lt;p class="info"&gt;Comment {{ forloop.counter }} by {{ comment.name }} {{ comment.created }}&lt;/p&gt;
+    {{ comment.body|linebreaks }}
+  &lt;/div&gt;
+{% empty %}
+  &lt;p&gt;There are no comments yet.&lt;/p&gt;
+{% endfor %}
+
+{% include "blog/post/includes/comment_form.html" %}
+</pre>
+</div>
+
+<dl class="gloss">
+  <dt>{% with %}</dt><dd>把一个值存成临时变量，避免重复计算或重复查库</dd>
+  <dt>|pluralize</dt><dd>数量不为 1 时输出 “s”，得到 0 comments / 1 comment / 2 comments</dd>
+  <dt>forloop.counter</dt><dd>循环计数（从 1 开始），还有 <code>counter0</code>、<code>first</code>、<code>last</code></dd>
+  <dt>{% empty %}</dt><dd>循环对象为空时渲染的内容</dd>
+  <dt>{% include %}</dt><dd>在当前上下文中插入另一个模板，可以 <code>with</code> 传额外变量</dd>
+</dl>
+
+<h3>Django 5.0 表单字段组</h3>
+
+<p>
+  <code>{{ form.as_p }}</code> 最简单，但想自定义布局就得逐个字段写 label、控件、错误、帮助文本。
+  5.0 引入的 <code>as_field_group</code> 一次性渲染这四样，布局交给你：
+</p>
+
+<div class="code" data-lang="html" data-file="blog/templates/blog/post/includes/comment_form.html">
+<pre>
+&lt;h2&gt;Add a new comment&lt;/h2&gt;
+&lt;form action="{% url "blog:post_comment" post.id %}" method="post"&gt;
+  &lt;div class="left"&gt;{{ form.name.as_field_group }}&lt;/div&gt;
+  &lt;div class="left"&gt;{{ form.email.as_field_group }}&lt;/div&gt;
+  {{ form.body.as_field_group }}
+  {% csrf_token %}
+  &lt;p&gt;&lt;input type="submit" value="Add comment"&gt;&lt;/p&gt;
+&lt;/form&gt;
+</pre>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 2 章代码点评 <small>Chapter02/mysite</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> ModelForm 显式列出 <code>fields</code> <span class="tag ts">TSD：表单</span></h4>
+    <p><code>CommentForm</code> 写的是 <code>fields = ['name', 'email', 'body']</code>。TSD 专门强调：<strong>永远不要用 <code>fields = '__all__'</code> 或 <code>exclude</code></strong>，否则将来模型加了个 <code>is_approved</code> 字段，用户就能通过伪造 POST 数据直接改它（批量赋值漏洞）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> <code>@require_POST</code>、<code>{% querystring %}</code>、凭据走环境变量</h4>
+    <p>评论视图限制了 HTTP 方法；分页模板用了 5.1 的 <code>{% querystring %}</code>；邮件凭据用 <code>decouple</code> 读取且 <code>.env</code> 没有进仓库。都是好习惯。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 分页用 <code>paginator.get_page()</code> 一行搞定 <span class="src">Chapter02/mysite/blog/views.py:12</span></h4>
+    <p><code>Paginator.get_page()</code>（Django 2.0 起）内部已经处理了非整数和越界页码，书里的 try/except 可以整个删掉：</p>
+<div class="code" data-lang="py"><pre>
+def post_list(request):
+    paginator = Paginator(Post.published.all(), 3)
+    posts = paginator.get_page(request.GET.get('page'))   # 非法值→第 1 页，越界→最后一页
+    return render(request, 'blog/post/list.html', {'posts': posts})
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 提交成功后直接 render，而不是重定向（缺少 PRG 模式）</h4>
+    <p>
+      <code>post_comment</code> 和 <code>post_share</code> 成功后都直接渲染页面。用户此时按 F5 刷新，浏览器会提示“重新提交表单”，
+      确认后就会<strong>再发一次邮件 / 再存一条评论</strong>。标准做法是 <strong>Post/Redirect/Get</strong>：成功后重定向，再用消息框架（第 5 章）显示提示。
+    </p>
+    <figure>
+    <svg class="dgm" viewBox="0 0 760 120" role="img" aria-label="PRG 模式：POST 成功后返回 302 重定向，浏览器再发 GET，刷新不会重复提交">
+      <rect class="bx-a" x="20" y="36" width="170" height="48" rx="8"/>
+      <text class="sm on-a" x="105" y="58" text-anchor="middle">POST /comment/</text>
+      <text class="sm" x="105" y="74" text-anchor="middle">保存评论</text>
+      <path class="ln-a" d="M192 60 H270" marker-end="url(#ar-a)"/>
+      <text class="mono sm" x="231" y="50" text-anchor="middle">302</text>
+      <rect class="bx" x="274" y="36" width="190" height="48" rx="8"/>
+      <text class="sm" x="369" y="58" text-anchor="middle">GET 文章详情页</text>
+      <text class="sm" x="369" y="74" text-anchor="middle">显示“评论已提交”</text>
+      <path class="ln-g" d="M466 60 H540" marker-end="url(#ar-g)"/>
+      <rect class="bx-g" x="544" y="36" width="196" height="48" rx="8"/>
+      <text class="sm on-g" x="642" y="58" text-anchor="middle">用户刷新 = 再 GET 一次</text>
+      <text class="sm" x="642" y="74" text-anchor="middle">不会重复提交 &#10003;</text>
+    </svg>
+    </figure>
+<div class="code" data-lang="py"><pre>
+from django.contrib import messages
+from django.shortcuts import redirect
+
+
+@require_POST
+def post_comment(request, post_id):
+    post = get_object_or_404(Post.published, pk=post_id)
+    form = CommentForm(data=request.POST)
+    if form.is_valid():
+        comment = form.save(commit=False)
+        comment.post = post
+        comment.save()
+        messages.success(request, '评论已提交，审核后显示。')
+        return redirect(post)                  # ← 成功就重定向
+    # 失败时才渲染，带着错误信息
+    return render(request, 'blog/post/comment.html', {'post': post, 'form': form})
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 邮件分享是一个“开放的发信器”</h4>
+    <p>
+      <code>post_share</code> 允许<strong>任何匿名访客</strong>向<strong>任意邮箱</strong>发送内容可自定义的邮件，发件人还是你的域名。
+      上线后很快会被脚本滥用来发垃圾邮件、钓鱼邮件，你的发信域名会被拉黑。至少要做到：要求登录，或加验证码；按 IP/用户限流（如 <code>django-ratelimit</code>）；
+      并且邮件发送应该放进后台任务（第 8 章 Celery），不要在请求里同步连 SMTP —— SMTP 慢或挂掉时整个页面会卡住。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 用数据库约束代替 <code>unique_for_date</code> <span class="src">Chapter02/mysite/blog/models.py:20</span></h4>
+    <p><code>unique_for_date</code> 只在表单校验时生效。Django 4.0 起 <code>UniqueConstraint</code> 支持表达式，可以把“同一天 slug 唯一”交给数据库保证：</p>
+<div class="code" data-lang="py"><pre>
+from django.db.models.functions import TruncDate
+
+
+class Post(models.Model):
+    # ...
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                TruncDate('publish'), 'slug',
+                name='unique_slug_per_publish_date',
+            ),
+        ]
+</pre></div>
+    <p>注意 <code>TruncDate</code> 在数据库里按 UTC 截取日期，而 URL 里的年月日按 <code>TIME_ZONE</code> 计算；如果你的时区不是 UTC，边界时刻可能不一致，需要统一口径。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 评论默认直接公开</h4>
+    <p><code>active = models.BooleanField(default=True)</code> 意味着任何人提交的内容立即显示在页面上。公开站点更稳妥的默认值是 <code>False</code>（先审核后显示），或者接入反垃圾服务。此外 <code>email</code> 是个人信息，存储它意味着要考虑隐私合规。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> <code>comments.count</code> + <code>for</code> 会查两次库</h4>
+    <p>模板里先 <code>comments.count</code>（一条 <code>COUNT</code>），再 <code>{% for comment in comments %}</code>（一条 <code>SELECT</code>）。反正都要把评论全部取出来，就用 <code>{{ comments|length }}</code>：它会求值 QuerySet 并缓存结果，后面的 for 循环直接用缓存。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 开发环境默认用控制台邮件后端 <span class="src">Chapter02/mysite/mysite/settings.py:128</span></h4>
+    <p><code>config('EMAIL_HOST_USER')</code> 没有默认值，新同事 clone 下来没有 <code>.env</code> 就直接启动失败。可以让“危险配置”没有默认值、“开发便利配置”有安全的默认值：</p>
+<div class="code" data-lang="py"><pre>
+EMAIL_BACKEND = config('EMAIL_BACKEND', default='django.core.mail.backends.console.EmailBackend')
+EMAIL_HOST_USER = config('EMAIL_HOST_USER', default='')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD', default='')
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> FBV 还是 CBV？ <span class="tag ts">TSD：视图</span></h4>
+    <p>
+      TSD 的立场很务实：通用的增删改查用 CBV（少写代码），逻辑特殊的用 FBV（一目了然），<strong>两者可以共存</strong>。
+      更重要的是“视图要瘦”：业务逻辑放到模型方法、QuerySet 方法或单独的 service 函数里，视图只做“取参数 → 调逻辑 → 返回响应”。
+      本章 <code>post_share</code> 里拼邮件内容的逻辑就适合抽成一个函数，方便单独测试。
+    </p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li><code>get_absolute_url()</code> 定义规范 URL，模板、Admin、站点地图都会用它。</li>
+  <li>路径转换器（<code>int</code>、<code>slug</code>…）同时完成匹配和类型转换；日期 + slug 让 URL 更友好。</li>
+  <li><code>Paginator</code> 负责分页；<code>ListView</code> 用几个属性就实现了带分页的列表。</li>
+  <li>表单处理的核心是 <code>is_valid()</code> 和 <code>cleaned_data</code>；<code>ModelForm</code> 的 <code>save(commit=False)</code> 用来补齐字段。</li>
+  <li>所有 POST 表单都要 <code>{% csrf_token %}</code>；凭据放环境变量。</li>
+  <li>生产代码里提交成功后要重定向（PRG），公开的发信功能要限流。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>把 <code>post_list</code> 改用 <code>paginator.get_page()</code>，访问 <code>?page=abc</code> 和 <code>?page=999</code> 验证行为。</li>
+    <li>把 <code>post_comment</code> 改成 PRG 模式：成功后 <code>redirect(post)</code>，并在详情页显示一条成功提示。</li>
+    <li>给 <code>Comment</code> 的 <code>active</code> 改成默认 <code>False</code>，在 <code>CommentAdmin</code> 里加一个“批量通过”的 Admin 动作（提示：第 9 章会讲 Admin 动作）。</li>
+    <li>设置 <code>EMAIL_BACKEND</code> 为控制台后端，分享一篇文章，在终端里找到邮件内容。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

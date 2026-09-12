@@ -1,0 +1,496 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 5 章 · 社交登录 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="5">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 5 章 · 项目二：图片书签社交网站</span>
+<h1>社交登录</h1>
+<p class="lede">
+  用户系统能用了，这一章让它更好用：操作后给出提示（消息框架）、允许用邮箱登录（自定义认证后端）、
+  支持“用 Google 账号登录”（OAuth 2.0）。为了模拟真实环境，我们还会在本地用自定义域名和 HTTPS 运行开发服务器。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用消息框架显示一次性提示</li>
+    <li>理解 <code>AUTHENTICATION_BACKENDS</code> 的工作方式，写一个邮箱认证后端</li>
+    <li>在表单层阻止重复邮箱</li>
+    <li>理解 OAuth 2.0 授权码流程，用 Python Social Auth 接入 Google</li>
+    <li>用 hosts 文件和 <code>runserver_plus</code> 在本地跑 HTTPS</li>
+    <li>扩展社交登录的 pipeline，为新用户自动创建 Profile</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="messages">消息框架</h2>
+
+<p>“资料已保存”“密码错误”这类提示只需要显示一次。<code>django.contrib.messages</code> 默认已启用：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="消息框架：视图添加消息，存入 Cookie 或会话，下一次渲染时由上下文处理器取出并显示，显示后自动清除">
+  <rect class="bx-a" x="16" y="60" width="160" height="70" rx="10"/>
+  <text class="ttl on-a" x="96" y="86" text-anchor="middle">视图</text>
+  <text class="mono sm" x="96" y="108" text-anchor="middle">messages.success(…)</text>
+  <path class="ln" d="M178 95 H226" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="230" y="60" width="160" height="70" rx="10"/>
+  <text class="ttl" x="310" y="86" text-anchor="middle">存储</text>
+  <text class="sm" x="310" y="108" text-anchor="middle">Cookie（放不下再用会话）</text>
+  <path class="ln" d="M392 95 H440" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="444" y="60" width="150" height="70" rx="10"/>
+  <text class="ttl on-b" x="519" y="86" text-anchor="middle">上下文处理器</text>
+  <text class="mono sm" x="519" y="108" text-anchor="middle">{{ messages }}</text>
+  <path class="ln" d="M596 95 H630" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="634" y="60" width="110" height="70" rx="10"/>
+  <text class="ttl on-g" x="689" y="86" text-anchor="middle">模板</text>
+  <text class="sm" x="689" y="108" text-anchor="middle">遍历即清除</text>
+  <text class="sm" x="380" y="170" text-anchor="middle">常见用法：POST 成功 → 加消息 → 重定向 → 下一个页面显示提示（完美配合 PRG 模式）</text>
+</svg>
+<figcaption>图 5-1　消息在“添加”之后的下一次渲染中显示，读过就消失</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <tr><th>方法</th><th><code>message.tags</code></th><th>用途</th></tr>
+  <tr><td><code>messages.debug()</code></td><td>debug</td><td>调试信息（默认级别下不显示）</td></tr>
+  <tr><td><code>messages.info()</code></td><td>info</td><td>一般信息</td></tr>
+  <tr><td><code>messages.success()</code></td><td>success</td><td>操作成功</td></tr>
+  <tr><td><code>messages.warning()</code></td><td>warning</td><td>有风险，但还没失败</td></tr>
+  <tr><td><code>messages.error()</code></td><td>error</td><td>操作失败</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="html" data-file="account/templates/base.html（节选）">
+<pre>
+{% if messages %}
+  &lt;ul class="messages"&gt;
+    {% for message in messages %}
+      &lt;li class="{{ message.tags }}"&gt;
+        {{ message|safe }}                  {# ← 点评里会说这个 |safe 的问题 #}
+        &lt;a href="#" class="close"&gt;x&lt;/a&gt;
+      &lt;/li&gt;
+    {% endfor %}
+  &lt;/ul&gt;
+{% endif %}
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="account/views.py（edit 中）">
+<pre>
+from django.contrib import messages
+
+if user_form.is_valid() and profile_form.is_valid():
+    user_form.save()
+    profile_form.save()
+    messages.success(request, 'Profile updated successfully')
+else:
+    messages.error(request, 'Error updating your profile')
+</pre>
+</div>
+
+<h2 id="backends">自定义认证后端：用邮箱登录</h2>
+
+<p>
+  <code>authenticate()</code> 会按顺序询问 <code>AUTHENTICATION_BACKENDS</code> 里的每个后端，<strong>第一个返回用户的后端胜出</strong>。
+  默认只有 <code>ModelBackend</code>（用户名 + 密码）。一个后端只需实现两个方法：
+</p>
+
+<ul>
+  <li><code>authenticate(request, **credentials)</code>：凭据有效返回用户，否则返回 <code>None</code>。</li>
+  <li><code>get_user(user_id)</code>：会话期间，Django 用它根据会话里存的 ID 取回用户。</li>
+</ul>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="authenticate 依次尝试 ModelBackend、EmailAuthBackend 和 GoogleOAuth2，第一个成功者胜出">
+  <rect class="bx" x="16" y="80" width="160" height="60" rx="10"/>
+  <text class="mono sm" x="96" y="104" text-anchor="middle">authenticate(</text>
+  <text class="mono sm" x="96" y="122" text-anchor="middle">username='a@b.com', …)</text>
+  <path class="ln" d="M178 110 H220" marker-end="url(#ar)"/>
+
+  <rect class="bx-r" x="224" y="20" width="230" height="52" rx="10"/>
+  <text class="mono sm" x="339" y="42" text-anchor="middle">① ModelBackend</text>
+  <text class="sm on-r" x="339" y="60" text-anchor="middle">没有叫 a@b.com 的用户名 → None</text>
+  <rect class="bx-g" x="224" y="84" width="230" height="52" rx="10"/>
+  <text class="mono sm" x="339" y="106" text-anchor="middle">② EmailAuthBackend</text>
+  <text class="sm on-g" x="339" y="124" text-anchor="middle">按邮箱找到用户且密码正确 → User</text>
+  <rect class="bx-d" x="224" y="148" width="230" height="52" rx="10"/>
+  <text class="mono sm" x="339" y="170" text-anchor="middle">③ GoogleOAuth2</text>
+  <text class="sm" x="339" y="188" text-anchor="middle">不再询问</text>
+
+  <path class="ln-g" d="M456 110 H510" marker-end="url(#ar-g)"/>
+  <rect class="bx-a" x="514" y="70" width="230" height="80" rx="10"/>
+  <text class="ttl on-a" x="629" y="96" text-anchor="middle">login(request, user)</text>
+  <text class="sm" x="629" y="118" text-anchor="middle">会话里记下用的是哪个后端</text>
+  <text class="sm" x="629" y="136" text-anchor="middle">后续请求用它的 get_user()</text>
+</svg>
+<figcaption>图 5-2　认证后端是一条“责任链”，顺序很重要</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="account/authentication.py">
+<pre>
+from django.contrib.auth.models import User
+
+
+class EmailAuthBackend:
+    """Authenticate using an e-mail address."""
+
+    def authenticate(self, request, username=None, password=None):
+        try:
+            user = User.objects.get(email=username)      # 参数仍叫 username，才能复用 LoginView
+            if user.check_password(password):
+                return user
+            return None
+        except (User.DoesNotExist, User.MultipleObjectsReturned):
+            return None
+
+    def get_user(self, user_id):
+        try:
+            return User.objects.get(pk=user_id)
+        except User.DoesNotExist:
+            return None
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="bookmarks/settings.py">
+<pre>
+AUTHENTICATION_BACKENDS = [
+    'django.contrib.auth.backends.ModelBackend',
+    'account.authentication.EmailAuthBackend',
+    'social_core.backends.google.GoogleOAuth2',
+]
+</pre>
+</div>
+
+<h3>阻止重复邮箱</h3>
+
+<p>既然邮箱能当登录名，它就必须唯一。内置 <code>User</code> 的 email 字段并不唯一，所以在表单里校验：</p>
+
+<div class="code" data-lang="py" data-file="account/forms.py">
+<pre>
+class UserRegistrationForm(forms.ModelForm):
+    # ...
+    def clean_email(self):
+        data = self.cleaned_data['email']
+        if User.objects.filter(email=data).exists():
+            raise forms.ValidationError('Email already in use.')
+        return data
+
+
+class UserEditForm(forms.ModelForm):
+    # ...
+    def clean_email(self):
+        data = self.cleaned_data['email']
+        qs = User.objects.exclude(id=self.instance.id).filter(email=data)   # 排除自己
+        if qs.exists():
+            raise forms.ValidationError('Email already in use.')
+        return data
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 仓库代码里这段会直接报错</div>
+  <p><code>Chapter05/bookmarks/account/forms.py</code> 顶部只导入了 <code>get_user_model</code>，没有导入 <code>User</code>，所以注册或编辑资料时会抛 <code>NameError: name 'User' is not defined</code>。书中正文的表单写的是 <code>model = User</code>（假定导入了 User）。修复方法见点评。</p>
+</div>
+
+<h2 id="oauth">OAuth 2.0 与 Google 登录</h2>
+
+<p>
+  “用 Google 登录”背后是 <strong>OAuth 2.0</strong>：你的网站<em>不接触</em>用户的 Google 密码，
+  而是让用户去 Google 那边同意授权，Google 再给你一个临时凭证，你用它换取用户信息。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="OAuth 2.0 授权码流程：用户点击登录，跳转到 Google 同意页，Google 带着 code 回调，我们的服务器用 code 换 token 并获取用户信息，然后执行 pipeline 并登录">
+  <rect class="bx" x="16" y="20" width="130" height="290" rx="12"/>
+  <text class="ttl" x="81" y="44" text-anchor="middle">浏览器</text>
+  <rect class="bx-a" x="315" y="20" width="130" height="290" rx="12"/>
+  <text class="ttl on-a" x="380" y="44" text-anchor="middle">我们的网站</text>
+  <rect class="bx-b" x="614" y="20" width="130" height="290" rx="12"/>
+  <text class="ttl on-b" x="679" y="44" text-anchor="middle">Google</text>
+
+  <path class="ln" d="M148 72 H311" marker-end="url(#ar)"/>
+  <text class="sm" x="230" y="66" text-anchor="middle">① 点“Sign in with Google”</text>
+  <text class="mono sm" x="230" y="86" text-anchor="middle">/social-auth/login/google-oauth2/</text>
+
+  <path class="ln" d="M313 110 H150" marker-end="url(#ar)"/>
+  <text class="sm" x="230" y="104" text-anchor="middle">② 302 → accounts.google.com</text>
+
+  <path class="ln-b" d="M148 136 H610" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="480" y="130" text-anchor="middle">③ 用户在 Google 登录并点“同意”</text>
+
+  <path class="ln-b" d="M612 170 H150" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="480" y="164" text-anchor="middle">④ 302 回到回调地址，带上一次性 code</text>
+
+  <path class="ln" d="M148 200 H311" marker-end="url(#ar)"/>
+  <text class="mono sm" x="230" y="194" text-anchor="middle">/social-auth/complete/google-oauth2/?code=…</text>
+
+  <path class="ln-a" d="M447 228 H610" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="530" y="222" text-anchor="middle">⑤ 服务器之间：code + client secret</text>
+  <path class="ln-a" d="M612 252 H449" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="530" y="246" text-anchor="middle">access token → 取用户邮箱、姓名</text>
+
+  <path class="ln-g" d="M313 286 H150" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="230" y="280" text-anchor="middle">⑥ 跑 pipeline、login()、跳 dashboard</text>
+</svg>
+<figcaption>图 5-3　授权码流程：client secret 只在服务器之间使用，从不经过浏览器</figcaption>
+</figure>
+
+<h3>安装 Python Social Auth</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install social-auth-app-django==5.4.0 python-decouple==3.8
+python manage.py migrate        # social_django 自带几张表（关联的社交账号等）
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="bookmarks/settings.py 与 bookmarks/urls.py">
+<pre>
+INSTALLED_APPS = [
+    # ...
+    'django_extensions',
+    'social_django',
+]
+
+SOCIAL_AUTH_GOOGLE_OAUTH2_KEY = config('GOOGLE_OAUTH2_KEY')        # 放在 .env 里
+SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET = config('GOOGLE_OAUTH2_SECRET')
+
+urlpatterns = [
+    # ...
+    path('social-auth/', include('social_django.urls', namespace='social')),
+]
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="registration/login.html（追加）">
+<pre>
+&lt;div class="social"&gt;
+  &lt;ul&gt;
+    &lt;li class="google"&gt;
+      &lt;a href="{% url "social:begin" "google-oauth2" %}"&gt;Sign in with Google&lt;/a&gt;
+    &lt;/li&gt;
+  &lt;/ul&gt;
+&lt;/div&gt;
+</pre>
+</div>
+
+<h3>在 Google Cloud 控制台创建凭据</h3>
+
+<ol class="steps">
+  <li>在 <code>console.cloud.google.com</code> 新建项目 “Bookmarks”。</li>
+  <li>“APIs &amp; Services → OAuth consent screen”：用户类型选 External，填应用名、支持邮箱，授权域名填 <code>mysite.com</code>，把自己加为测试用户。</li>
+  <li>“Credentials → Create credentials → OAuth client ID”：类型选 Web application。</li>
+  <li>Authorized JavaScript origins：<code>https://mysite.com:8000</code>；Authorized redirect URIs：<code>https://mysite.com:8000/social-auth/complete/google-oauth2/</code>。</li>
+  <li>把得到的 Client ID 和 Client secret 写进 <code>.env</code>。</li>
+</ol>
+
+<h2 id="https">本地域名与 HTTPS</h2>
+
+<p>很多 OAuth 提供方要求回调地址是一个域名，下一章的书签小工具还要求 HTTPS。于是我们在本地模拟：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="浏览器访问 mysite.com 经 hosts 文件解析为本机，由 runserver_plus 以自签名证书提供 HTTPS">
+  <rect class="bx" x="16" y="50" width="170" height="60" rx="10"/>
+  <text class="mono sm" x="101" y="76" text-anchor="middle">https://mysite.com:8000</text>
+  <text class="sm" x="101" y="96" text-anchor="middle">浏览器</text>
+  <path class="ln" d="M188 80 H236" marker-end="url(#ar)"/>
+  <rect class="bx-d" x="240" y="50" width="200" height="60" rx="10"/>
+  <text class="mono sm" x="340" y="76" text-anchor="middle">/etc/hosts</text>
+  <text class="mono sm" x="340" y="96" text-anchor="middle">127.0.0.1  mysite.com</text>
+  <path class="ln" d="M442 80 H490" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="494" y="50" width="250" height="60" rx="10"/>
+  <text class="mono sm on-a" x="619" y="76" text-anchor="middle">runserver_plus --cert-file cert.crt</text>
+  <text class="sm" x="619" y="96" text-anchor="middle">自动生成自签名证书</text>
+  <text class="sm" x="380" y="146" text-anchor="middle">还要把 mysite.com 加进 ALLOWED_HOSTS，否则 Django 返回 “Invalid HTTP_HOST header” 400 错误</text>
+</svg>
+<figcaption>图 5-4　浏览器会警告证书不受信任，开发时手动放行即可</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install django-extensions==3.2.3 werkzeug==3.0.2 pyOpenSSL==24.1.0
+python manage.py runserver_plus --cert-file cert.crt
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="bookmarks/settings.py">
+<pre>
+ALLOWED_HOSTS = ['mysite.com', 'localhost', '127.0.0.1']
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 更顺滑的本地 HTTPS：mkcert</div>
+  <p><code>mkcert</code> 可以在本机安装一个受信任的开发用根证书，然后签发 <code>mysite.com</code> 的证书，浏览器不再弹警告：<code>mkcert -install &amp;&amp; mkcert mysite.com</code>，再用 <code>runserver_plus --cert-file mysite.com.pem --key-file mysite.com-key.pem</code> 启动。</p>
+</div>
+
+<h2 id="pipeline">扩展 pipeline：为社交用户创建 Profile</h2>
+
+<p>社交登录时，Python Social Auth 按一条 <strong>pipeline</strong>（函数列表）依次处理：取资料 → 找已关联用户 → 生成用户名 → 创建用户 → 关联 → ……我们在“创建用户”之后插入自己的一步：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="社交认证 pipeline 的各个步骤，自定义的 create_profile 插在 create_user 之后">
+  <rect class="bx" x="16" y="30" width="110" height="46" rx="8"/><text class="mono sm" x="71" y="58" text-anchor="middle">social_details</text>
+  <rect class="bx" x="136" y="30" width="96" height="46" rx="8"/><text class="mono sm" x="184" y="58" text-anchor="middle">social_uid</text>
+  <rect class="bx" x="242" y="30" width="100" height="46" rx="8"/><text class="mono sm" x="292" y="58" text-anchor="middle">auth_allowed</text>
+  <rect class="bx" x="352" y="30" width="96" height="46" rx="8"/><text class="mono sm" x="400" y="58" text-anchor="middle">social_user</text>
+  <rect class="bx" x="458" y="30" width="110" height="46" rx="8"/><text class="mono sm" x="513" y="58" text-anchor="middle">get_username</text>
+  <rect class="bx-b" x="578" y="30" width="110" height="46" rx="8"/><text class="mono sm on-b" x="633" y="58" text-anchor="middle">create_user</text>
+  <path class="ln-a" d="M633 78 V100 H120 V116" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="16" y="120" width="200" height="46" rx="8"/><text class="mono sm on-a" x="116" y="148" text-anchor="middle">create_profile（我们的）</text>
+  <rect class="bx" x="226" y="120" width="130" height="46" rx="8"/><text class="mono sm" x="291" y="148" text-anchor="middle">associate_user</text>
+  <rect class="bx" x="366" y="120" width="130" height="46" rx="8"/><text class="mono sm" x="431" y="148" text-anchor="middle">load_extra_data</text>
+  <rect class="bx" x="506" y="120" width="120" height="46" rx="8"/><text class="mono sm" x="566" y="148" text-anchor="middle">user_details</text>
+</svg>
+<figcaption>图 5-5　每个 pipeline 函数都收到 backend、user 等参数，返回的字典会合并进后续步骤的参数</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="account/authentication.py 与 settings.py">
+<pre>
+from account.models import Profile
+
+
+def create_profile(backend, user, *args, **kwargs):
+    """Create user profile for social authentication"""
+    Profile.objects.get_or_create(user=user)      # 老用户已有就不重复创建
+
+
+SOCIAL_AUTH_PIPELINE = [
+    'social_core.pipeline.social_auth.social_details',
+    'social_core.pipeline.social_auth.social_uid',
+    'social_core.pipeline.social_auth.auth_allowed',
+    'social_core.pipeline.social_auth.social_user',
+    'social_core.pipeline.user.get_username',
+    'social_core.pipeline.user.create_user',
+    'account.authentication.create_profile',
+    'social_core.pipeline.social_auth.associate_user',
+    'social_core.pipeline.social_auth.load_extra_data',
+    'social_core.pipeline.user.user_details',
+]
+</pre>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 5 章代码点评 <small>Chapter05/bookmarks</small></div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> <code>forms.py</code> 使用了未导入的 <code>User</code> <span class="src">Chapter05/bookmarks/account/forms.py:34</span></h4>
+    <p>两个 <code>clean_email</code> 都引用 <code>User</code>，但文件只导入了 <code>get_user_model</code>。一执行就是 <code>NameError</code>。修复并顺便保持“不硬编码 User”的原则：</p>
+<div class="code" data-lang="py"><pre>
+from django.contrib.auth import get_user_model
+
+User = get_user_model()
+</pre></div>
+    <p>这类错误用最简单的测试（提交一次注册表单）就能发现 —— 又一个“为什么要写测试”的例子。<code>ruff</code>/<code>flake8</code> 这类 linter 也会直接报 F821 未定义名称。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 模型与迁移不一致：<code>photo</code> 被改成了 CharField <span class="src">Chapter05/bookmarks/account/models.py:11</span></h4>
+    <p>
+      仓库第 5 章的 <code>Profile.photo</code> 被改成 <code>CharField(max_length=250)</code>，但迁移文件仍是 <code>ImageField</code>，第 6 章又改了回去。
+      这会让 <code>makemigrations --check</code> 失败，表单变成文本框（头像上传失效），模板里的 <code>photo.url</code> 也会报错。
+      建议在 CI 里加一步 <code>python manage.py makemigrations --check --dry-run</code>，自动发现“改了模型忘了生成迁移”。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> <code>{{ message|safe }}</code> 可能导致 XSS <span class="src">account/templates/base.html:40</span></h4>
+    <p>消息里一旦拼进了用户输入（比如 <code>f'已关注 {user.first_name}'</code>），<code>|safe</code> 就会让名字里的 <code>&lt;script&gt;</code> 原样执行。去掉 <code>|safe</code>；确实需要在消息里放链接时，用 <code>format_html()</code> 构造，它会转义参数：</p>
+<div class="code" data-lang="py"><pre>
+from django.utils.html import format_html
+
+messages.success(request, format_html('Saved. &lt;a href="{}"&gt;View profile&lt;/a&gt;', url))
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 让邮箱后端继承 <code>ModelBackend</code></h4>
+    <p>
+      手写的后端少了内置 <code>ModelBackend</code> 的几项保护：① 不检查 <code>is_active</code>，被停用用户的已有会话仍有效（<code>get_user</code> 照样返回他）；
+      ② 用户不存在时立即返回，响应明显更快，攻击者可以通过<strong>响应时间</strong>判断某邮箱是否注册；③ 邮箱区分大小写，<code>A@b.com</code> 登录不了。改成：
+    </p>
+<div class="code" data-lang="py"><pre>
+from django.contrib.auth import get_user_model
+from django.contrib.auth.backends import ModelBackend
+
+
+class EmailAuthBackend(ModelBackend):
+    def authenticate(self, request, username=None, password=None, **kwargs):
+        User = get_user_model()
+        try:
+            user = User.objects.get(email__iexact=username)
+        except (User.DoesNotExist, User.MultipleObjectsReturned):
+            User().set_password(password)      # 故意跑一次哈希，抹平时间差
+            return None
+        if user.check_password(password) and self.user_can_authenticate(user):
+            return user
+        return None
+    # get_user() 继承自 ModelBackend，已包含 is_active 检查
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 邮箱唯一性只靠表单校验</h4>
+    <p>
+      “先查询、再插入”在并发下有竞态；Admin、shell、社交登录创建的用户也不经过这个表单。唯一性应当由数据库保证 ——
+      这正是第 4 章点评说的“自定义用户模型 + <code>email = EmailField(unique=True)</code>”。如果还要大小写不敏感，可以加
+      <code>UniqueConstraint(Lower('email'), name='unique_lower_email')</code>。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 另一个选择：django-allauth <span class="tag ts">TSD：第三方包</span></h4>
+    <p>
+      Python Social Auth 专注于“第三方登录”。如果你还需要邮箱验证、邮箱登录、账号绑定/解绑、多因素认证等完整的账号体系，
+      社区里更常用的是 <strong>django-allauth</strong>，TSD 也把它列为账号注册的首选包。选型时的原则是：优先选维护活跃、文档齐全、下载量大的包。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 社交账号关联要谨慎</h4>
+    <p>pipeline 里有一个可选步骤 <code>associate_by_email</code>：按邮箱把社交账号自动并入已有用户。只有在提供方<strong>确认邮箱已验证</strong>时才安全，否则攻击者在某个不验证邮箱的平台注册你的邮箱，就能登录你的账号。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 编辑资料仍然没有 PRG</h4>
+    <p>消息框架已经就位，<code>edit</code> 成功时就可以 <code>messages.success(...)</code> 后 <code>return redirect('edit')</code>，而不是继续渲染。失败时渲染表单并显示字段错误即可，顶部再加一条“更新失败”的消息反而与字段错误重复。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>消息框架提供一次性提示，最适合与“POST 成功后重定向”搭配。</li>
+  <li><code>authenticate()</code> 按 <code>AUTHENTICATION_BACKENDS</code> 顺序尝试后端；后端只需 <code>authenticate()</code> 和 <code>get_user()</code>。</li>
+  <li>OAuth 2.0 授权码流程中，client secret 只在服务器之间使用；回调地址必须在提供方控制台登记。</li>
+  <li>本地可用 hosts + <code>runserver_plus</code>（或 mkcert）模拟域名和 HTTPS。</li>
+  <li>Python Social Auth 的 pipeline 可以插入自定义步骤，例如创建 Profile。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>修复 <code>forms.py</code> 的 <code>NameError</code>，并写一个测试：用已存在的邮箱注册应当失败。</li>
+    <li>把 <code>EmailAuthBackend</code> 改为继承 <code>ModelBackend</code>，测试停用（<code>is_active=False</code>）的用户无法用邮箱登录。</li>
+    <li>把 <code>edit</code> 视图改成 PRG 模式，并去掉模板里的 <code>|safe</code>。</li>
+    <li>选做：再接入一个 GitHub 登录（<code>social_core.backends.github.GithubOAuth2</code>）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

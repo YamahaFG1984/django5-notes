@@ -1,0 +1,1368 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 1 章 · 创建博客应用 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="1">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 1 章 · 项目一：博客</span>
+<h1>创建博客应用</h1>
+<p class="lede">
+  这一章从零搭起一个能跑的博客：装好 Python 和 Django，建项目、建应用，
+  设计数据模型并同步到数据库，配一个管理后台，再用视图、URL 和模板把文章展示出来。
+  学完你会对 Django 处理一个请求的完整路线有一张清晰的“地图”。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>理解 Django 的 MTV 分工，以及一个请求从进入到返回经过了哪些组件</li>
+    <li>分清“项目（project）”和“应用（app）”，认识 <code>settings.py</code> 里最重要的几项</li>
+    <li>写出 <code>Post</code> 模型：字段、默认排序、索引、枚举选项、外键</li>
+    <li>掌握迁移三步曲：<code>makemigrations</code> → <code>sqlmigrate</code> → <code>migrate</code></li>
+    <li>用 <code>ModelAdmin</code> 定制管理后台</li>
+    <li>熟练使用 QuerySet：增删改查、字段查找、链式过滤、<code>Q</code> 对象、惰性求值、自定义管理器</li>
+    <li>写列表页和详情页：视图、URL 命名空间、模板继承</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="overview">Django 是怎么工作的</h2>
+
+<p>
+  Django 是一个“电池全包”的 Python Web 框架：数据库访问、表单、用户认证、管理后台、缓存、国际化……
+  这些网站常见需求它都内置了。它的组件是<strong>松耦合</strong>的 —— 数据库层不知道数据会怎么显示，
+  模板系统也不关心请求从哪来 —— 所以每一块都能单独理解、单独替换。
+</p>
+
+<p>
+  Django 采用 <strong>MTV（Model-Template-View）</strong>模式。如果你听说过 MVC，可以这样对照：
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>MTV 中的角色</th><th>负责什么</th><th>对应 MVC 里的</th><th>在哪个文件</th></tr>
+  <tr><td><strong>Model</strong> 模型</td><td>定义数据结构，负责和数据库打交道</td><td>Model</td><td><code>models.py</code></td></tr>
+  <tr><td><strong>Template</strong> 模板</td><td>展示层：决定数据长什么样（HTML）</td><td>View</td><td><code>templates/*.html</code></td></tr>
+  <tr><td><strong>View</strong> 视图</td><td>业务逻辑：取数据、交给模板、返回响应</td><td>Controller（的一部分）</td><td><code>views.py</code></td></tr>
+  <tr><td>框架本身</td><td>按 URL 配置把请求派发给正确的视图</td><td>Controller</td><td><code>urls.py</code></td></tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="Django MTV 架构：请求经 URL 配置派发给视图，视图读模型、渲染模板后返回响应">
+  <rect class="bx" x="16" y="112" width="112" height="60" rx="10"/>
+  <text class="ttl" x="72" y="138" text-anchor="middle">浏览器</text>
+  <text class="sm" x="72" y="156" text-anchor="middle">GET /blog/3/</text>
+
+  <rect class="bx-d" x="168" y="112" width="124" height="60" rx="10"/>
+  <text class="ttl" x="230" y="138" text-anchor="middle">URL 配置</text>
+  <text class="mono sm" x="230" y="156" text-anchor="middle">urls.py</text>
+
+  <rect class="bx-a" x="332" y="112" width="132" height="60" rx="10"/>
+  <text class="ttl on-a" x="398" y="138" text-anchor="middle">视图 View</text>
+  <text class="mono sm" x="398" y="156" text-anchor="middle">views.py</text>
+
+  <rect class="bx-b" x="520" y="26" width="118" height="60" rx="10"/>
+  <text class="ttl on-b" x="579" y="52" text-anchor="middle">模型 Model</text>
+  <text class="mono sm" x="579" y="70" text-anchor="middle">models.py</text>
+
+  <rect class="bx" x="672" y="26" width="76" height="60" rx="10"/>
+  <text class="ttl" x="710" y="52" text-anchor="middle">数据库</text>
+  <text class="sm" x="710" y="70" text-anchor="middle">SQL</text>
+
+  <rect class="bx-g" x="520" y="198" width="118" height="60" rx="10"/>
+  <text class="ttl on-g" x="579" y="224" text-anchor="middle">模板</text>
+  <text class="mono sm" x="579" y="242" text-anchor="middle">detail.html</text>
+
+  <path class="ln" d="M130 132 H164" marker-end="url(#ar)"/>
+  <text class="sm" x="147" y="124" text-anchor="middle">①</text>
+  <path class="ln" d="M294 142 H328" marker-end="url(#ar)"/>
+  <text class="sm" x="311" y="134" text-anchor="middle">②</text>
+  <path class="ln-b" d="M466 122 L516 72" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="470" y="90">③ 查询</text>
+  <path class="ln" d="M640 56 H668" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M466 162 L516 212" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="470" y="206">④ 渲染</text>
+  <path class="ln-a" d="M398 174 V276 H72 V176" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="236" y="270" text-anchor="middle">⑤ HttpResponse（HTML）</text>
+</svg>
+<figcaption>图 1-1　MTV：URL 配置负责派发，视图负责协调，模型管数据，模板管外观</figcaption>
+</figure>
+
+<ol class="steps">
+  <li>浏览器按 URL 请求页面，Web 服务器把 HTTP 请求交给 Django。</li>
+  <li>Django 按顺序比对 URL 模式，<strong>停在第一个匹配的</strong>，调用对应的视图。</li>
+  <li>视图通过模型查询数据库（ORM 会把 Python 调用翻译成 SQL）。</li>
+  <li>视图把数据交给模板，渲染出 HTML。</li>
+  <li>视图返回一个 <code>HttpResponse</code>，浏览器显示页面。</li>
+</ol>
+
+<div class="box note">
+  <div class="t">&#9432; 图里省略了中间件</div>
+  <p>
+    真实的请求在到达视图之前、响应在离开视图之后，还会穿过一层层<strong>中间件（middleware）</strong>，
+    比如会话、CSRF 校验、用户认证。本章末尾的请求/响应图会把它画出来，第 17 章会教你自己写一个。
+  </p>
+</div>
+
+<h3>Django 5.x 带来了什么</h3>
+
+<p>书是按 Django 5.0 写的，仓库代码已经升级到 <strong>Django 5.2（LTS 长期支持版，支持到 2028 年 4 月）</strong>。下面这些新特性本书都会用到：</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128202;</span><h4>Admin 分面计数 <small>(5.0)</small></h4><p>过滤器旁显示每个选项有多少条记录，本章就会用到 <code>show_facets</code>。</p></div>
+  <div class="card"><span class="ic">&#129513;</span><h4>表单字段组 <small>(5.0)</small></h4><p><code>{{ form.name.as_field_group }}</code> 一次渲染标签、控件、帮助文本和错误。</p></div>
+  <div class="card"><span class="ic">&#128451;</span><h4>数据库默认值 <small>(5.0)</small></h4><p><code>db_default=Now()</code> 让数据库自己算默认值；还有 <code>GeneratedField</code> 生成列。</p></div>
+  <div class="card"><span class="ic">&#127991;</span><h4>更简洁的 choices <small>(5.0)</small></h4><p>直接写 <code>choices=Status</code>，不必再写 <code>Status.choices</code>。</p></div>
+  <div class="card"><span class="ic">&#128279;</span><h4><code>{% querystring %}</code> <small>(5.1)</small></h4><p>生成分页链接时保留其他查询参数，第 2 章的分页模板在用。</p></div>
+  <div class="card"><span class="ic">&#128273;</span><h4>复合主键 <small>(5.2)</small></h4><p><code>CompositePrimaryKey</code>，本章仓库代码里的“收藏”功能就用了它。</p></div>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 5.2 对初学者很友好的一点：shell 自动导入</div>
+  <p>
+    从 Django 5.2 开始，<code>python manage.py shell</code> 会<strong>自动导入所有已安装应用的模型</strong>。
+    书里每次都要先 <code>from blog.models import Post</code>，在 5.2 里可以直接敲 <code>Post.objects.all()</code>。
+  </p>
+</div>
+
+<h2 id="setup">准备环境：Python、虚拟环境与 Django</h2>
+
+<p>
+  Django 5.2 支持 Python 3.10 及以上（书中用 3.12）。先确认 Python 版本：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+python3 --version        # Windows 上用 py --version
+# Python 3.12.3
+</pre>
+</div>
+
+<h3>为什么要用虚拟环境</h3>
+
+<p>
+  同一台机器上的不同项目，常常需要同一个库的不同版本。如果都装进系统 Python，升级一个就可能搞坏另一个。
+  <strong>虚拟环境</strong>给每个项目一份独立的 Python 和 <code>site-packages</code> 目录。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="每个虚拟环境都有独立的包目录，互不干扰">
+  <rect class="bx-d" x="20" y="20" width="720" height="164" rx="12"/>
+  <text class="sm" x="36" y="42">你的电脑（系统 Python 3.12）</text>
+
+  <rect class="bx-a" x="44" y="58" width="310" height="110" rx="10"/>
+  <text class="ttl on-a" x="199" y="82" text-anchor="middle">my_env/（博客项目）</text>
+  <text class="mono sm" x="64" y="108">Django 5.2</text>
+  <text class="mono sm" x="64" y="128">django-taggit 5.0</text>
+  <text class="mono sm" x="64" y="148">psycopg 3.1</text>
+
+  <rect class="bx-b" x="406" y="58" width="310" height="110" rx="10"/>
+  <text class="ttl on-b" x="561" y="82" text-anchor="middle">old_env/（旧项目）</text>
+  <text class="mono sm" x="426" y="108">Django 4.2</text>
+  <text class="mono sm" x="426" y="128">celery 5.2</text>
+  <text class="sm on-g" x="426" y="148">&#10003; 两边互不影响</text>
+</svg>
+<figcaption>图 1-2　虚拟环境 = 每个项目一套独立的依赖</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m venv my_env              # 创建（Windows: py -m venv my_env）
+source my_env/bin/activate         # 激活（Windows: .\my_env\Scripts\activate）
+python -m pip install "Django~=5.2"
+python -m django --version         # 看到 5.2.x 就成功了
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 依赖用 requirements.txt 锁住</div>
+  <p>
+    仓库每一章都有一个 <code>requirements.txt</code>，一条命令装齐：<code>python -m pip install -r requirements.txt</code>。
+    这里的 <code>Django~=5.2</code> 表示“5.2.x 中最新的”，能自动拿到安全补丁又不会跳到 6.0。
+  </p>
+</div>
+
+<h2 id="project">项目与应用</h2>
+
+<p>这是 Django 最先要搞清的两个词：</p>
+
+<ul>
+  <li><strong>项目（project）</strong>：一个网站的整体配置 —— 数据库连哪、启用了哪些应用、根 URL 是什么。</li>
+  <li><strong>应用（app）</strong>：一块独立的功能，包含自己的模型、视图、模板和 URL。比如博客、论坛、购物车。一个应用可以被多个项目复用。</li>
+</ul>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="一个 Django 项目包含多个应用，应用可以在项目间复用">
+  <rect class="bx-a" x="20" y="20" width="520" height="200" rx="12"/>
+  <text class="ttl on-a" x="40" y="46">mysite 项目</text>
+  <text class="mono sm" x="40" y="68">settings.py · urls.py · wsgi.py · asgi.py</text>
+
+  <rect class="bx-g" x="40" y="88" width="148" height="112" rx="10"/>
+  <text class="ttl on-g" x="114" y="112" text-anchor="middle">blog 应用</text>
+  <text class="mono sm" x="56" y="136">models.py</text>
+  <text class="mono sm" x="56" y="154">views.py</text>
+  <text class="mono sm" x="56" y="172">urls.py</text>
+  <text class="mono sm" x="56" y="190">templates/</text>
+
+  <rect class="bx" x="206" y="88" width="148" height="112" rx="10"/>
+  <text class="ttl" x="280" y="112" text-anchor="middle">taggit（第三方）</text>
+  <text class="sm" x="280" y="140" text-anchor="middle">pip 安装的应用</text>
+  <text class="sm" x="280" y="160" text-anchor="middle">第 3 章加入</text>
+
+  <rect class="bx" x="372" y="88" width="148" height="112" rx="10"/>
+  <text class="ttl" x="446" y="112" text-anchor="middle">django.contrib.*</text>
+  <text class="sm" x="446" y="140" text-anchor="middle">admin · auth</text>
+  <text class="sm" x="446" y="160" text-anchor="middle">sessions · messages</text>
+
+  <rect class="bx-d" x="590" y="88" width="150" height="112" rx="10"/>
+  <text class="ttl" x="665" y="112" text-anchor="middle">另一个项目</text>
+  <text class="sm" x="665" y="140" text-anchor="middle">也能装上</text>
+  <text class="sm" x="665" y="160" text-anchor="middle">同一个 blog 应用</text>
+  <path class="ln-d" d="M190 150 C 300 236, 520 236, 588 160" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 1-3　项目是“网站”，应用是“功能模块”，应用可以被复用</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+django-admin startproject mysite   # 创建项目（别用 django、test 这类会和内置模块重名的名字）
+cd mysite
+python manage.py migrate           # 为内置应用（auth、admin、sessions…）建表
+python manage.py runserver         # 启动开发服务器 → http://127.0.0.1:8000/
+python manage.py startapp blog     # 创建 blog 应用
+</pre>
+</div>
+
+<div class="code" data-lang="text" data-file="生成的目录结构">
+<pre>
+mysite/                 ← 外层：只是个容器，名字随便改
+├── manage.py           ← 命令行工具，几乎不用改
+├── mysite/             ← 项目的 Python 包
+│   ├── __init__.py
+│   ├── settings.py     ← 所有配置
+│   ├── urls.py         ← 根 URL 配置
+│   ├── asgi.py         ← 异步服务器入口（第 16 章用）
+│   └── wsgi.py         ← 同步服务器入口（第 17 章用）
+└── blog/               ← startapp 生成的应用
+    ├── admin.py        ← 注册到管理后台
+    ├── apps.py         ← 应用配置类 BlogConfig
+    ├── migrations/     ← 数据库迁移文件
+    ├── models.py       ← 数据模型
+    ├── tests.py        ← 测试
+    └── views.py        ← 视图
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; runserver 只能用来开发</div>
+  <p>
+    开发服务器会自动重载代码，但它没做过安全和性能加固。生产环境要用 Gunicorn / uWSGI（WSGI）
+    或 Daphne / Uvicorn（ASGI），第 17 章会讲。另外新增文件时自动重载有时察觉不到，需要手动重启。
+  </p>
+</div>
+
+<h3>settings.py 里你需要先认识的几项</h3>
+
+<div class="tw">
+<table>
+  <tr><th>配置项</th><th>作用</th><th>注意</th></tr>
+  <tr><td><code>DEBUG</code></td><td>出错时显示详细报错页</td><td><strong>生产环境必须为 False</strong>，否则会泄露源码和配置</td></tr>
+  <tr><td><code>SECRET_KEY</code></td><td>签名会话、CSRF 令牌、密码重置链接等</td><td>泄露等于别人能伪造你的签名。不能写死在代码里</td></tr>
+  <tr><td><code>ALLOWED_HOSTS</code></td><td>允许访问的域名</td><td>DEBUG=False 时必须配置，否则所有请求 400</td></tr>
+  <tr><td><code>INSTALLED_APPS</code></td><td>启用哪些应用</td><td>新建的应用要加进来，Django 才会加载它的模型、模板</td></tr>
+  <tr><td><code>MIDDLEWARE</code></td><td>中间件列表</td><td>顺序有意义，别随手调换</td></tr>
+  <tr><td><code>DATABASES</code></td><td>数据库连接</td><td>默认 SQLite，第 3 章换成 PostgreSQL</td></tr>
+  <tr><td><code>USE_TZ</code></td><td>启用时区感知的时间</td><td>保持 True：数据库存 UTC，显示时再转换</td></tr>
+</table>
+</div>
+
+<p>新建应用后，把它的配置类加到 <code>INSTALLED_APPS</code>：</p>
+
+<div class="code" data-lang="py" data-file="mysite/settings.py">
+<pre>
+INSTALLED_APPS = [
+    'django.contrib.admin',
+    'django.contrib.auth',
+    'django.contrib.contenttypes',
+    'django.contrib.sessions',
+    'django.contrib.messages',
+    'django.contrib.staticfiles',
+    'blog.apps.BlogConfig',      # ← 新增：我们的博客应用
+]
+</pre>
+</div>
+
+<h2 id="models">设计数据模型</h2>
+
+<p>
+  <strong>模型</strong>就是一个继承 <code>django.db.models.Model</code> 的 Python 类。
+  一个模型对应数据库里一张表，类里的每个字段属性对应表里的一列。
+  我们一步步把博客文章模型 <code>Post</code> 搭起来。
+</p>
+
+<h3>第一步：最基本的字段</h3>
+
+<div class="code" data-lang="py" data-file="blog/models.py">
+<pre>
+from django.db import models
+
+
+class Post(models.Model):
+    title = models.CharField(max_length=250)   # → VARCHAR(250)
+    slug = models.SlugField(max_length=250)    # → VARCHAR(250)，默认带索引
+    body = models.TextField()                  # → TEXT
+
+    def __str__(self):
+        return self.title                      # 在 Admin、shell 里显示的名字
+</pre>
+</div>
+
+<p>
+  <strong>slug</strong> 是一个只含字母、数字、下划线、连字符的短标签，用来做好看的 URL。
+  比如标题 “Django Reinhardt: A legend of Jazz” 的 slug 可以是 <code>django-reinhardt-legend-jazz</code>。
+  你没有定义主键时，Django 会自动加一个自增的 <code>id</code>（类型由 <code>DEFAULT_AUTO_FIELD</code> 决定，默认 64 位的 <code>BigAutoField</code>）。
+</p>
+
+<h3>第二步：时间、排序与索引</h3>
+
+<div class="code" data-lang="py" data-file="blog/models.py">
+<pre>
+from django.utils import timezone
+
+
+class Post(models.Model):
+    # ...
+    publish = models.DateTimeField(default=timezone.now)  # 发布时间，默认“现在”
+    created = models.DateTimeField(auto_now_add=True)     # 创建时自动填，之后不变
+    updated = models.DateTimeField(auto_now=True)         # 每次 save() 都自动更新
+
+    class Meta:
+        ordering = ['-publish']                  # 默认按发布时间倒序
+        indexes = [
+            models.Index(fields=['-publish']),   # 为排序字段建降序索引
+        ]
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#9733; <code>default=timezone.now</code> 不要写成 <code>timezone.now()</code></div>
+  <p>
+    传的是函数本身，Django 每次创建对象时调用它；加了括号就变成“模块加载那一刻的时间”，所有文章都会是同一个时间。
+    Django 5 还可以写 <code>db_default=Now()</code>，让数据库用 <code>NOW()</code> 生成默认值。
+  </p>
+</div>
+
+<h3>第三步：状态字段 —— 用枚举类定义选项</h3>
+
+<div class="code" data-lang="py" data-file="blog/models.py">
+<pre>
+class Post(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = 'DF', 'Draft'            # 存进数据库的值, 给人看的标签
+        PUBLISHED = 'PB', 'Published'
+
+    # ...
+    status = models.CharField(
+        max_length=2,
+        choices=Status,                  # Django 5 起可以直接传枚举类
+        default=Status.DRAFT,
+    )
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="python manage.py shell">
+<pre>
+>>> Post.Status.choices     # [('DF', 'Draft'), ('PB', 'Published')]
+>>> Post.Status.labels      # ['Draft', 'Published']
+>>> Post.Status.values      # ['DF', 'PB']
+>>> Post.Status.names       # ['DRAFT', 'PUBLISHED']
+>>> Post.Status.PUBLISHED   # 在代码任何地方都用它，而不是写死 'PB'
+</pre>
+</div>
+
+<h3>第四步：作者 —— 多对一关系</h3>
+
+<div class="code" data-lang="py" data-file="blog/models.py">
+<pre>
+from django.conf import settings
+
+
+class Post(models.Model):
+    # ...
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,        # 指向“当前项目的用户模型”，而不是写死 User
+        on_delete=models.CASCADE,        # 用户被删，他的文章一起删
+        related_name='blog_posts',       # 反向访问名：user.blog_posts.all()
+    )
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="一个用户可以写多篇文章，文章表的 author_id 列指向用户表">
+  <rect class="bx-b" x="30" y="70" width="170" height="90" rx="10"/>
+  <text class="ttl on-b" x="115" y="96" text-anchor="middle">auth_user</text>
+  <text class="mono sm" x="48" y="122">id = 1</text>
+  <text class="mono sm" x="48" y="142">username = 'admin'</text>
+
+  <rect class="bx-a" x="400" y="16" width="330" height="54" rx="8"/>
+  <text class="mono sm" x="416" y="38">blog_post  id=10  title='Who was Django…'</text>
+  <text class="mono sm on-a" x="416" y="58">author_id = 1</text>
+  <rect class="bx-a" x="400" y="86" width="330" height="54" rx="8"/>
+  <text class="mono sm" x="416" y="108">blog_post  id=11  title='Another post'</text>
+  <text class="mono sm on-a" x="416" y="128">author_id = 1</text>
+  <rect class="bx-a" x="400" y="156" width="330" height="54" rx="8"/>
+  <text class="mono sm" x="416" y="178">blog_post  id=12  title='New title'</text>
+  <text class="mono sm on-a" x="416" y="198">author_id = 1</text>
+
+  <path class="ln-a" d="M398 44 C 300 44, 280 100, 202 108" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M398 113 H202" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M398 183 C 300 183, 280 128, 202 120" marker-end="url(#ar-a)"/>
+
+  <text class="sm" x="300" y="222" text-anchor="middle">正向：post.author　　反向：user.blog_posts.all()</text>
+  <text class="sm" x="115" y="186" text-anchor="middle">“一”</text>
+  <text class="sm" x="566" y="226" text-anchor="middle">“多”</text>
+</svg>
+<figcaption>图 1-4　ForeignKey：外键列 <code>author_id</code> 放在“多”的一方</figcaption>
+</figure>
+
+<div class="box note">
+  <div class="t">&#9432; on_delete 的常见取值</div>
+  <p>
+    <code>CASCADE</code> 级联删除；<code>PROTECT</code> 有关联时禁止删除；<code>SET_NULL</code> 置空（字段要 <code>null=True</code>）；
+    <code>SET_DEFAULT</code> 设为默认值；<code>RESTRICT</code> 类似 PROTECT 但允许被级联删除。
+    文章跟着作者一起删未必合理 —— 真实项目里经常用 <code>PROTECT</code> 或软删除，见本章末的点评。
+  </p>
+</div>
+
+<h3>完整的 Post 模型</h3>
+
+<p>最后加上自定义管理器和 <code>get_absolute_url()</code>（后者第 2 章详细讲），就是仓库里 <code>Chapter01/mysite/blog/models.py</code> 的样子：</p>
+
+<div class="code" data-lang="py" data-file="blog/models.py">
+<pre>
+from django.conf import settings
+from django.db import models
+from django.urls import reverse
+from django.utils import timezone
+
+
+class PublishedManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(status=Post.Status.PUBLISHED)
+
+
+class Post(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = 'DF', 'Draft'
+        PUBLISHED = 'PB', 'Published'
+
+    title = models.CharField(max_length=250)
+    slug = models.SlugField(max_length=250)
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='blog_posts',
+    )
+    body = models.TextField()
+    publish = models.DateTimeField(default=timezone.now)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+    status = models.CharField(max_length=2, choices=Status, default=Status.DRAFT)
+
+    objects = models.Manager()        # 默认管理器
+    published = PublishedManager()    # 自定义管理器
+
+    class Meta:
+        ordering = ['-publish']
+        indexes = [models.Index(fields=['-publish'])]
+
+    def __str__(self):
+        return self.title
+
+    def get_absolute_url(self):
+        return reverse('blog:post_detail', args=[self.id])
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="Post 模型的字段与 blog_post 表的列一一对应">
+  <rect class="bx-a" x="20" y="16" width="300" height="300" rx="12"/>
+  <text class="ttl on-a" x="170" y="42" text-anchor="middle">class Post(models.Model)</text>
+  <text class="mono sm" x="40" y="72">(自动) id</text>
+  <text class="mono sm" x="40" y="100">title   CharField(250)</text>
+  <text class="mono sm" x="40" y="128">slug    SlugField(250)</text>
+  <text class="mono sm" x="40" y="156">author  ForeignKey(User)</text>
+  <text class="mono sm" x="40" y="184">body    TextField</text>
+  <text class="mono sm" x="40" y="212">publish DateTimeField</text>
+  <text class="mono sm" x="40" y="240">created DateTimeField</text>
+  <text class="mono sm" x="40" y="268">updated DateTimeField</text>
+  <text class="mono sm" x="40" y="296">status  CharField(2)</text>
+
+  <rect class="bx-b" x="440" y="16" width="300" height="300" rx="12"/>
+  <text class="ttl on-b" x="590" y="42" text-anchor="middle">表 blog_post</text>
+  <text class="mono sm" x="460" y="72">id        bigint PK 自增</text>
+  <text class="mono sm" x="460" y="100">title     varchar(250)</text>
+  <text class="mono sm" x="460" y="128">slug      varchar(250) +索引</text>
+  <text class="mono sm" x="460" y="156">author_id bigint FK +索引</text>
+  <text class="mono sm" x="460" y="184">body      text</text>
+  <text class="mono sm" x="460" y="212">publish   datetime +降序索引</text>
+  <text class="mono sm" x="460" y="240">created   datetime</text>
+  <text class="mono sm" x="460" y="268">updated   datetime</text>
+  <text class="mono sm" x="460" y="296">status    varchar(2)</text>
+
+  <path class="ln-d" d="M322 68 H436"/>
+  <path class="ln-d" d="M322 96 H436"/>
+  <path class="ln-d" d="M322 124 H436"/>
+  <path class="ln-a" d="M322 152 H436" marker-end="url(#ar-a)"/>
+  <path class="ln-d" d="M322 180 H436"/>
+  <path class="ln-d" d="M322 208 H436"/>
+  <path class="ln-d" d="M322 236 H436"/>
+  <path class="ln-d" d="M322 264 H436"/>
+  <path class="ln-d" d="M322 292 H436"/>
+  <text class="sm on-a" x="380" y="146" text-anchor="middle">加 _id 后缀</text>
+</svg>
+<figcaption>图 1-5　模型字段 → 表的列。表名 = 应用名_模型名小写</figcaption>
+</figure>
+
+<h2 id="migrations">迁移：把模型同步到数据库</h2>
+
+<p>
+  你改了 <code>models.py</code>，数据库并不会自动跟着变。Django 的<strong>迁移系统</strong>记录模型的每一次变化，
+  生成可以提交到 Git 的迁移文件，再把这些变化应用到数据库。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="迁移流程：修改模型、生成迁移文件、查看 SQL、应用到数据库">
+  <rect class="bx-a" x="16" y="60" width="130" height="64" rx="10"/>
+  <text class="ttl on-a" x="81" y="88" text-anchor="middle">改 models.py</text>
+  <text class="sm" x="81" y="108" text-anchor="middle">加字段/加模型</text>
+
+  <rect class="bx" x="206" y="60" width="160" height="64" rx="10"/>
+  <text class="mono" x="286" y="88" text-anchor="middle">0001_initial.py</text>
+  <text class="sm" x="286" y="108" text-anchor="middle">迁移文件（提交到 Git）</text>
+
+  <rect class="bx-b" x="436" y="60" width="130" height="64" rx="10"/>
+  <text class="ttl on-b" x="501" y="88" text-anchor="middle">数据库</text>
+  <text class="sm" x="501" y="108" text-anchor="middle">建表/改表</text>
+
+  <rect class="bx-d" x="610" y="60" width="134" height="64" rx="10"/>
+  <text class="mono sm" x="677" y="88" text-anchor="middle">django_migrations</text>
+  <text class="sm" x="677" y="108" text-anchor="middle">记录“已应用”</text>
+
+  <path class="ln-a" d="M148 92 H202" marker-end="url(#ar-a)"/>
+  <text class="mono sm" x="175" y="48" text-anchor="middle">makemigrations</text>
+  <path class="ln-b" d="M368 92 H432" marker-end="url(#ar-b)"/>
+  <text class="mono sm" x="400" y="48" text-anchor="middle">migrate</text>
+  <path class="ln-d" d="M568 92 H606" marker-end="url(#ar)"/>
+
+  <path class="ln-d" d="M286 126 V170"/>
+  <rect class="bx-d" x="196" y="170" width="180" height="30" rx="6"/>
+  <text class="mono sm" x="286" y="190" text-anchor="middle">sqlmigrate blog 0001</text>
+  <text class="sm" x="480" y="190">↖ 只打印 SQL，不执行 —— 用来学习和审查</text>
+</svg>
+<figcaption>图 1-6　迁移三步曲：生成 → （查看）→ 应用</figcaption>
+</figure>
+
+<div class="code" data-lang="bash">
+<pre>
+python manage.py makemigrations blog     # 生成 blog/migrations/0001_initial.py
+python manage.py sqlmigrate blog 0001    # 看看它会执行什么 SQL
+python manage.py migrate                 # 真正应用到数据库
+</pre>
+</div>
+
+<div class="code" data-lang="sql" data-file="sqlmigrate 的输出（SQLite）">
+<pre>
+BEGIN;
+-- Create model Post
+CREATE TABLE "blog_post" (
+  "id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
+  "title" varchar(250) NOT NULL,
+  "slug" varchar(250) NOT NULL,
+  "body" text NOT NULL,
+  "publish" datetime NOT NULL,
+  "created" datetime NOT NULL,
+  "updated" datetime NOT NULL,
+  "status" varchar(10) NOT NULL,
+  "author_id" integer NOT NULL REFERENCES "auth_user" ("id") DEFERRABLE INITIALLY DEFERRED);
+CREATE INDEX "blog_post_publish_bb7600_idx" ON "blog_post" ("publish" DESC);
+CREATE INDEX "blog_post_slug_b95473f2" ON "blog_post" ("slug");
+CREATE INDEX "blog_post_author_id_dd7a8485" ON "blog_post" ("author_id");
+COMMIT;
+</pre>
+</div>
+
+<p>注意这里自动建了三个索引：我们在 <code>Meta.indexes</code> 里声明的 <code>publish</code> 降序索引，以及 <code>SlugField</code> 和 <code>ForeignKey</code> 默认附带的索引。</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 迁移文件是代码，要提交、要审查</div>
+  <p>
+    团队开发时，每个人都用同一套迁移文件重建数据库。不要把 <code>migrations/</code> 加进 <code>.gitignore</code>，
+    也不要随手删掉已经被别人应用过的迁移。
+  </p>
+</div>
+
+<h2 id="admin">管理后台</h2>
+
+<p>
+  Django 最出名的“杀手锏”之一：读取模型的元数据，<strong>自动生成</strong>一个可以增删改查的后台。
+  先建一个超级用户：
+</p>
+
+<div class="code" data-lang="bash">
+<pre>
+python manage.py createsuperuser
+# 然后访问 http://127.0.0.1:8000/admin/
+</pre>
+</div>
+
+<p>最简单的注册只要一行 <code>admin.site.register(Post)</code>。但用 <code>ModelAdmin</code> 可以定制得非常舒服：</p>
+
+<div class="code" data-lang="py" data-file="blog/admin.py">
+<pre>
+from django.contrib import admin
+
+from .models import Post
+
+
+@admin.register(Post)
+class PostAdmin(admin.ModelAdmin):
+    list_display = ['title', 'slug', 'author', 'publish', 'status']
+    list_filter = ['status', 'created', 'publish', 'author']
+    search_fields = ['title', 'body']
+    prepopulated_fields = {'slug': ('title',)}
+    raw_id_fields = ['author']
+    date_hierarchy = 'publish'
+    ordering = ['status', 'publish']
+    show_facets = admin.ShowFacets.ALWAYS      # Django 5.0：过滤器显示计数
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>选项</th><th>效果</th></tr>
+  <tr><td><code>list_display</code></td><td>列表页显示哪些列</td></tr>
+  <tr><td><code>list_filter</code></td><td>右侧过滤栏（外键过滤器在有 2 个以上对象时才出现）</td></tr>
+  <tr><td><code>search_fields</code></td><td>出现搜索框，按这些字段搜索</td></tr>
+  <tr><td><code>prepopulated_fields</code></td><td>输入标题时自动生成 slug</td></tr>
+  <tr><td><code>raw_id_fields</code></td><td>外键用 ID 输入框 + 放大镜代替下拉框（用户上千时下拉框会卡死）</td></tr>
+  <tr><td><code>date_hierarchy</code></td><td>搜索框下方的按年/月/日导航</td></tr>
+  <tr><td><code>ordering</code></td><td>后台列表的默认排序（覆盖模型的 Meta.ordering）</td></tr>
+  <tr><td><code>show_facets</code></td><td>在过滤选项旁显示匹配数量，如 “Published (3)”</td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 后台是给“内部人员”用的</div>
+  <p>
+    Admin 适合编辑、运营、管理员管理数据。不要把它当成面向普通用户的界面来改造 —— 那样会越改越痛苦。
+    这也是 <em>Two Scoops of Django</em> 反复强调的一点。
+  </p>
+</div>
+
+<h2 id="orm">ORM 与 QuerySet</h2>
+
+<p>
+  <strong>ORM（对象关系映射）</strong>让你用 Python 对象的方式操作数据库，不必手写 SQL。
+  它支持 PostgreSQL、MySQL、MariaDB、SQLite、Oracle。核心概念是 <strong>QuerySet</strong>：
+  一个“待执行的查询”，相当于一条 <code>SELECT</code>，可以不断叠加过滤条件。
+</p>
+
+<h3>增、改、删</h3>
+
+<div class="code" data-lang="py" data-file="python manage.py shell">
+<pre>
+>>> from django.contrib.auth.models import User
+>>> from blog.models import Post
+>>> user = User.objects.get(username='admin')
+
+# 创建：先建对象再 save()（INSERT）
+>>> post = Post(title='Another post', slug='another-post', body='Post body.', author=user)
+>>> post.save()
+
+# 一步到位
+>>> Post.objects.create(title='One more post', slug='one-more-post', body='...', author=user)
+
+# 有就取，没有就建；返回 (对象, 是否新建)
+>>> user2, created = User.objects.get_or_create(username='user2')
+
+# 修改：改属性后 save()（UPDATE）—— 不 save() 数据库就不会变
+>>> post.title = 'New title'
+>>> post.save()
+
+# 删除：CASCADE 的关联对象会一起删
+>>> post.delete()
+</pre>
+</div>
+
+<h3>查：get / all / filter / exclude / order_by</h3>
+
+<div class="code" data-lang="py">
+<pre>
+Post.objects.get(id=1)                 # 只取一个：0 个抛 DoesNotExist，多个抛 MultipleObjectsReturned
+Post.objects.all()                     # 全部
+Post.objects.filter(publish__year=2024, author__username='admin')   # 条件之间是 AND
+Post.objects.filter(publish__year=2024).exclude(title__startswith='Why')
+Post.objects.order_by('-title')        # 负号 = 降序；'?' = 随机
+Post.objects.all()[:5]                 # LIMIT 5（不支持负索引）
+Post.objects.filter(id__lt=3).count()  # SELECT COUNT(*)
+Post.objects.filter(title__startswith='Why').exists()   # 只判断有没有，比 count() 快
+</pre>
+</div>
+
+<h3>字段查找（field lookups）：双下划线语法</h3>
+
+<div class="tw">
+<table>
+  <tr><th>写法</th><th>含义（SQL）</th></tr>
+  <tr><td><code>id=1</code> / <code>id__exact=1</code></td><td><code>= 1</code></td></tr>
+  <tr><td><code>title__iexact='who'</code></td><td>不区分大小写的相等</td></tr>
+  <tr><td><code>title__contains='Django'</code> / <code>__icontains</code></td><td><code>LIKE '%Django%'</code></td></tr>
+  <tr><td><code>id__in=[1, 3]</code></td><td><code>IN (1, 3)</code></td></tr>
+  <tr><td><code>id__gt=3</code> / <code>__gte</code> / <code>__lt</code> / <code>__lte</code></td><td><code>&gt;</code> <code>&gt;=</code> <code>&lt;</code> <code>&lt;=</code></td></tr>
+  <tr><td><code>title__istartswith='who'</code> / <code>__iendswith</code></td><td>以…开头 / 结尾</td></tr>
+  <tr><td><code>publish__date=date(2024,1,31)</code></td><td>取日期部分比较</td></tr>
+  <tr><td><code>publish__year=2024</code> / <code>__month</code> / <code>__day</code></td><td>按年 / 月 / 日</td></tr>
+  <tr><td><code>author__username='admin'</code></td><td><strong>跨关系查找</strong>：自动 JOIN</td></tr>
+</table>
+</div>
+
+<h3>OR 查询：Q 对象</h3>
+
+<div class="code" data-lang="py">
+<pre>
+from django.db.models import Q
+
+starts_who = Q(title__istartswith='who')
+starts_why = Q(title__istartswith='why')
+Post.objects.filter(starts_who | starts_why)   # |=OR  &amp;=AND  ^=XOR  ~=NOT
+</pre>
+</div>
+
+<h3>QuerySet 是惰性的</h3>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 220" role="img" aria-label="QuerySet 链式调用时不访问数据库，直到被求值时才执行 SQL">
+  <rect class="bx" x="16" y="30" width="120" height="44" rx="8"/>
+  <text class="mono sm" x="76" y="57" text-anchor="middle">Post.objects</text>
+  <rect class="bx" x="160" y="30" width="150" height="44" rx="8"/>
+  <text class="mono sm" x="235" y="57" text-anchor="middle">.filter(year=2024)</text>
+  <rect class="bx" x="334" y="30" width="150" height="44" rx="8"/>
+  <text class="mono sm" x="409" y="57" text-anchor="middle">.exclude(...)</text>
+  <rect class="bx" x="508" y="30" width="130" height="44" rx="8"/>
+  <text class="mono sm" x="573" y="57" text-anchor="middle">.order_by(...)</text>
+  <path class="ln" d="M138 52 H156" marker-end="url(#ar)"/>
+  <path class="ln" d="M312 52 H330" marker-end="url(#ar)"/>
+  <path class="ln" d="M486 52 H504" marker-end="url(#ar)"/>
+  <text class="sm" x="330" y="98" text-anchor="middle">每一步都只是在“拼 SQL”，数据库一次都没被访问</text>
+
+  <path class="ln-a" d="M573 76 V126" marker-end="url(#ar-a)"/>
+  <rect class="bx-a" x="400" y="130" width="340" height="76" rx="10"/>
+  <text class="ttl on-a" x="570" y="152" text-anchor="middle">以下操作才会真正执行 SQL</text>
+  <text class="sm" x="416" y="176">for 迭代 · 切片 [:3] · list() · len() · repr()</text>
+  <text class="sm" x="416" y="196">bool() / if qs: · pickle / 缓存</text>
+
+  <rect class="bx-g" x="16" y="130" width="360" height="76" rx="10"/>
+  <text class="ttl on-g" x="196" y="152" text-anchor="middle">好处</text>
+  <text class="sm" x="32" y="176">可以把查询当变量传来传去，最后才执行</text>
+  <text class="sm" x="32" y="196">模板里 {% for %} 时才查，不用就不查</text>
+</svg>
+<figcaption>图 1-7　惰性求值：先组装，后执行</figcaption>
+</figure>
+
+<div class="box tip">
+  <div class="t">&#128161; 想看生成的 SQL？</div>
+  <p><code>print(Post.objects.filter(title='x').query)</code>。它不是公开 API，只用来学习和调试。第 7 章会用 Django Debug Toolbar 更直观地看。</p>
+</div>
+
+<h3>自定义管理器</h3>
+
+<p>
+  每个模型至少有一个管理器，默认叫 <code>objects</code>。自定义管理器有两种方式：
+  给现有管理器加方法（<code>Post.objects.my_method()</code>），或者改写它返回的初始 QuerySet（<code>Post.published.all()</code>）。
+  本书用了第二种：
+</p>
+
+<div class="code" data-lang="py">
+<pre>
+class PublishedManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(status=Post.Status.PUBLISHED)
+
+class Post(models.Model):
+    # ...
+    objects = models.Manager()      # 显式保留默认管理器！
+    published = PublishedManager()
+
+Post.published.filter(title__startswith='Who')
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 第一个声明的管理器就是“默认管理器”</div>
+  <p>
+    如果你只写了 <code>published = PublishedManager()</code> 而没写 <code>objects</code>，那么 <code>objects</code> 会消失，
+    而且 Admin、<code>dumpdata</code> 等用默认管理器的地方都只能看到已发布文章。所以书里把 <code>objects</code> 放在前面。
+  </p>
+</div>
+
+<h2 id="views">视图、URL 与模板</h2>
+
+<h3>视图：接收请求，返回响应</h3>
+
+<div class="code" data-lang="py" data-file="blog/views.py">
+<pre>
+from django.shortcuts import get_object_or_404, render
+
+from .models import Post
+
+
+def post_list(request):
+    posts = Post.published.all()
+    return render(request, 'blog/post/list.html', {'posts': posts})
+
+
+def post_detail(request, id):
+    post = get_object_or_404(Post, id=id, status=Post.Status.PUBLISHED)
+    return render(request, 'blog/post/detail.html', {'post': post})
+</pre>
+</div>
+
+<ul>
+  <li>每个视图的第一个参数都是 <code>request</code>（<code>HttpRequest</code> 对象）。</li>
+  <li><code>render()</code> 把模板和上下文字典渲染成 <code>HttpResponse</code>，并且会带上<strong>上下文处理器</strong>提供的变量（比如 <code>user</code>）。</li>
+  <li><code>get_object_or_404()</code> = <code>get()</code> + 找不到时抛 <code>Http404</code>，省去手写 <code>try/except DoesNotExist</code>。</li>
+</ul>
+
+<h3>URL：两层配置 + 命名空间</h3>
+
+<div class="code" data-lang="py" data-file="blog/urls.py">
+<pre>
+from django.urls import path
+
+from . import views
+
+app_name = 'blog'      # 应用命名空间
+
+urlpatterns = [
+    path('', views.post_list, name='post_list'),
+    path('&lt;int:id&gt;/', views.post_detail, name='post_detail'),
+]
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="mysite/urls.py">
+<pre>
+from django.contrib import admin
+from django.urls import include, path
+
+urlpatterns = [
+    path('admin/', admin.site.urls),
+    path('blog/', include('blog.urls', namespace='blog')),
+]
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="URL 解析：根配置匹配 blog 前缀后交给应用配置，应用配置匹配剩余部分并调用视图；反向解析方向相反">
+  <text class="ttl" x="20" y="24">正向解析：URL → 视图</text>
+  <rect class="bx" x="20" y="36" width="130" height="44" rx="8"/>
+  <text class="mono" x="85" y="63" text-anchor="middle">/blog/3/</text>
+  <rect class="bx-d" x="190" y="36" width="170" height="44" rx="8"/>
+  <text class="mono sm" x="275" y="56" text-anchor="middle">mysite/urls.py</text>
+  <text class="sm" x="275" y="72" text-anchor="middle">匹配 'blog/'，剩 '3/'</text>
+  <rect class="bx-d" x="400" y="36" width="170" height="44" rx="8"/>
+  <text class="mono sm" x="485" y="56" text-anchor="middle">blog/urls.py</text>
+  <text class="sm" x="485" y="72" text-anchor="middle">匹配 '&lt;int:id&gt;/'</text>
+  <rect class="bx-a" x="610" y="36" width="134" height="44" rx="8"/>
+  <text class="mono sm on-a" x="677" y="56" text-anchor="middle">post_detail(</text>
+  <text class="mono sm on-a" x="677" y="72" text-anchor="middle">request, id=3)</text>
+  <path class="ln" d="M152 58 H186" marker-end="url(#ar)"/>
+  <path class="ln" d="M362 58 H396" marker-end="url(#ar)"/>
+  <path class="ln" d="M572 58 H606" marker-end="url(#ar)"/>
+  <text class="sm" x="20" y="102">&lt;int:id&gt; 是路径转换器：只匹配整数，并把它转成 int 传给视图。另有 str、slug、uuid、path。</text>
+
+  <text class="ttl" x="20" y="146">反向解析：名字 → URL（永远别在模板里写死 URL）</text>
+  <rect class="bx-g" x="20" y="160" width="300" height="44" rx="8"/>
+  <text class="mono sm on-g" x="170" y="178" text-anchor="middle">{% url 'blog:post_detail' 3 %}</text>
+  <text class="mono sm on-g" x="170" y="196" text-anchor="middle">reverse('blog:post_detail', args=[3])</text>
+  <path class="ln-g" d="M322 182 H396" marker-end="url(#ar-g)"/>
+  <rect class="bx" x="400" y="160" width="130" height="44" rx="8"/>
+  <text class="mono" x="465" y="187" text-anchor="middle">/blog/3/</text>
+  <text class="sm" x="20" y="232">'blog' 是命名空间，'post_detail' 是 URL 名字。以后改 URL 格式，只改 urls.py 一处即可。</text>
+</svg>
+<figcaption>图 1-8　URL 的正向匹配与反向解析</figcaption>
+</figure>
+
+<h3>模板：继承与“挖坑填坑”</h3>
+
+<p>Django 模板语言有三种语法：</p>
+
+<dl class="gloss">
+  <dt>{% tag %}</dt><dd>模板标签：控制逻辑，如 <code>{% for %}</code>、<code>{% if %}</code>、<code>{% block %}</code>、<code>{% url %}</code></dd>
+  <dt>{{ variable }}</dt><dd>模板变量：渲染时替换成值，默认会做 HTML 转义</dd>
+  <dt>{{ var|filter }}</dt><dd>过滤器：加工变量，可以串联，如 <code>{{ post.body|truncatewords:30|linebreaks }}</code></dd>
+</dl>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 260" role="img" aria-label="模板继承：base.html 定义 block，list.html 继承并填充 block">
+  <rect class="bx-b" x="20" y="20" width="250" height="220" rx="12"/>
+  <text class="ttl on-b" x="145" y="44" text-anchor="middle">blog/base.html（骨架）</text>
+  <text class="mono sm" x="36" y="70">&lt;title&gt;</text>
+  <rect class="bx-d" x="90" y="58" width="160" height="20" rx="4"/>
+  <text class="mono sm" x="170" y="72" text-anchor="middle">block title</text>
+  <text class="mono sm" x="36" y="104">&lt;div id="content"&gt;</text>
+  <rect class="bx-d" x="48" y="114" width="200" height="56" rx="4"/>
+  <text class="mono sm" x="148" y="146" text-anchor="middle">block content</text>
+  <text class="mono sm" x="36" y="192">&lt;div id="sidebar"&gt;</text>
+  <text class="sm" x="48" y="214">My blog…（所有页面共享）</text>
+
+  <rect class="bx-a" x="310" y="20" width="200" height="220" rx="12"/>
+  <text class="ttl on-a" x="410" y="44" text-anchor="middle">post/list.html</text>
+  <text class="mono sm" x="324" y="72">{% extends "blog/base.html" %}</text>
+  <text class="mono sm" x="324" y="104">{% block title %}</text>
+  <text class="mono sm" x="336" y="122">My Blog</text>
+  <text class="mono sm" x="324" y="140">{% endblock %}</text>
+  <text class="mono sm" x="324" y="168">{% block content %}</text>
+  <text class="mono sm" x="336" y="186">{% for post in posts %}</text>
+  <text class="mono sm" x="336" y="204">…</text>
+  <text class="mono sm" x="324" y="222">{% endblock %}</text>
+
+  <path class="ln-a" d="M308 118 C 280 110, 270 80, 252 70" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M308 176 C 290 170, 270 150, 250 144" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-g" x="550" y="20" width="190" height="220" rx="12"/>
+  <text class="ttl on-g" x="645" y="44" text-anchor="middle">最终 HTML</text>
+  <text class="sm" x="566" y="74">&lt;title&gt;My Blog</text>
+  <text class="sm" x="566" y="104">文章 1 标题</text>
+  <text class="sm" x="566" y="124">文章 2 标题</text>
+  <text class="sm" x="566" y="144">文章 3 标题</text>
+  <text class="sm" x="566" y="192">侧边栏（来自 base）</text>
+  <path class="ln" d="M512 130 H546" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 1-9　父模板“挖坑”（block），子模板“填坑”</figcaption>
+</figure>
+
+<div class="code" data-lang="html" data-file="blog/templates/blog/base.html">
+<pre>
+{% load static %}
+&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;
+  &lt;title&gt;{% block title %}{% endblock %}&lt;/title&gt;
+  &lt;link href="{% static "css/blog.css" %}" rel="stylesheet"&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  &lt;div id="content"&gt;
+    {% block content %}
+    {% endblock %}
+  &lt;/div&gt;
+  &lt;div id="sidebar"&gt;
+    &lt;h2&gt;My blog&lt;/h2&gt;
+    &lt;p&gt;This is my blog.&lt;/p&gt;
+  &lt;/div&gt;
+&lt;/body&gt;
+&lt;/html&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="blog/templates/blog/post/list.html">
+<pre>
+{% extends "blog/base.html" %}
+
+{% block title %}My Blog{% endblock %}
+
+{% block content %}
+  &lt;h1&gt;My Blog&lt;/h1&gt;
+  {% for post in posts %}
+    &lt;h2&gt;
+      &lt;a href="{% url 'blog:post_detail' post.id %}"&gt;{{ post.title }}&lt;/a&gt;
+    &lt;/h2&gt;
+    &lt;p class="date"&gt;Published {{ post.publish }} by {{ post.author }}&lt;/p&gt;
+    {{ post.body|truncatewords:30|linebreaks }}
+  {% endfor %}
+{% endblock %}
+</pre>
+</div>
+
+<div class="code" data-lang="html" data-file="blog/templates/blog/post/detail.html">
+<pre>
+{% extends "blog/base.html" %}
+
+{% block title %}{{ post.title }}{% endblock %}
+
+{% block content %}
+  &lt;h1&gt;{{ post.title }}&lt;/h1&gt;
+  &lt;p class="date"&gt;Published {{ post.publish }} by {{ post.author }}&lt;/p&gt;
+  {{ post.body|linebreaks }}
+{% endblock %}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么模板路径是 <code>blog/templates/blog/...</code>，blog 写两遍？</div>
+  <p>
+    <code>APP_DIRS=True</code> 时，Django 会把<strong>所有应用</strong>的 <code>templates/</code> 目录合并成一个搜索空间。
+    如果两个应用都有 <code>templates/list.html</code>，就会互相覆盖。多套一层以应用名命名的目录，相当于给模板加了命名空间。
+  </p>
+</div>
+
+<h2 id="cycle">完整的请求/响应周期</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="完整请求周期：请求穿过中间件，经 URL 解析到视图，视图查询模型、渲染模板，响应再反向穿过中间件">
+  <rect class="bx" x="16" y="120" width="100" height="60" rx="10"/>
+  <text class="ttl" x="66" y="146" text-anchor="middle">浏览器</text>
+  <text class="sm" x="66" y="164" text-anchor="middle">/blog/33/</text>
+
+  <rect class="bx-p" x="146" y="40" width="80" height="220" rx="10"/>
+  <text class="ttl on-p" x="186" y="64" text-anchor="middle">中间件</text>
+  <text class="sm" x="186" y="96" text-anchor="middle">Security</text>
+  <text class="sm" x="186" y="120" text-anchor="middle">Session</text>
+  <text class="sm" x="186" y="144" text-anchor="middle">Common</text>
+  <text class="sm" x="186" y="168" text-anchor="middle">Csrf</text>
+  <text class="sm" x="186" y="192" text-anchor="middle">Auth</text>
+  <text class="sm" x="186" y="216" text-anchor="middle">Messages</text>
+  <text class="sm" x="186" y="240" text-anchor="middle">Clickjack</text>
+
+  <rect class="bx-d" x="262" y="40" width="130" height="60" rx="10"/>
+  <text class="ttl" x="327" y="66" text-anchor="middle">URL 解析</text>
+  <text class="sm" x="327" y="86" text-anchor="middle">第一个匹配就停</text>
+
+  <rect class="bx-a" x="262" y="150" width="130" height="60" rx="10"/>
+  <text class="ttl on-a" x="327" y="176" text-anchor="middle">post_detail</text>
+  <text class="sm" x="327" y="196" text-anchor="middle">(request, id=33)</text>
+
+  <rect class="bx-b" x="440" y="100" width="140" height="60" rx="10"/>
+  <text class="ttl on-b" x="510" y="126" text-anchor="middle">ORM → SQL</text>
+  <text class="sm" x="510" y="146" text-anchor="middle">SELECT … id=33</text>
+
+  <rect class="bx-g" x="440" y="200" width="140" height="60" rx="10"/>
+  <text class="ttl on-g" x="510" y="226" text-anchor="middle">渲染模板</text>
+  <text class="sm" x="510" y="246" text-anchor="middle">detail.html</text>
+
+  <rect class="bx" x="620" y="100" width="120" height="60" rx="10"/>
+  <text class="ttl" x="680" y="126" text-anchor="middle">数据库</text>
+  <text class="sm" x="680" y="146" text-anchor="middle">Post 行</text>
+
+  <path class="ln" d="M118 140 H142" marker-end="url(#ar)"/>
+  <path class="ln" d="M228 70 H258" marker-end="url(#ar)"/>
+  <path class="ln" d="M327 102 V146" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M394 170 L436 138" marker-end="url(#ar-b)"/>
+  <path class="ln" d="M582 130 H616" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M394 196 L436 222" marker-end="url(#ar-g)"/>
+  <path class="ln-a" d="M440 250 H400 V282 H186 V264" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M144 230 H66 V184" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="300" y="296" text-anchor="middle">HttpResponse 反向穿过中间件</text>
+</svg>
+<figcaption>图 1-10　加上中间件后的完整周期：请求“由外向内”，响应“由内向外”</figcaption>
+</figure>
+
+<h3>本章用到的管理命令</h3>
+
+<div class="tw">
+<table>
+  <tr><th>命令</th><th>作用</th></tr>
+  <tr><td><code>django-admin startproject mysite</code></td><td>创建项目</td></tr>
+  <tr><td><code>python manage.py startapp blog</code></td><td>创建应用</td></tr>
+  <tr><td><code>python manage.py makemigrations blog</code></td><td>根据模型变化生成迁移</td></tr>
+  <tr><td><code>python manage.py sqlmigrate blog 0001</code></td><td>查看迁移对应的 SQL</td></tr>
+  <tr><td><code>python manage.py migrate</code></td><td>应用迁移</td></tr>
+  <tr><td><code>python manage.py runserver [ip:port] [--settings=…]</code></td><td>启动开发服务器</td></tr>
+  <tr><td><code>python manage.py shell</code></td><td>交互式 shell（5.2 起自动导入模型）</td></tr>
+  <tr><td><code>python manage.py createsuperuser</code></td><td>创建超级用户</td></tr>
+</table>
+</div>
+
+<h2 id="repo-extra">仓库代码里的彩蛋：用复合主键做“收藏”</h2>
+
+<p>
+  仓库的 <code>Chapter01</code> 比书多了一个“收藏文章”功能，用来演示 <strong>Django 5.2 的复合主键</strong>。
+  这个功能在第 2 章的代码里又被删掉了，所以只在这一章出现。
+</p>
+
+<div class="code" data-lang="py" data-file="Chapter01/mysite/blog/models.py">
+<pre>
+class FavouritePost(models.Model):
+    pk = models.CompositePrimaryKey("user", "post")   # 主键 = (user_id, post_id)
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    post = models.ForeignKey('blog.Post', on_delete=models.CASCADE)
+    created = models.DateTimeField(auto_now_add=True)
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="复合主键表：user_id 与 post_id 组合唯一，同一用户不能重复收藏同一篇文章">
+  <rect class="bx-a" x="20" y="20" width="420" height="150" rx="10"/>
+  <text class="ttl on-a" x="230" y="44" text-anchor="middle">blog_favouritepost</text>
+  <text class="mono sm on-a" x="40" y="72">user_id  post_id  created</text>
+  <text class="mono sm" x="40" y="96">1        10       2024-05-01</text>
+  <text class="mono sm" x="40" y="118">1        12       2024-05-03</text>
+  <text class="mono sm" x="40" y="140">2        10       2024-05-04</text>
+  <text class="mono sm on-r" x="40" y="162">1        10       ✗ 主键冲突，插不进去</text>
+  <rect class="bx-g" x="470" y="20" width="270" height="150" rx="10"/>
+  <text class="ttl on-g" x="605" y="44" text-anchor="middle">复合主键的意义</text>
+  <text class="sm" x="486" y="72">没有多余的自增 id 列</text>
+  <text class="sm" x="486" y="96">(user, post) 天然唯一</text>
+  <text class="sm" x="486" y="120">数据库层面防止重复收藏</text>
+  <text class="sm" x="486" y="144">适合纯“关系表”</text>
+</svg>
+<figcaption>图 1-11　复合主键：用两列的组合唯一标识一行</figcaption>
+</figure>
+
+<p>对应的视图和 URL（节选）：</p>
+
+<div class="code" data-lang="py" data-file="Chapter01/mysite/blog/views.py（节选）">
+<pre>
+def add_favourite(request, id):
+    """ A view to add a post to favourites. Redirects to post detail when favourite added. """
+    post = get_object_or_404(Post, id=id)
+    FavouritePost.objects.get_or_create(user=request.user, post=post)
+    return HttpResponseRedirect(post.get_absolute_url())
+
+
+@login_required
+def favourites(request):
+    favourite_posts = Post.objects.filter(
+        id__in=FavouritePost.objects.filter(user=request.user).values_list('post_id', flat=True)
+    )
+    return render(request, 'blog/post/favourites.html', {'favourite_posts': favourite_posts})
+</pre>
+</div>
+
+<p>这段代码能跑，但有好几个值得学习的问题 —— 放到下面的点评里一起说。</p>
+
+<h2 id="review">代码点评：对照 Django 5.2 与 Two Scoops of Django</h2>
+
+<p>
+  本书是教学代码，目标是“把概念讲清楚”，所以常常省略生产项目里必须做的事。
+  每章结尾我会对照 <strong>Django 5.2 官方最佳实践</strong>和 <strong><em>Two Scoops of Django</em></strong>（下文简称 TSD）的建议逐条点评。
+  标签含义：<span class="tag good">做得好</span> <span class="tag warn">建议改进</span> <span class="tag bad">有问题</span> <span class="tag info">补充知识</span>。
+</p>
+
+<div class="review">
+  <div class="h">&#128269; 第 1 章代码点评 <small>Chapter01/mysite</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 用 <code>settings.AUTH_USER_MODEL</code> 引用用户模型</h4>
+    <p>外键写 <code>settings.AUTH_USER_MODEL</code> 而不是 <code>from django.contrib.auth.models import User</code>，以后换成自定义用户模型也不用改这里。TSD 的写法完全一致。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 枚举类 choices、显式索引、应用命名空间</h4>
+    <p><code>TextChoices</code> 让“魔法字符串”只出现一次；<code>Meta.indexes</code> 为高频排序字段建索引；URL 用 <code>app_name</code> 命名空间、模板用 <code>{% url %}</code> 反向解析。这三个都是值得从第一天就养成的习惯。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> <code>add_favourite</code> 没有登录校验，而且用 GET 修改数据 <span class="src">Chapter01/mysite/blog/views.py:40</span></h4>
+    <p>
+      ① 视图没有 <code>@login_required</code>：匿名用户访问时 <code>request.user</code> 是 <code>AnonymousUser</code>，
+      <code>get_or_create(user=request.user)</code> 会直接抛异常（500 错误）。
+      ② “收藏”是修改数据的操作，却通过一个普通 <code>&lt;a href&gt;</code> 链接（GET）触发。
+      GET 请求不受 CSRF 保护，别的网站放一张 <code>&lt;img src="…/favrourite/add/10/"&gt;</code> 就能让已登录用户在不知情时“收藏”；
+      浏览器预加载、爬虫也可能触发它。HTTP 规定 GET 应当是<strong>安全、幂等</strong>的。
+    </p>
+    <div class="vs">
+      <div class="old"><div class="h">原代码</div>
+<div class="code" data-lang="py"><pre>
+def add_favourite(request, id):
+    post = get_object_or_404(Post, id=id)
+    FavouritePost.objects.get_or_create(
+        user=request.user, post=post
+    )
+    return HttpResponseRedirect(post.get_absolute_url())
+</pre></div></div>
+      <div class="new"><div class="h">建议</div>
+<div class="code" data-lang="py"><pre>
+@login_required
+@require_POST
+def add_favourite(request, post_id):
+    post = get_object_or_404(Post.published, pk=post_id)
+    FavouritePost.objects.get_or_create(
+        user=request.user, post=post
+    )
+    return redirect(post)   # redirect 会调用 get_absolute_url
+</pre></div></div>
+    </div>
+    <p>模板里对应改成一个带 <code>{% csrf_token %}</code> 的小表单按钮。另外 URL 里的 <code>favrourite</code> 是拼写错误（<span class="src">Chapter01/mysite/blog/urls.py:11</span>），并且原代码允许收藏<em>草稿</em>文章（用的是 <code>Post</code> 而不是 <code>Post.published</code>）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 查询可以更简洁、更少 SQL</h4>
+    <p><code>post_detail</code> 用 <code>try/except DoesNotExist</code> 只为判断“是否收藏过”，<code>favourites</code> 用 <code>id__in</code> + 子查询。都可以用更直接的写法：</p>
+<div class="code" data-lang="py"><pre>
+# 是否收藏：只需要 True/False，用 exists()
+is_favourite = (
+    request.user.is_authenticated
+    and FavouritePost.objects.filter(user=request.user, post=post).exists()
+)
+
+# 我的收藏：沿反向关系直接过滤（关系名默认是模型名小写 favouritepost）
+favourite_posts = Post.published.filter(favouritepost__user=request.user)
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 复合主键在 5.2 中的限制</h4>
+    <p>
+      <code>CompositePrimaryKey</code> 是 5.2 新增的，生态还在跟进：其他模型<strong>不能用 ForeignKey 指向</strong>一个复合主键模型；
+      Admin 等组件对它的支持也有限。对“纯关系表”（收藏、点赞、关注）它很合适；
+      如果以后可能被别的表引用，TSD 的一贯建议仍然是“普通自增主键 + <code>UniqueConstraint</code>”：
+    </p>
+<div class="code" data-lang="py"><pre>
+class FavouritePost(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE)
+    post = models.ForeignKey(Post, on_delete=models.CASCADE)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=['user', 'post'], name='unique_favourite'),
+        ]
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 用“QuerySet 方法”代替只改 <code>get_queryset</code> 的管理器 <span class="tag ts">TSD：Fat models / 管理器</span></h4>
+    <p>
+      <code>Post.published.all()</code> 能用，但不能组合：想要“某作者已发布的文章”只能写 <code>Post.published.filter(author=…)</code>，
+      想在关系上用（<code>user.blog_posts.published()</code>）就做不到。把过滤逻辑写在自定义 QuerySet 上，再用 <code>as_manager()</code> 生成管理器，任何地方都能链式调用：
+    </p>
+<div class="code" data-lang="py"><pre>
+class PostQuerySet(models.QuerySet):
+    def published(self):
+        return self.filter(status=Post.Status.PUBLISHED)
+
+    def by_author(self, user):
+        return self.filter(author=user)
+
+
+class Post(models.Model):
+    # ...
+    objects = PostQuerySet.as_manager()
+
+# 用法：可以任意组合，也能用在反向关系上
+Post.objects.published().by_author(user)
+user.blog_posts.published()
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 抽出 TimeStampedModel 抽象基类 <span class="tag ts">TSD：模型继承</span></h4>
+    <p>
+      <code>created</code>/<code>updated</code> 这对字段后面的 Comment、Image、Order、Course 等几乎每个模型都会再写一遍。
+      TSD 推荐做一个<strong>抽象基类</strong>（不建表，只复用字段）放在公共应用里：
+    </p>
+<div class="code" data-lang="py"><pre>
+# core/models.py
+class TimeStampedModel(models.Model):
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+
+
+class Post(TimeStampedModel):
+    ...
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> SECRET_KEY 写死、DEBUG=True <span class="src">Chapter01/mysite/mysite/settings.py:24</span> <span class="tag ts">TSD：设置与环境变量</span></h4>
+    <p>
+      这是 <code>startproject</code> 生成的默认值，开发时无所谓，但它一旦进了 Git 就等于公开了。
+      TSD 的核心原则：<strong>密钥不进版本库，配置随环境变化</strong>。第 2 章仓库代码开始用 <code>python-decouple</code> 读环境变量，
+      第 17 章会拆分 <code>settings/</code> 为 base / local / prod。建议从一开始就这样做：
+    </p>
+<div class="code" data-lang="py"><pre>
+SECRET_KEY = config('SECRET_KEY')
+DEBUG = config('DEBUG', default=False, cast=bool)     # 默认安全：没配置就是 False
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', default='', cast=Csv())
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 删除作者会级联删掉所有文章</h4>
+    <p>
+      <code>on_delete=CASCADE</code> 在教学里最省事，但对内容型网站，“删一个账号就丢一堆文章”通常不是想要的。
+      可以考虑 <code>PROTECT</code>（先转移文章才能删用户）或 <code>SET_NULL</code>（保留文章，作者置空），
+      或者干脆不删用户，只把 <code>is_active</code> 设为 False。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> <code>tests.py</code> 是空的 <span class="tag ts">TSD：测试</span></h4>
+    <p>
+      TSD 的原话大意是“没有测试的代码就是坏掉的代码”。至少为模型方法和视图写几个冒烟测试。Django 自带的 <code>TestCase</code> 就够用，
+      TSD 推荐进一步用 <code>pytest-django</code> + <code>factory_boy</code>：
+    </p>
+<div class="code" data-lang="py" data-file="blog/tests.py"><pre>
+from django.contrib.auth import get_user_model
+from django.test import TestCase
+from django.urls import reverse
+
+from .models import Post
+
+
+class PostViewsTests(TestCase):
+    @classmethod
+    def setUpTestData(cls):
+        user = get_user_model().objects.create_user('alice', password='x')
+        cls.draft = Post.objects.create(title='Draft', slug='draft', body='…', author=user)
+        cls.live = Post.objects.create(title='Live', slug='live', body='…', author=user,
+                                       status=Post.Status.PUBLISHED)
+
+    def test_list_only_shows_published(self):
+        resp = self.client.get(reverse('blog:post_list'))
+        self.assertContains(resp, 'Live')
+        self.assertNotContains(resp, 'Draft')
+
+    def test_draft_detail_is_404(self):
+        resp = self.client.get(self.draft.get_absolute_url())
+        self.assertEqual(resp.status_code, 404)
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 参数名 <code>id</code> 遮蔽了 Python 内置函数</h4>
+    <p>视图参数叫 <code>id</code> 会遮蔽内置的 <code>id()</code>。更常见的写法是 <code>&lt;int:pk&gt;</code> 或 <code>&lt;int:post_id&gt;</code>，第 2 章的 <code>post_share(request, post_id)</code> 就改成了这种风格。另外查询时写 <code>pk=</code> 比 <code>id=</code> 更通用（主键不一定叫 id）。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>Django 用 MTV 分工：模型管数据、模板管外观、视图管逻辑，URL 配置负责派发。</li>
+  <li>项目是配置的集合，应用是可复用的功能模块；新应用要加进 <code>INSTALLED_APPS</code>。</li>
+  <li>模型字段对应表的列；<code>Meta</code> 里定义排序和索引；用 <code>TextChoices</code> 定义选项；外键用 <code>settings.AUTH_USER_MODEL</code>。</li>
+  <li>改模型后 <code>makemigrations</code> + <code>migrate</code>；迁移文件要提交到版本库。</li>
+  <li>QuerySet 是惰性的；<code>filter</code> 用双下划线查找，<code>Q</code> 对象实现 OR；自定义管理器封装常用过滤。</li>
+  <li>URL 用命名空间 + 名字反向解析，模板用继承复用骨架。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>在 shell 里创建 5 篇文章，其中 2 篇草稿。分别用 <code>Post.objects</code> 和 <code>Post.published</code> 查询，对比数量。</li>
+    <li>给 <code>Post</code> 加一个 <code>db_default=Now()</code> 的字段，运行 <code>sqlmigrate</code> 观察生成的 SQL 与 <code>default=timezone.now</code> 有何不同。</li>
+    <li>按“点评”里的建议，把 <code>PublishedManager</code> 改写成 <code>PostQuerySet.as_manager()</code>，并确认 <code>user.blog_posts.published()</code> 可用。</li>
+    <li>把收藏功能改成 POST + <code>@login_required</code>，再写一个测试：匿名用户 POST 收藏应被重定向到登录页。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

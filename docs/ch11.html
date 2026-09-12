@@ -1,0 +1,535 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>第 11 章 · 国际化 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="11">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">第 11 章 · 项目三：在线商店</span>
+<h1>国际化</h1>
+<p class="lede">
+  让商店同时服务英语和西班牙语用户：翻译 Python 代码和模板里的文字、用 Rosetta 在浏览器里编辑翻译、
+  给 URL 加语言前缀甚至把 URL 本身翻译掉、用 django-parler 翻译数据库里的商品信息，
+  最后处理日期、数字格式的本地化和各国特有的表单字段。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>分清 i18n（国际化）和 l10n（本地化）</li>
+    <li>掌握 <code>gettext</code>/<code>gettext_lazy</code>/<code>ngettext</code> 与模板里的 <code>{% translate %}</code>/<code>{% blocktranslate %}</code></li>
+    <li>走通 <code>makemessages</code> → 翻译 <code>.po</code> → <code>compilemessages</code> 的流程</li>
+    <li>理解 <code>LocaleMiddleware</code> 如何决定当前语言</li>
+    <li>用 <code>i18n_patterns</code> 和 <code>gettext_lazy</code> 实现多语言 URL</li>
+    <li>用 django-parler 翻译模型字段；使用本地化格式与 django-localflavor</li>
+  </ul>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="concepts">i18n 与 l10n</h2>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#127760;</span><h4>国际化 i18n</h4><p>让软件<strong>能够</strong>支持多种语言和地区：把要翻译的文字标记出来，不把格式写死。这是开发者的活。</p></div>
+  <div class="card"><span class="ic">&#127466;&#127480;</span><h4>本地化 l10n</h4><p>把软件<strong>真正</strong>适配到某个地区：翻译文字、使用当地的日期/数字/货币格式。这常常是译者的活。</p></div>
+</div>
+
+<div class="code" data-lang="py" data-file="myshop/settings.py">
+<pre>
+from django.utils.translation import gettext_lazy as _
+
+LANGUAGE_CODE = 'en'                 # 默认语言
+LANGUAGES = [                        # 网站支持的语言（不设置则是 Django 支持的全部）
+    ('en', _('English')),
+    ('es', _('Spanish')),
+]
+LOCALE_PATHS = [BASE_DIR / 'locale'] # 项目级翻译文件的位置
+USE_I18N = True
+USE_TZ = True
+
+MIDDLEWARE = [
+    'django.middleware.security.SecurityMiddleware',
+    'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.middleware.locale.LocaleMiddleware',        # 在 Session 之后、Common 之前
+    'django.middleware.common.CommonMiddleware',
+    # ...
+]
+</pre>
+</div>
+
+<h2 id="workflow">翻译的工作流</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 230" role="img" aria-label="翻译流程：在代码和模板中标记字符串，makemessages 生成 po 文件，译者填写 msgstr，compilemessages 生成 mo 文件，运行时按当前语言查表">
+  <rect class="bx-a" x="16" y="30" width="160" height="80" rx="10"/>
+  <text class="ttl on-a" x="96" y="54" text-anchor="middle">① 标记</text>
+  <text class="mono sm" x="96" y="76" text-anchor="middle">_('Your cart')</text>
+  <text class="mono sm" x="96" y="96" text-anchor="middle">{% translate … %}</text>
+  <path class="ln" d="M178 70 H214" marker-end="url(#ar)"/>
+  <text class="mono sm" x="196" y="60" text-anchor="middle">make</text>
+  <rect class="bx-b" x="218" y="30" width="170" height="80" rx="10"/>
+  <text class="ttl on-b" x="303" y="54" text-anchor="middle">② django.po</text>
+  <text class="mono sm" x="303" y="76" text-anchor="middle">msgid "Your cart"</text>
+  <text class="mono sm" x="303" y="96" text-anchor="middle">msgstr ""</text>
+  <path class="ln" d="M390 70 H426" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="430" y="30" width="150" height="80" rx="10"/>
+  <text class="ttl on-g" x="505" y="54" text-anchor="middle">③ 翻译</text>
+  <text class="mono sm" x="505" y="76" text-anchor="middle">msgstr "Tu carrito"</text>
+  <text class="sm" x="505" y="96" text-anchor="middle">Poedit / Rosetta</text>
+  <path class="ln" d="M582 70 H618" marker-end="url(#ar)"/>
+  <text class="mono sm" x="600" y="60" text-anchor="middle">compile</text>
+  <rect class="bx-p" x="622" y="30" width="122" height="80" rx="10"/>
+  <text class="ttl on-p" x="683" y="54" text-anchor="middle">④ django.mo</text>
+  <text class="sm" x="683" y="76" text-anchor="middle">二进制，查表快</text>
+  <text class="sm" x="683" y="96" text-anchor="middle">运行时读取</text>
+
+  <rect class="bx-d" x="16" y="140" width="728" height="74" rx="10"/>
+  <text class="mono sm" x="30" y="164">python manage.py makemessages -l es --ignore="env/*"   # 或 --all：更新所有语言</text>
+  <text class="mono sm" x="30" y="186">python manage.py compilemessages --ignore="env/*"</text>
+  <text class="sm" x="30" y="206">需要系统安装 GNU gettext（macOS: brew install gettext）。应用里有 locale/ 目录时，它的字符串会写进应用自己的 .po 文件。</text>
+</svg>
+<figcaption>图 11-1　.po 是给人编辑的文本，.mo 是给程序读的二进制；两者都应提交到版本库（或在部署时编译 .mo）</figcaption>
+</figure>
+
+<h2 id="python">翻译 Python 代码</h2>
+
+<div class="tw">
+<table>
+  <tr><th>函数</th><th>用途</th><th>例子</th></tr>
+  <tr><td><code>gettext()</code>（习惯别名 <code>_</code>）</td><td>立即翻译，用在函数体里</td><td><code>messages.success(request, _('Saved'))</code></td></tr>
+  <tr><td><code>gettext_lazy()</code></td><td>延迟到“被使用时”才翻译，用在模块加载时就求值的地方</td><td>模型字段名、表单 label、settings</td></tr>
+  <tr><td><code>ngettext()</code></td><td>单复数</td><td>见下方</td></tr>
+  <tr><td><code>pgettext()</code></td><td>带上下文，区分同形异义词</td><td><code>pgettext('month', 'May')</code></td></tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 190" role="img" aria-label="为什么模型字段要用 gettext_lazy：模块在启动时加载，那时还没有请求语言；lazy 版本把翻译推迟到渲染时">
+  <rect class="bx-r" x="20" y="20" width="350" height="150" rx="12"/>
+  <text class="ttl on-r" x="195" y="44" text-anchor="middle">gettext() 用在模型字段上</text>
+  <text class="sm" x="36" y="70">models.py 在进程启动时导入一次</text>
+  <text class="sm" x="36" y="92">那一刻没有“当前请求的语言”</text>
+  <text class="sm" x="36" y="114">→ 字段名被固定成默认语言</text>
+  <text class="sm on-r" x="36" y="140">西班牙语用户看到的仍是 “first name”</text>
+  <rect class="bx-g" x="390" y="20" width="350" height="150" rx="12"/>
+  <text class="ttl on-g" x="565" y="44" text-anchor="middle">gettext_lazy()</text>
+  <text class="sm" x="406" y="70">返回一个“惰性字符串”代理对象</text>
+  <text class="sm" x="406" y="92">真正被渲染 / 转成 str 时才查表</text>
+  <text class="sm" x="406" y="114">此时 LocaleMiddleware 已激活语言</text>
+  <text class="sm on-g" x="406" y="140">每个用户看到自己的语言 ✓</text>
+</svg>
+<figcaption>图 11-2　规则：模块级别（类属性、settings、表单字段定义）一律用 <code>_lazy</code> 版本</figcaption>
+</figure>
+
+<div class="code" data-lang="py">
+<pre>
+from django.utils.translation import gettext as _, ngettext
+
+# 带变量：用命名占位符，译者可以调整语序
+output = _('Today is %(month)s %(day)s') % {'month': month, 'day': day}
+
+# 单复数
+output = ngettext(
+    'there is %(count)d product',
+    'there are %(count)d products',
+    count,
+) % {'count': count}
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="orders/models.py 与 cart/forms.py">
+<pre>
+from django.utils.translation import gettext_lazy as _
+
+
+class Order(models.Model):
+    first_name = models.CharField(_('first name'), max_length=50)   # 第一个位置参数就是 verbose_name
+    last_name = models.CharField(_('last name'), max_length=50)
+    email = models.EmailField(_('e-mail'))
+    # ...
+
+
+class CartAddProductForm(forms.Form):
+    quantity = forms.TypedChoiceField(choices=PRODUCT_QUANTITY_CHOICES, coerce=int,
+                                      label=_('Quantity'))
+</pre>
+</div>
+
+<p><code>OrderCreateForm</code> 是 ModelForm，会自动使用模型字段的 <code>verbose_name</code> 作为 label，所以不用再单独翻译。</p>
+
+<h2 id="templates">翻译模板</h2>
+
+<div class="code" data-lang="html" data-file="shop/templates/shop/base.html（节选）">
+<pre>
+{% load i18n static %}
+
+&lt;title&gt;{% block title %}{% translate "My shop" %}{% endblock %}&lt;/title&gt;
+
+{% with total_items=cart|length %}
+  {% if total_items &gt; 0 %}
+    {% translate "Your cart" %}:
+    &lt;a href="{% url "cart:cart_detail" %}"&gt;
+      {% blocktranslate with total=cart.get_total_price count items=total_items %}
+        {{ items }} item, ${{ total }}
+      {% plural %}
+        {{ items }} items, ${{ total }}
+      {% endblocktranslate %}
+    &lt;/a&gt;
+  {% elif not order %}
+    {% translate "Your cart is empty." %}
+  {% endif %}
+{% endwith %}
+
+&lt;input type="submit" value="{% translate "Add to cart" %}"&gt;
+</pre>
+</div>
+
+<dl class="gloss">
+  <dt>{% translate %}</dt><dd>翻译一个字面量；可以 <code>as 变量名</code> 存起来</dd>
+  <dt>{% blocktranslate %}</dt><dd>翻译包含变量的文本。块内只能使用简单变量，属性访问、过滤器要先用 <code>with</code> 绑定</dd>
+  <dt>count … {% plural %}</dt><dd>在 blocktranslate 中处理单复数</dd>
+</dl>
+
+<div class="box warn">
+  <div class="t">&#9888; 模板标签不能跨行</div>
+  <p>Django 模板标签必须写在同一行，<code>{% blocktranslate with a=… b=… %}</code> 这种长标签尤其容易被编辑器自动换行打断。</p>
+</div>
+
+<h2 id="rosetta">Rosetta：在浏览器里翻译</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+python -m pip install django-rosetta==0.10.0
+# INSTALLED_APPS 加 'rosetta'；urls.py 加 path('rosetta/', include('rosetta.urls'))
+</pre>
+</div>
+
+<p>
+  Rosetta 提供一个类似 Admin 的界面，列出所有 <code>.po</code> 文件，可以逐条翻译、筛选“未翻译”或“模糊（fuzzy）”条目，保存时自动编译。
+  只有超级用户或 <code>translators</code> 组成员可以使用。<strong>fuzzy</strong> 是 gettext 的标记：源字符串小改后，gettext 猜测旧译文可能还能用，标记为待审核，fuzzy 条目不会被编译进 <code>.mo</code>。
+</p>
+
+<h2 id="locale-middleware">Django 如何决定当前语言</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 170" role="img" aria-label="LocaleMiddleware 依次检查 URL 语言前缀、语言 Cookie、Accept-Language 请求头，最后使用 LANGUAGE_CODE">
+  <rect class="bx-a" x="16" y="40" width="160" height="70" rx="10"/>
+  <text class="ttl on-a" x="96" y="66" text-anchor="middle">① URL 前缀</text>
+  <text class="mono sm" x="96" y="88" text-anchor="middle">/es/…（i18n_patterns）</text>
+  <path class="ln" d="M178 75 H206" marker-end="url(#ar)"/>
+  <rect class="bx-b" x="210" y="40" width="160" height="70" rx="10"/>
+  <text class="ttl on-b" x="290" y="66" text-anchor="middle">② Cookie</text>
+  <text class="mono sm" x="290" y="88" text-anchor="middle">django_language</text>
+  <path class="ln" d="M372 75 H400" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="404" y="40" width="170" height="70" rx="10"/>
+  <text class="ttl on-g" x="489" y="66" text-anchor="middle">③ 请求头</text>
+  <text class="mono sm" x="489" y="88" text-anchor="middle">Accept-Language</text>
+  <path class="ln" d="M576 75 H604" marker-end="url(#ar)"/>
+  <rect class="bx" x="608" y="40" width="136" height="70" rx="10"/>
+  <text class="ttl" x="676" y="66" text-anchor="middle">④ 兜底</text>
+  <text class="mono sm" x="676" y="88" text-anchor="middle">LANGUAGE_CODE</text>
+  <text class="sm" x="380" y="140" text-anchor="middle">找到第一个“在 LANGUAGES 里的”语言就停；结果放在 request.LANGUAGE_CODE</text>
+  <text class="sm" x="380" y="160" text-anchor="middle">书中提到的“会话中的语言键”在 Django 4.0 已移除，现在用 Cookie 记住用户的选择</text>
+</svg>
+<figcaption>图 11-3　语言的决定顺序（Django 5.x）</figcaption>
+</figure>
+
+<h2 id="urls">多语言 URL</h2>
+
+<div class="code" data-lang="py" data-file="myshop/urls.py">
+<pre>
+from django.conf.urls.i18n import i18n_patterns
+from django.utils.translation import gettext_lazy as _
+from payment import webhooks
+
+urlpatterns = i18n_patterns(
+    path('admin/', admin.site.urls),
+    path(_('cart/'), include('cart.urls', namespace='cart')),         # URL 本身也可翻译
+    path(_('orders/'), include('orders.urls', namespace='orders')),
+    path(_('payment/'), include('payment.urls', namespace='payment')),
+    path(_('coupons/'), include('coupons.urls', namespace='coupons')),
+    path('rosetta/', include('rosetta.urls')),
+    path('', include('shop.urls', namespace='shop')),
+)
+
+urlpatterns += [
+    # Stripe 需要一个固定地址，所以 Webhook 放在 i18n_patterns 之外
+    path('payment/webhook/', webhooks.stripe_webhook, name='stripe-webhook'),
+]
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 180" role="img" aria-label="同一个 URL 名字在不同语言下反向解析为不同的地址，Webhook 不带语言前缀">
+  <rect class="bx" x="16" y="30" width="220" height="50" rx="8"/>
+  <text class="mono sm" x="126" y="60" text-anchor="middle">{% url 'cart:cart_detail' %}</text>
+  <path class="ln-b" d="M238 45 L300 30" marker-end="url(#ar-b)"/>
+  <path class="ln-a" d="M238 65 L300 80" marker-end="url(#ar-a)"/>
+  <rect class="bx-b" x="304" y="10" width="180" height="40" rx="8"/>
+  <text class="mono sm on-b" x="394" y="35" text-anchor="middle">/en/cart/</text>
+  <rect class="bx-a" x="304" y="60" width="180" height="40" rx="8"/>
+  <text class="mono sm on-a" x="394" y="85" text-anchor="middle">/es/carrito/</text>
+  <rect class="bx-d" x="520" y="10" width="224" height="90" rx="10"/>
+  <text class="sm" x="632" y="34" text-anchor="middle">当前激活的语言决定</text>
+  <text class="sm" x="632" y="54" text-anchor="middle">前缀和翻译后的路径</text>
+  <text class="sm" x="632" y="74" text-anchor="middle">每种语言一个独立 URL</text>
+  <text class="sm" x="632" y="92" text-anchor="middle">利于搜索引擎分别收录</text>
+  <rect class="bx-g" x="16" y="120" width="468" height="44" rx="8"/>
+  <text class="mono sm on-g" x="250" y="147" text-anchor="middle">/payment/webhook/   ← 不带前缀、不翻译，第三方回调地址必须稳定</text>
+</svg>
+<figcaption>图 11-4　i18n_patterns 给 URL 加语言前缀；gettext_lazy 让路径本身随语言变化</figcaption>
+</figure>
+
+<h3>语言切换器</h3>
+
+<div class="code" data-lang="html" data-file="shop/templates/shop/base.html（书中版本）">
+<pre>
+{% get_current_language as LANGUAGE_CODE %}
+{% get_available_languages as LANGUAGES %}
+{% get_language_info_list for LANGUAGES as languages %}
+&lt;ul class="languages"&gt;
+  {% for language in languages %}
+    &lt;li&gt;
+      &lt;a href="/{{ language.code }}/"{% if language.code == LANGUAGE_CODE %} class="selected"{% endif %}&gt;
+        {{ language.name_local }}
+      &lt;/a&gt;
+    &lt;/li&gt;
+  {% endfor %}
+&lt;/ul&gt;
+</pre>
+</div>
+
+<h2 id="parler">用 django-parler 翻译模型</h2>
+
+<p>界面文字翻译好了，但商品名称、描述存在数据库里。Django 本身不提供模型翻译，这里用第三方包 django-parler：</p>
+
+<div class="code" data-lang="py" data-file="shop/models.py">
+<pre>
+from parler.models import TranslatableModel, TranslatedFields
+
+
+class Product(TranslatableModel):
+    translations = TranslatedFields(
+        name=models.CharField(max_length=200),
+        slug=models.SlugField(max_length=200),
+        description=models.TextField(blank=True),
+    )
+    category = models.ForeignKey(Category, related_name='products', on_delete=models.CASCADE)
+    image = models.ImageField(upload_to='products/%Y/%m/%d', blank=True)
+    price = models.DecimalField(max_digits=10, decimal_places=2)
+    available = models.BooleanField(default=True)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        # ordering = ['name']     # 翻译字段不在主表里，不能用于 Meta.ordering 和索引
+        indexes = [models.Index(fields=['-created'])]
+
+
+# settings.py
+PARLER_LANGUAGES = {
+    None: ({'code': 'en'}, {'code': 'es'}),
+    'default': {'fallback': 'en', 'hide_untranslated': False},
+}
+</pre>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="parler 为 Product 生成 ProductTranslation 表，每种语言一行，通过 master 外键关联">
+  <rect class="bx-a" x="20" y="30" width="230" height="150" rx="12"/>
+  <text class="ttl on-a" x="135" y="54" text-anchor="middle">shop_product</text>
+  <text class="mono sm" x="36" y="80">id = 2</text>
+  <text class="mono sm" x="36" y="100">category_id, image</text>
+  <text class="mono sm" x="36" y="120">price = 12.50</text>
+  <text class="mono sm" x="36" y="140">available, created …</text>
+  <text class="sm" x="36" y="166">不随语言变化的字段</text>
+
+  <rect class="bx-b" x="330" y="20" width="410" height="80" rx="10"/>
+  <text class="mono sm on-b" x="346" y="42">shop_product_translation  language_code='en'</text>
+  <text class="mono sm" x="346" y="64">master_id=2  name='Red tea'  slug='red-tea'</text>
+  <text class="mono sm" x="346" y="86">description='…'</text>
+  <rect class="bx-g" x="330" y="112" width="410" height="80" rx="10"/>
+  <text class="mono sm on-g" x="346" y="134">shop_product_translation  language_code='es'</text>
+  <text class="mono sm" x="346" y="156">master_id=2  name='Té rojo'  slug='te-rojo'</text>
+  <text class="mono sm" x="346" y="178">description='…'</text>
+  <path class="ln-b" d="M328 60 H252" marker-end="url(#ar-b)"/>
+  <path class="ln-g" d="M328 152 H252" marker-end="url(#ar-g)"/>
+</svg>
+<figcaption>图 11-5　“一个主表 + 一个翻译表”，(language_code, master) 联合唯一</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="python manage.py shell">
+<pre>
+>>> from django.utils.translation import activate
+>>> activate('es')
+>>> Product.objects.first().name              # 'Té verde'
+>>> Product.objects.language('en').first().name   # 'Green tea'
+>>> product.set_current_language('es')
+>>> Product.objects.filter(translations__name='Green tea')
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="shop/views.py（按当前语言的 slug 查找）">
+<pre>
+def product_detail(request, id, slug):
+    language = request.LANGUAGE_CODE
+    product = get_object_or_404(
+        Product, id=id,
+        translations__language_code=language,
+        translations__slug=slug,
+        available=True,
+    )
+    ...
+</pre>
+</div>
+
+<p>Admin 类改为继承 <code>parler.admin.TranslatableAdmin</code>，编辑页会出现语言标签页；parler 不支持 <code>prepopulated_fields</code> 属性，改为重写 <code>get_prepopulated_fields()</code> 方法。</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 书中的迁移会丢数据</div>
+  <p>按书中步骤生成的迁移会先<strong>删除</strong> <code>name</code>/<code>slug</code>/<code>description</code> 列，再建翻译表 —— 已有商品的名称全部丢失，只能在后台重新录入。书里还需要手工把迁移中的 <code>bases</code> 改为 <code>parler.models.TranslatableModel</code> 才能运行。正确做法见点评。</p>
+</div>
+
+<h2 id="formats">格式本地化与 localflavor</h2>
+
+<p>Django 5.0 起本地化格式始终开启：同一个数字在英文页面显示 <code>1,234.56</code>，在西班牙语页面显示 <code>1.234,56</code>。输出给 JavaScript 或 JSON 的数字不能被本地化，这时关掉它：</p>
+
+<div class="code" data-lang="html">
+<pre>
+{% load l10n %}
+{% localize off %}{{ value }}{% endlocalize %}
+{{ value|unlocalize }}
+</pre>
+</div>
+
+<p>django-localflavor 提供各国特有的表单/模型字段（邮编、电话、身份证号……）：</p>
+
+<div class="code" data-lang="py" data-file="orders/forms.py">
+<pre>
+from localflavor.us.forms import USZipCodeField
+
+
+class OrderCreateForm(forms.ModelForm):
+    postal_code = USZipCodeField()          # 只接受 XXXXX 或 XXXXX-XXXX
+    class Meta:
+        model = Order
+        fields = ['first_name', 'last_name', 'email', 'address', 'postal_code', 'city']
+</pre>
+</div>
+
+<h2 id="review">代码点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 11 章代码点评 <small>Chapter11/myshop</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 惰性翻译、命名占位符、Webhook 不带语言前缀</h4>
+    <p>模型、表单、settings、URL 都正确使用了 <code>gettext_lazy</code>；带变量的翻译用命名占位符；把 Stripe Webhook 移出 <code>i18n_patterns</code>，这是很多人第一次做国际化时会踩的坑。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 语言切换器总是跳回首页，而且不记住选择</h4>
+    <p>
+      <code>&lt;a href="/{{ language.code }}/"&gt;</code> 无论用户在哪个页面，一切换语言就回到首页；也不会写入语言 Cookie。
+      Django 自带 <code>set_language</code> 视图：POST 语言代码和 <code>next</code>，它会设置 Cookie，并把 <code>next</code> 里的 URL 翻译成目标语言的对应地址。
+    </p>
+<div class="code" data-lang="py" data-file="myshop/urls.py"><pre>
+urlpatterns += [path('i18n/', include('django.conf.urls.i18n'))]   # 放在 i18n_patterns 之外
+</pre></div>
+<div class="code" data-lang="html"><pre>
+&lt;form action="{% url 'set_language' %}" method="post"&gt;
+  {% csrf_token %}
+  &lt;input type="hidden" name="next" value="{{ request.get_full_path }}"&gt;
+  {% for language in languages %}
+    &lt;button name="language" value="{{ language.code }}"&gt;{{ language.name_local }}&lt;/button&gt;
+  {% endfor %}
+&lt;/form&gt;
+</pre></div>
+    <p>对于 parler 翻译过 slug 的商品页，还需要用 parler 的 <code>{% get_translated_url %}</code> 标签生成目标语言的商品 URL。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag bad">有问题</span> 网站提供西班牙语，却只接受美国邮编 <span class="src">Chapter11/myshop/orders/forms.py:9</span></h4>
+    <p><code>USZipCodeField</code> 让西班牙（5 位数字，但规则不同）、墨西哥以及其他国家的顾客都无法下单或可能被错误放行。邮编校验应该依赖“收货国家”字段动态选择（例如 localflavor 的 <code>ESPostalCodeField</code>、<code>MXZipCodeField</code>），或者只做宽松校验、把严格校验交给物流接口。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 模型翻译迁移应分三步，避免丢数据</h4>
+    <p>parler 官方文档给出的做法是：① 先添加 <code>TranslatedFields</code>（旧字段先保留，改名避免冲突）并迁移；② 写一个数据迁移，把旧字段的值复制到默认语言的翻译行；③ 再删除旧字段。这是 Django 迁移的通用原则 —— <strong>结构迁移和数据迁移分开，先加后删</strong>。</p>
+<div class="code" data-lang="py" data-file="shop/migrations/0003_copy_translations.py"><pre>
+from django.conf import settings
+from django.db import migrations
+
+
+def forwards(apps, schema_editor):
+    Product = apps.get_model('shop', 'Product')
+    ProductTranslation = apps.get_model('shop', 'ProductTranslation')
+    for p in Product.objects.all():
+        ProductTranslation.objects.create(
+            master_id=p.pk, language_code=settings.LANGUAGE_CODE,
+            name=p.name_old, slug=p.slug_old, description=p.description_old,
+        )
+
+
+class Migration(migrations.Migration):
+    dependencies = [('shop', '0002_add_translations')]
+    operations = [migrations.RunPython(forwards, migrations.RunPython.noop)]
+</pre></div>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 翻译查询的 N+1 与排序</h4>
+    <p>列表页每个商品的 <code>product.name</code> 都会触发一次翻译表查询；分类失去了 Meta.ordering，侧边栏顺序变得不确定。可以 <code>Product.objects.translated().prefetch_related('translations')</code>，排序用 <code>.order_by('translations__name')</code> 前先用 <code>.translated(language)</code> 限定语言，否则多语言的行会造成重复。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> django-parler 的维护状况与替代品 <span class="tag ts">TSD：选择第三方包</span></h4>
+    <p>
+      书中也承认 parler 已多年未更新，这正是 TSD 提醒要评估的风险（最近一次发布、对当前 Django 版本的支持、Issue 处理情况）。
+      另一个常用方案是 <strong>django-modeltranslation</strong>：它在原表中为每种语言加一列（<code>name_en</code>、<code>name_es</code>），查询、排序、索引都更简单，维护也更活跃；代价是每加一种语言都要迁移。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 书中过时的地方与小技巧</h4>
+    <p>
+      ① 书中说 LocaleMiddleware 会查会话中的 <code>LANGUAGE_SESSION_KEY</code>，该机制已在 Django 4.0 移除；
+      ② <code>makemessages</code> 默认会扫描整个目录，虚拟环境放在项目里时要加 <code>--ignore="env/*"</code>，否则会把第三方包的字符串也收进来；
+      ③ 不想让默认语言带前缀可以用 <code>i18n_patterns(..., prefix_default_language=False)</code>；
+      ④ Rosetta 需要对 <code>locale/</code> 目录有写权限，而且修改后要重启应用服务器才生效，多实例部署时各实例的文件还会不一致 —— 生产环境更推荐“在开发环境翻译、提交 .po、部署时编译”。
+    </p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>标记字符串（<code>_()</code>、<code>{% translate %}</code>）→ <code>makemessages</code> → 翻译 <code>.po</code> → <code>compilemessages</code>。</li>
+  <li>模块级文字用 <code>gettext_lazy</code>；带变量用命名占位符；单复数用 <code>ngettext</code> / <code>{% plural %}</code>。</li>
+  <li>LocaleMiddleware 依次看 URL 前缀、Cookie、Accept-Language、LANGUAGE_CODE。</li>
+  <li><code>i18n_patterns</code> 给 URL 加语言前缀；第三方回调地址放在外面。</li>
+  <li>django-parler 用翻译表存储多语言字段；改造已有模型要分步迁移避免丢数据。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 <code>set_language</code> 视图重写语言切换器，确认在购物车页切换语言后停留在（翻译后的）购物车页。</li>
+    <li>把浏览器语言设为西班牙语，清掉 Cookie 后访问首页，观察被重定向到哪个前缀。</li>
+    <li>给 <code>Order</code> 增加 <code>country</code> 字段，根据国家选择不同的邮编校验。</li>
+    <li>选做：新建一个分支，用 django-modeltranslation 实现商品翻译，比较两种方案的查询 SQL。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

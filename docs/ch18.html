@@ -1,0 +1,503 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>附录 · 代码点评总览 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-chapter="18">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">附录 · 代码点评总览</span>
+<h1>代码点评总览</h1>
+<p class="lede">
+  前面 17 章，每章末尾都有一段“代码点评”。这份附录把它们汇总起来：先看问题分布在哪里，
+  再给出<strong>最值得养成的 10 个习惯</strong>，然后按专题整理成可逐项核对的清单，
+  最后对照 Django 5.x 新特性与《Two Scoops of Django》的核心原则，给出一个“如果今天重新开始”的项目骨架。
+</p>
+
+<div class="box note">
+  <div class="t">&#9432; 先说清楚：这不是在挑原书的错</div>
+  <p>
+    《Django 5 By Example》是一本教学书，为了让每一章聚焦一个知识点，示例代码有意省略了权限、事务、测试等“生产级”细节，这完全合理。
+    这里的点评是在回答另一个问题：<em>当你把学到的东西用到真实项目里时，还需要补上什么？</em>
+  </p>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="map">问题分布</h2>
+
+<p>
+  17 章里共标出了 <strong>42 个“有问题”</strong>（会造成安全漏洞、数据错误或 500 的缺陷）和 <strong>54 个“建议改进”</strong>。
+  按主题归类后，可以看到几条贯穿全书的主线：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 288" role="img" aria-label="问题热力图：横轴为第1到17章，纵轴为安全、数据完整性、性能、健壮性、结构与规范五类，格子里的数字是该章该类问题的数量">
+  <a href="ch01.html#review"><text class="mono sm" x="134" y="30" text-anchor="middle">1</text></a>
+  <a href="ch02.html#review"><text class="mono sm" x="172" y="30" text-anchor="middle">2</text></a>
+  <a href="ch03.html#review"><text class="mono sm" x="208" y="30" text-anchor="middle">3</text></a>
+  <a href="ch04.html#review"><text class="mono sm" x="246" y="30" text-anchor="middle">4</text></a>
+  <a href="ch05.html#review"><text class="mono sm" x="282" y="30" text-anchor="middle">5</text></a>
+  <a href="ch06.html#review"><text class="mono sm" x="320" y="30" text-anchor="middle">6</text></a>
+  <a href="ch07.html#review"><text class="mono sm" x="356" y="30" text-anchor="middle">7</text></a>
+  <a href="ch08.html#review"><text class="mono sm" x="394" y="30" text-anchor="middle">8</text></a>
+  <a href="ch09.html#review"><text class="mono sm" x="430" y="30" text-anchor="middle">9</text></a>
+  <a href="ch10.html#review"><text class="mono sm" x="468" y="30" text-anchor="middle">10</text></a>
+  <a href="ch11.html#review"><text class="mono sm" x="504" y="30" text-anchor="middle">11</text></a>
+  <a href="ch12.html#review"><text class="mono sm" x="542" y="30" text-anchor="middle">12</text></a>
+  <a href="ch13.html#review"><text class="mono sm" x="578" y="30" text-anchor="middle">13</text></a>
+  <a href="ch14.html#review"><text class="mono sm" x="616" y="30" text-anchor="middle">14</text></a>
+  <a href="ch15.html#review"><text class="mono sm" x="652" y="30" text-anchor="middle">15</text></a>
+  <a href="ch16.html#review"><text class="mono sm" x="690" y="30" text-anchor="middle">16</text></a>
+  <a href="ch17.html#review"><text class="mono sm" x="726" y="30" text-anchor="middle">17</text></a>
+  <text class="lbl on-r" x="104" y="66" text-anchor="end">安全</text>
+  <rect class="bx-r" x="119" y="47" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-r" x="134" y="69" text-anchor="middle">2</text>
+  <rect class="bx-r" x="156" y="47" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-r" x="172" y="69" text-anchor="middle">1</text>
+  <rect class="bx-r" x="193" y="47" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-r" x="208" y="69" text-anchor="middle">1</text>
+  <rect class="bx-r" x="230" y="47" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-r" x="246" y="69" text-anchor="middle">1</text>
+  <rect class="bx-r" x="267" y="47" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-r" x="282" y="69" text-anchor="middle">1</text>
+  <rect class="bx-r" x="304" y="47" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-r" x="320" y="69" text-anchor="middle">1</text>
+  <circle class="bx-d" cx="356.5" cy="64" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="393.5" cy="64" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="430.5" cy="64" r="2.5" style="stroke:none"/>
+  <rect class="bx-r" x="452" y="47" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-r" x="468" y="69" text-anchor="middle">1</text>
+  <circle class="bx-d" cx="504.5" cy="64" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="541.5" cy="64" r="2.5" style="stroke:none"/>
+  <rect class="bx-r" x="563" y="47" width="31" height="34" rx="6" style="opacity:1"/><text class="mono sm on-r" x="578" y="69" text-anchor="middle">3</text>
+  <circle class="bx-d" cx="615.5" cy="64" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="652.5" cy="64" r="2.5" style="stroke:none"/>
+  <rect class="bx-r" x="674" y="47" width="31" height="34" rx="6" style="opacity:1"/><text class="mono sm on-r" x="690" y="69" text-anchor="middle">3</text>
+  <rect class="bx-r" x="711" y="47" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-r" x="726" y="69" text-anchor="middle">2</text>
+  <text class="lbl on-a" x="104" y="106" text-anchor="end">数据完整性</text>
+  <rect class="bx-a" x="119" y="87" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-a" x="134" y="109" text-anchor="middle">1</text>
+  <rect class="bx-a" x="156" y="87" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-a" x="172" y="109" text-anchor="middle">1</text>
+  <circle class="bx-d" cx="208.5" cy="104" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="245.5" cy="104" r="2.5" style="stroke:none"/>
+  <rect class="bx-a" x="267" y="87" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-a" x="282" y="109" text-anchor="middle">1</text>
+  <circle class="bx-d" cx="319.5" cy="104" r="2.5" style="stroke:none"/>
+  <rect class="bx-a" x="341" y="87" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-a" x="356" y="109" text-anchor="middle">2</text>
+  <rect class="bx-a" x="378" y="87" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-a" x="394" y="109" text-anchor="middle">2</text>
+  <rect class="bx-a" x="415" y="87" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-a" x="430" y="109" text-anchor="middle">2</text>
+  <rect class="bx-a" x="452" y="87" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-a" x="468" y="109" text-anchor="middle">2</text>
+  <rect class="bx-a" x="489" y="87" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-a" x="504" y="109" text-anchor="middle">1</text>
+  <rect class="bx-a" x="526" y="87" width="31" height="34" rx="6" style="opacity:1"/><text class="mono sm on-a" x="542" y="109" text-anchor="middle">3</text>
+  <rect class="bx-a" x="563" y="87" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-a" x="578" y="109" text-anchor="middle">1</text>
+  <circle class="bx-d" cx="615.5" cy="104" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="652.5" cy="104" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="689.5" cy="104" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="726.5" cy="104" r="2.5" style="stroke:none"/>
+  <text class="lbl on-b" x="104" y="146" text-anchor="end">性能</text>
+  <rect class="bx-b" x="119" y="127" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-b" x="134" y="149" text-anchor="middle">1</text>
+  <circle class="bx-d" cx="171.5" cy="144" r="2.5" style="stroke:none"/>
+  <rect class="bx-b" x="193" y="127" width="31" height="34" rx="6" style="opacity:1"/><text class="mono sm on-b" x="208" y="149" text-anchor="middle">3</text>
+  <circle class="bx-d" cx="245.5" cy="144" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="282.5" cy="144" r="2.5" style="stroke:none"/>
+  <rect class="bx-b" x="304" y="127" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-b" x="320" y="149" text-anchor="middle">1</text>
+  <rect class="bx-b" x="341" y="127" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-b" x="356" y="149" text-anchor="middle">2</text>
+  <rect class="bx-b" x="378" y="127" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-b" x="394" y="149" text-anchor="middle">1</text>
+  <circle class="bx-d" cx="430.5" cy="144" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="467.5" cy="144" r="2.5" style="stroke:none"/>
+  <rect class="bx-b" x="489" y="127" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-b" x="504" y="149" text-anchor="middle">1</text>
+  <circle class="bx-d" cx="541.5" cy="144" r="2.5" style="stroke:none"/>
+  <rect class="bx-b" x="563" y="127" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-b" x="578" y="149" text-anchor="middle">1</text>
+  <rect class="bx-b" x="600" y="127" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-b" x="616" y="149" text-anchor="middle">2</text>
+  <rect class="bx-b" x="637" y="127" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-b" x="652" y="149" text-anchor="middle">2</text>
+  <circle class="bx-d" cx="689.5" cy="144" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="726.5" cy="144" r="2.5" style="stroke:none"/>
+  <text class="lbl on-p" x="104" y="186" text-anchor="end">健壮性</text>
+  <circle class="bx-d" cx="134.5" cy="184" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="171.5" cy="184" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="208.5" cy="184" r="2.5" style="stroke:none"/>
+  <rect class="bx-p" x="230" y="167" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-p" x="246" y="189" text-anchor="middle">1</text>
+  <rect class="bx-p" x="267" y="167" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-p" x="282" y="189" text-anchor="middle">1</text>
+  <rect class="bx-p" x="304" y="167" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-p" x="320" y="189" text-anchor="middle">1</text>
+  <circle class="bx-d" cx="356.5" cy="184" r="2.5" style="stroke:none"/>
+  <rect class="bx-p" x="378" y="167" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-p" x="394" y="189" text-anchor="middle">1</text>
+  <circle class="bx-d" cx="430.5" cy="184" r="2.5" style="stroke:none"/>
+  <rect class="bx-p" x="452" y="167" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-p" x="468" y="189" text-anchor="middle">1</text>
+  <rect class="bx-p" x="489" y="167" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-p" x="504" y="189" text-anchor="middle">2</text>
+  <circle class="bx-d" cx="541.5" cy="184" r="2.5" style="stroke:none"/>
+  <rect class="bx-p" x="563" y="167" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-p" x="578" y="189" text-anchor="middle">1</text>
+  <rect class="bx-p" x="600" y="167" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-p" x="616" y="189" text-anchor="middle">2</text>
+  <rect class="bx-p" x="637" y="167" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-p" x="652" y="189" text-anchor="middle">1</text>
+  <rect class="bx-p" x="674" y="167" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-p" x="690" y="189" text-anchor="middle">1</text>
+  <rect class="bx-p" x="711" y="167" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-p" x="726" y="189" text-anchor="middle">2</text>
+  <text class="lbl on-g" x="104" y="226" text-anchor="end">结构与规范</text>
+  <rect class="bx-g" x="119" y="207" width="31" height="34" rx="6" style="opacity:1"/><text class="mono sm on-g" x="134" y="229" text-anchor="middle">3</text>
+  <rect class="bx-g" x="156" y="207" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-g" x="172" y="229" text-anchor="middle">2</text>
+  <circle class="bx-d" cx="208.5" cy="224" r="2.5" style="stroke:none"/>
+  <rect class="bx-g" x="230" y="207" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-g" x="246" y="229" text-anchor="middle">2</text>
+  <circle class="bx-d" cx="282.5" cy="224" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="319.5" cy="224" r="2.5" style="stroke:none"/>
+  <rect class="bx-g" x="341" y="207" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-g" x="356" y="229" text-anchor="middle">2</text>
+  <rect class="bx-g" x="378" y="207" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-g" x="394" y="229" text-anchor="middle">1</text>
+  <rect class="bx-g" x="415" y="207" width="31" height="34" rx="6" style="opacity:1"/><text class="mono sm on-g" x="430" y="229" text-anchor="middle">3</text>
+  <circle class="bx-d" cx="467.5" cy="224" r="2.5" style="stroke:none"/>
+  <circle class="bx-d" cx="504.5" cy="224" r="2.5" style="stroke:none"/>
+  <rect class="bx-g" x="526" y="207" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-g" x="542" y="229" text-anchor="middle">2</text>
+  <rect class="bx-g" x="563" y="207" width="31" height="34" rx="6" style="opacity:0.45"/><text class="mono sm on-g" x="578" y="229" text-anchor="middle">1</text>
+  <circle class="bx-d" cx="615.5" cy="224" r="2.5" style="stroke:none"/>
+  <rect class="bx-g" x="637" y="207" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-g" x="652" y="229" text-anchor="middle">2</text>
+  <circle class="bx-d" cx="689.5" cy="224" r="2.5" style="stroke:none"/>
+  <rect class="bx-g" x="711" y="207" width="31" height="34" rx="6" style="opacity:0.75"/><text class="mono sm on-g" x="726" y="229" text-anchor="middle">2</text>
+  <text class="sm" x="116" y="270">↑ 章节号（可点击）　颜色越深，该章这一类的点评条目越多</text>
+</svg>
+<figcaption>图 A-1　问题热力图：安全问题集中在“用户输入”和“权限”相关的章节，数据完整性问题集中在商店与学习平台</figcaption>
+</figure>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128274;</span><h4>安全</h4><p>XSS（<code>|safe</code>、<code>mark_safe</code>、<code>innerHTML</code>）、GET 改数据、缺少登录/权限检查、SSRF、机密入库。</p></div>
+  <div class="card"><span class="ic">&#128451;</span><h4>数据完整性</h4><p>缺少数据库约束与事务、级联删除历史数据、Webhook 不幂等、迁移与模型不一致。</p></div>
+  <div class="card"><span class="ic">&#9889;</span><h4>性能</h4><p>列表页 N+1、每个请求重复统计、缓存没有失效策略、API 查询数随数据线性增长。</p></div>
+  <div class="card"><span class="ic">&#128165;</span><h4>健壮性</h4><p>非法输入、对象不存在、大小写差异等边界情况直接变成 500。</p></div>
+  <div class="card"><span class="ic">&#127959;</span><h4>结构与规范</h4><p>没有自定义用户模型、业务逻辑写在视图里、没有测试、开发工具混入生产。</p></div>
+</div>
+
+<h2 id="top10">最值得养成的 10 个习惯</h2>
+
+<ol class="steps">
+  <li>
+    <strong>新项目第一天就建自定义用户模型。</strong>
+    哪怕只是 <code>class User(AbstractUser): pass</code>。以后要加字段、改用邮箱登录都不必动迁移；到处用 <code>settings.AUTH_USER_MODEL</code> / <code>get_user_model()</code> 引用它，不要 <code>add_to_class</code> 打补丁。
+    <br><span class="tag ts">TSD：用户模型</span> 见 <a href="ch04.html#review">第 4 章</a>、<a href="ch07.html#review">第 7 章</a>、<a href="ch12.html#review">第 12 章</a>
+  </li>
+  <li>
+    <strong>机密只来自环境，设置按环境拆分。</strong>
+    <code>SECRET_KEY</code>、数据库密码、API 密钥、TLS 私钥都不进版本库；缺失时启动即失败；上线前跑 <code>check --deploy</code>。
+    <br><span class="tag ts">TSD：设置</span> 见 <a href="ch01.html#review">第 1 章</a>、<a href="ch03.html#review">第 3 章</a>、<a href="ch17.html#review">第 17 章</a>
+  </li>
+  <li>
+    <strong>修改数据只用 POST，并且先检查“是谁、能不能”。</strong>
+    <code>@require_POST</code> + CSRF + <code>@login_required</code> / 权限；查询里带上 owner 过滤；WebSocket 端点也一样。可以考虑 5.1 的 <code>LoginRequiredMiddleware</code> 默认全站需要登录。
+    <br>见 <a href="ch01.html#review">第 1 章</a>、<a href="ch13.html#review">第 13 章</a>、<a href="ch16.html#review">第 16 章</a>
+  </li>
+  <li>
+    <strong>永远不要把用户输入当 HTML 输出。</strong>
+    模板默认转义，别用 <code>|safe</code> / <code>mark_safe</code> 包裹用户内容；Markdown 渲染后要用 nh3 清洗；前端插入用 <code>textContent</code>；Python 值交给 JS 用 <code>json_script</code>。
+    <br>见 <a href="ch03.html#review">第 3 章</a>、<a href="ch05.html#review">第 5 章</a>、<a href="ch16.html#review">第 16 章</a>
+  </li>
+  <li>
+    <strong>让数据库守住数据的规则。</strong>
+    唯一性、互斥关系用 <code>UniqueConstraint</code> / <code>CheckConstraint</code>；多步写入包在 <code>transaction.atomic()</code> 里；任务在提交之后再发（<code>transaction.on_commit</code> 或 Celery 5.4 的 <code>delay_on_commit</code>）；历史数据的外键用 <code>PROTECT</code> / <code>SET_NULL</code>。
+    <br>见 <a href="ch02.html#review">第 2 章</a>、<a href="ch07.html#review">第 7 章</a>、<a href="ch08.html#review">第 8 章</a>
+  </li>
+  <li>
+    <strong>外部回调必须幂等，状态检查要在最后一刻再做一次。</strong>
+    Webhook 会重复投递，记录已处理的事件 ID；优惠券、库存、支付状态在结账时再验证，而不是只在“添加”时验证。
+    <br>见 <a href="ch09.html#review">第 9 章</a>、<a href="ch10.html#review">第 10 章</a>
+  </li>
+  <li>
+    <strong>对每个页面的 SQL 数量保持敏感。</strong>
+    列表页用 <code>select_related</code> / <code>prefetch_related</code>，统计用 <code>annotate</code>；开发时开 Debug Toolbar，测试里用 <code>assertNumQueries</code> 把查询数固定下来。
+    <br>见 <a href="ch03.html#review">第 3 章</a>、<a href="ch06.html#review">第 6 章</a>、<a href="ch13.html#review">第 13 章</a>、<a href="ch15.html#review">第 15 章</a>
+  </li>
+  <li>
+    <strong>不信任任何输入，别让用户看到 500。</strong>
+    用表单/序列化器校验，<code>get_object_or_404</code> 取对象，大小写用 <code>__iexact</code>，空 slug、空列表、非法类型名都要有分支；成功的 POST 一律重定向（PRG）。
+    <br>见 <a href="ch02.html#review">第 2 章</a>、<a href="ch04.html#review">第 4 章</a>、<a href="ch06.html#review">第 6 章</a>、<a href="ch14.html#review">第 14 章</a>
+  </li>
+  <li>
+    <strong>业务逻辑放在模型、QuerySet 或服务函数里。</strong>
+    视图只负责“解析请求 → 调用逻辑 → 返回响应”。例如 <code>Order.objects.create_from_cart(cart, user)</code>，同一段逻辑 Web、API、管理命令都能复用，也更好测。
+    <br><span class="tag ts">TSD：Fat models</span> 见 <a href="ch01.html#review">第 1 章</a>、<a href="ch08.html#review">第 8 章</a>
+  </li>
+  <li>
+    <strong>从第一个模型开始写测试。</strong>
+    pytest-django + factory_boy 造数据；每修一个 bug 先写一个会失败的测试。本书的仓库只有第 15 章有 API 测试，这是最值得补的一块。
+    <br><span class="tag ts">TSD：测试</span> 见 <a href="ch01.html#review">第 1 章</a>、<a href="ch15.html#review">第 15 章</a>
+  </li>
+</ol>
+
+<h2 id="checklists">专题清单</h2>
+
+<p>下面的清单可以直接拿来检查自己的项目。每一行都能在对应章节的点评里找到具体的代码与修改方法。</p>
+
+<h3 id="cl-settings">项目结构与设置</h3>
+<div class="tw">
+<table>
+  <tr><th>检查项</th><th>原因</th><th>章节</th></tr>
+  <tr><td>自定义用户模型，<code>AUTH_USER_MODEL</code> 统一引用</td><td>项目中途再换几乎不可能</td><td><a href="ch04.html#review">4</a> · <a href="ch07.html#review">7</a> · <a href="ch12.html#review">12</a></td></tr>
+  <tr><td>设置拆分 base / local / test / prod；三个入口文件的默认设置模块正确</td><td>避免在生产打开调试功能</td><td><a href="ch17.html#review">17</a></td></tr>
+  <tr><td>机密从环境变量读取，<code>.env</code>、私钥、数据目录进 <code>.gitignore</code> 和 <code>.dockerignore</code></td><td>版本库和镜像都会被复制和分享</td><td><a href="ch01.html#review">1</a> · <a href="ch03.html#review">3</a> · <a href="ch17.html#review">17</a></td></tr>
+  <tr><td>Debug Toolbar、redisboard、控制台邮件后端只在 local 设置里</td><td>生产环境的错误邮件会“消失”</td><td><a href="ch07.html#review">7</a> · <a href="ch17.html#review">17</a></td></tr>
+  <tr><td>依赖拆成 <code>requirements/base.txt</code> / <code>local.txt</code> / <code>production.txt</code>，并锁定版本</td><td>生产镜像更小、可复现</td><td><a href="ch17.html#review">17</a></td></tr>
+  <tr><td>删除不用的代码与模板，别让“示例残留”留在项目里</td><td>降低阅读和维护成本</td><td><a href="ch04.html#review">4</a></td></tr>
+</table>
+</div>
+
+<h3 id="cl-models">模型与数据库</h3>
+<div class="tw">
+<table>
+  <tr><th>检查项</th><th>原因</th><th>章节</th></tr>
+  <tr><td>公共字段抽成 <code>TimeStampedModel</code> 等抽象基类</td><td>DRY，统一审计字段</td><td><a href="ch01.html#review">1</a> · <a href="ch12.html#review">12</a></td></tr>
+  <tr><td>自定义查询写成 QuerySet 方法：<code>Post.objects.published().by(author)</code></td><td>可链式调用，逻辑集中</td><td><a href="ch01.html#review">1</a></td></tr>
+  <tr><td>业务规则落成数据库约束（唯一、不能关注自己、日期内唯一）</td><td>表单校验挡不住并发和其他入口</td><td><a href="ch02.html#review">2</a> · <a href="ch05.html#review">5</a> · <a href="ch07.html#review">7</a></td></tr>
+  <tr><td>认真选择 <code>on_delete</code>：订单、聊天等历史数据不能被级联删除</td><td>财务和审计数据必须保留</td><td><a href="ch01.html#review">1</a> · <a href="ch08.html#review">8</a> · <a href="ch16.html#review">16</a></td></tr>
+  <tr><td>多步写入用 <code>transaction.atomic()</code>，异步任务在提交后派发</td><td>避免“半个订单”和任务读不到数据</td><td><a href="ch08.html#review">8</a> · <a href="ch13.html#review">13</a></td></tr>
+  <tr><td>模型改动一定要生成迁移；数据迁移分“加字段 → 迁数据 → 删字段”三步</td><td>模型与迁移不一致会在新环境炸掉</td><td><a href="ch05.html#review">5</a> · <a href="ch11.html#review">11</a></td></tr>
+  <tr><td>自定义字段实现 <code>deconstruct()</code>；并发敏感的计数用数据库表达式或加锁</td><td>迁移可重建；避免重复序号</td><td><a href="ch12.html#review">12</a></td></tr>
+  <tr><td>slug 生成考虑中文等非 ASCII 标题（<code>allow_unicode</code> 或回退值）</td><td>空 slug 会导致唯一冲突或 500</td><td><a href="ch06.html#review">6</a></td></tr>
+</table>
+</div>
+
+<h3 id="cl-views">视图、表单与模板</h3>
+<div class="tw">
+<table>
+  <tr><th>检查项</th><th>原因</th><th>章节</th></tr>
+  <tr><td>POST 成功后重定向（PRG），失败时带着错误重新渲染</td><td>刷新不会重复提交</td><td><a href="ch02.html#review">2</a> · <a href="ch04.html#review">4</a> · <a href="ch05.html#review">5</a></td></tr>
+  <tr><td>ModelForm 显式列出 <code>fields</code>，不用 <code>exclude</code> 或 <code>__all__</code></td><td>新增字段不会被意外暴露</td><td><a href="ch02.html#review">2</a> · <a href="ch13.html#review">13</a></td></tr>
+  <tr><td>注册、改密码走 <code>UserCreationForm</code> / <code>validate_password</code></td><td>密码强度校验不能绕过</td><td><a href="ch04.html#review">4</a></td></tr>
+  <tr><td>分页用 <code>paginator.get_page()</code>，链接用 <code>{% querystring %}</code></td><td>保留其他查询参数，更少代码</td><td><a href="ch02.html#review">2</a> · <a href="ch03.html#review">3</a></td></tr>
+  <tr><td>GET 预填表单用 <code>initial</code>，而不是把 GET 当作已提交的数据</td><td>避免首次打开就显示错误</td><td><a href="ch06.html#review">6</a></td></tr>
+  <tr><td>模板上下文显式传递，不用 <code>locals()</code>；模板里不写业务逻辑</td><td>可读、可测</td><td><a href="ch09.html#review">9</a></td></tr>
+  <tr><td>Admin 里生成 HTML 用 <code>format_html</code>，用 <code>@admin.display</code> / <code>@admin.action</code> 装饰器</td><td>防止后台 XSS，写法更清晰</td><td><a href="ch09.html#review">9</a></td></tr>
+  <tr><td>国际化：语言切换器回到当前页；表单校验规则与所服务的地区一致</td><td>用户体验一致</td><td><a href="ch11.html#review">11</a></td></tr>
+</table>
+</div>
+
+<h3 id="cl-security">安全</h3>
+<div class="tw">
+<table>
+  <tr><th>检查项</th><th>原因</th><th>章节</th></tr>
+  <tr><td>不用 <code>|safe</code> / <code>mark_safe</code> 输出用户内容；Markdown 输出前用 nh3 清洗</td><td>存储型 XSS</td><td><a href="ch03.html#review">3</a> · <a href="ch05.html#review">5</a></td></tr>
+  <tr><td>前端插入内容用 <code>textContent</code>，数据用 <code>json_script</code> 传递</td><td>DOM XSS</td><td><a href="ch16.html#review">16</a></td></tr>
+  <tr><td>所有写操作 POST + CSRF；不要 <code>@csrf_exempt</code> 自己的 AJAX 接口；登出是 POST</td><td>CSRF</td><td><a href="ch01.html#review">1</a> · <a href="ch13.html#review">13</a></td></tr>
+  <tr><td>每个视图、每个 API、每个 WebSocket 都有登录与对象级权限检查</td><td>越权访问</td><td><a href="ch13.html#review">13</a> · <a href="ch16.html#review">16</a></td></tr>
+  <tr><td>服务器替用户抓取 URL 时限制协议、主机、大小和超时</td><td>SSRF、资源耗尽</td><td><a href="ch06.html#review">6</a></td></tr>
+  <tr><td>发邮件、应用券码等接口加登录要求与限速</td><td>被当作垃圾邮件中继或暴力枚举</td><td><a href="ch02.html#review">2</a> · <a href="ch10.html#review">10</a></td></tr>
+  <tr><td>上传文件限制大小和类型，媒体文件不要和站点同源执行</td><td>恶意文件</td><td><a href="ch04.html#review">4</a> · <a href="ch12.html#review">12</a></td></tr>
+  <tr><td>ASGI 应用用 <code>AllowedHostsOriginValidator</code> 包装</td><td>跨站 WebSocket 劫持</td><td><a href="ch16.html#review">16</a></td></tr>
+  <tr><td>HTTPS、Secure Cookie、HSTS；<code>check --deploy</code> 进 CI</td><td>会话劫持</td><td><a href="ch17.html#review">17</a></td></tr>
+</table>
+</div>
+
+<h3 id="cl-perf">性能与缓存</h3>
+<div class="tw">
+<table>
+  <tr><th>检查项</th><th>原因</th><th>章节</th></tr>
+  <tr><td>列表页和序列化器消除 N+1：<code>select_related</code> / <code>prefetch_related</code> / <code>Prefetch</code></td><td>查询数不随数据量增长</td><td><a href="ch03.html#review">3</a> · <a href="ch06.html#review">6</a> · <a href="ch11.html#review">11</a> · <a href="ch15.html#review">15</a></td></tr>
+  <tr><td>判断存在用 <code>exists()</code>，计数用 <code>annotate(Count(...))</code>，注意 filter 条件</td><td>少查、查对</td><td><a href="ch03.html#review">3</a> · <a href="ch07.html#review">7</a></td></tr>
+  <tr><td>高频统计放缓存，并设计失效（信号或版本号键）</td><td>缓存最难的是失效</td><td><a href="ch03.html#review">3</a> · <a href="ch14.html#review">14</a></td></tr>
+  <tr><td>片段缓存的键包含所有会变化的维度（对象 ID、语言、用户）</td><td>避免“串数据”</td><td><a href="ch14.html#review">14</a></td></tr>
+  <tr><td>搜索加 GIN 索引（<code>SearchVectorField</code> 或 <code>GinIndex</code>）；限制查询参数长度</td><td>全文检索不扫全表</td><td><a href="ch03.html#review">3</a></td></tr>
+  <tr><td>Redis 连接复用（模块级客户端或 <code>django-redis</code>），临时键加唯一后缀和过期时间</td><td>连接数和键冲突</td><td><a href="ch07.html#review">7</a> · <a href="ch10.html#review">10</a></td></tr>
+</table>
+</div>
+
+<h3 id="cl-integrations">异步任务、支付与集成</h3>
+<div class="tw">
+<table>
+  <tr><th>检查项</th><th>原因</th><th>章节</th></tr>
+  <tr><td>Celery 任务只传 ID，在事务提交后派发，任务本身可重试且幂等</td><td>任务可能先于提交执行、可能重复执行</td><td><a href="ch08.html#review">8</a></td></tr>
+  <tr><td>以 Webhook 为支付结果的唯一来源；校验签名；按事件 ID 去重</td><td>重复投递</td><td><a href="ch09.html#review">9</a></td></tr>
+  <tr><td>已支付订单不能再次发起支付；结账时重新校验优惠券</td><td>重复扣款、过期优惠</td><td><a href="ch09.html#review">9</a> · <a href="ch10.html#review">10</a></td></tr>
+  <tr><td>Webhook 视图只做“验签 + 记录 + 派发任务”，耗时工作交给任务</td><td>第三方有超时和重试</td><td><a href="ch10.html#review">10</a></td></tr>
+  <tr><td>金额用 <code>Decimal</code>/整数分，保存价格和折扣快照</td><td>历史订单不随商品改价变化</td><td><a href="ch08.html#review">8</a> · <a href="ch09.html#review">9</a></td></tr>
+</table>
+</div>
+
+<h3 id="cl-api">API 与实时通信</h3>
+<div class="tw">
+<table>
+  <tr><th>检查项</th><th>原因</th><th>章节</th></tr>
+  <tr><td>生产 API 用 Token / Session / JWT 认证，不单用 Basic；配置限流</td><td>凭据安全、防滥用</td><td><a href="ch15.html#review">15</a></td></tr>
+  <tr><td>URL 或 Header 版本化；用 drf-spectacular 生成 OpenAPI 文档</td><td>客户端可以平滑升级</td><td><a href="ch15.html#review">15</a></td></tr>
+  <tr><td>客户端遍历分页时处理每一页，而不是只处理最后一页</td><td>静默的数据遗漏</td><td><a href="ch15.html#review">15</a></td></tr>
+  <tr><td>消费者 <code>connect()</code> 做认证和授权；校验消息格式和长度</td><td>WebSocket 不经过视图的权限检查</td><td><a href="ch16.html#review">16</a></td></tr>
+  <tr><td>客户端根据页面协议选择 <code>ws://</code> / <code>wss://</code>，并支持断线重连</td><td>HTTPS 下的混合内容</td><td><a href="ch16.html#review">16</a></td></tr>
+</table>
+</div>
+
+<h3 id="cl-deploy">部署与运维</h3>
+<div class="tw">
+<table>
+  <tr><th>检查项</th><th>原因</th><th>章节</th></tr>
+  <tr><td>生产容器不挂载源码；镜像内完成 <code>collectstatic</code>；<code>migrate</code> 作为发布步骤</td><td>部署可复现、可回滚</td><td><a href="ch17.html#review">17</a></td></tr>
+  <tr><td>非 root 用户运行、slim 基础镜像、<code>.dockerignore</code></td><td>更小更安全</td><td><a href="ch17.html#review">17</a></td></tr>
+  <tr><td>用 healthcheck 表达服务依赖；配置 <code>LOGGING</code> 与错误告警</td><td>可观测</td><td><a href="ch17.html#review">17</a></td></tr>
+  <tr><td>Nginx 设置 <code>client_max_body_size</code>；代理后正确传递协议与客户端 IP</td><td>上传 413、IP 错误</td><td><a href="ch17.html#review">17</a></td></tr>
+  <tr><td>中间件不能对非预期的 Host（IP、健康检查）产生副作用</td><td>全站 404</td><td><a href="ch17.html#review">17</a></td></tr>
+  <tr><td>定时命令可重复执行而不重复发送（记录执行结果）</td><td>用户每天收到同一封邮件</td><td><a href="ch17.html#review">17</a></td></tr>
+</table>
+</div>
+
+<h2 id="django5">Django 5.x 新特性速查</h2>
+
+<p>原书基于 Django 5.0 编写，仓库的依赖已指向 5.2（LTS，支持到 2028 年 4 月）。下面这些新特性可以直接改进书中的代码：</p>
+
+<div class="tw">
+<table>
+  <tr><th>版本</th><th>特性</th><th>可以用在哪里</th></tr>
+  <tr><td>5.0</td><td>Admin 筛选器显示计数（<code>show_facets</code>）</td><td>第 1 章博客后台</td></tr>
+  <tr><td>5.0</td><td><code>Field.db_default</code>：由数据库计算默认值</td><td>时间戳、状态字段；<code>db_default=Now()</code></td></tr>
+  <tr><td>5.0</td><td><code>GeneratedField</code>：数据库生成列</td><td>订单项小计、搜索向量</td></tr>
+  <tr><td>5.0</td><td>表单字段组模板：<code>{{ form.email.as_field_group }}</code></td><td>第 2、4 章的表单模板</td></tr>
+  <tr><td>5.0</td><td><code>choices</code> 可直接传枚举类或字典；<code>request.auser()</code> 等异步认证接口</td><td>第 1 章 Status；第 16 章异步代码</td></tr>
+  <tr><td>5.0</td><td><code>LogoutView</code> 只接受 POST</td><td>第 4、13 章登出链接必须改成表单</td></tr>
+  <tr><td>5.1</td><td><code>{% querystring %}</code> 模板标签</td><td>第 2、3 章分页链接</td></tr>
+  <tr><td>5.1</td><td><code>LoginRequiredMiddleware</code> + <code>@login_not_required</code></td><td>第 4、13 章：默认全站需要登录</td></tr>
+  <tr><td>5.1</td><td>PostgreSQL 连接池（<code>OPTIONS: {"pool": True}</code>）</td><td>第 17 章生产数据库</td></tr>
+  <tr><td>5.1</td><td><code>CheckConstraint(condition=...)</code>（取代 <code>check=</code>）</td><td>第 7 章“不能关注自己”约束</td></tr>
+  <tr><td>5.2</td><td><code>CompositePrimaryKey</code> 复合主键</td><td>第 1 章点评：多对多中间表</td></tr>
+  <tr><td>5.2</td><td><code>manage.py shell</code> 自动导入所有模型</td><td>书中大量 shell 练习</td></tr>
+  <tr><td>5.2</td><td><code>reverse(..., query=..., fragment=...)</code></td><td>带查询参数的重定向</td></tr>
+  <tr><td>5.2</td><td><code>@register.simple_block_tag</code></td><td>第 3 章自定义模板标签</td></tr>
+</table>
+</div>
+
+<h2 id="tsd">Two Scoops of Django 原则对照</h2>
+
+<div class="tw">
+<table>
+  <tr><th>原则</th><th>本书示例的做法</th><th>建议</th></tr>
+  <tr><td>每个项目都用自定义 User</td><td>直接用 <code>auth.User</code>，Profile 一对一扩展，第 7 章用 <code>add_to_class</code> 打补丁</td><td>第一天建 <code>users.User(AbstractUser)</code>；Profile 只放真正“可选”的资料</td></tr>
+  <tr><td>设置拆分、机密走环境变量</td><td>前 16 章单一 settings；第 17 章拆分但 SECRET_KEY 仍写死</td><td>一开始就拆分；用 django-environ / python-decouple，缺失即报错</td></tr>
+  <tr><td>应用小而专，一个应用做一件事</td><td>基本做到（blog、cart、orders、coupons、payment……）</td><td>保持；公共模型与工具放 <code>core</code> 应用</td></tr>
+  <tr><td>Fat models, thin views</td><td>下单、支付、选课等逻辑写在视图中</td><td>模型方法 / QuerySet 方法 / <code>services.py</code></td></tr>
+  <tr><td>表单显式列出字段</td><td>大多显式；第 13 章个别地方用了 <code>exclude</code></td><td>一律 <code>fields = [...]</code></td></tr>
+  <tr><td>模板里不写逻辑，不用 <code>locals()</code></td><td>第 9 章用了 <code>locals()</code></td><td>显式构建 context</td></tr>
+  <tr><td>谨慎使用信号</td><td>第 7 章用 <code>m2m_changed</code> 维护计数</td><td>能在模型方法/服务里显式调用就不要用信号</td></tr>
+  <tr><td>API 版本化、认证、限流</td><td>未版本化，Basic 认证</td><td>见第 15 章点评</td></tr>
+  <tr><td>测试：每个应用有 tests 包、用工厂造数据</td><td>几乎没有测试（第 15 章 API 测试除外）</td><td>pytest-django + factory_boy + coverage</td></tr>
+  <tr><td>挑选维护良好的第三方包</td><td>django-parler、django-braces 等更新变慢</td><td>评估活跃度；能用 Django 内置功能就少一个依赖</td></tr>
+</table>
+</div>
+
+<h2 id="skeleton">如果今天重新开始：推荐的项目骨架</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="推荐的项目骨架：config 目录放设置和入口，设置拆分为 base、local、test、production；requirements 分为 base、local、production；apps 下有 users、core 和各业务应用；每个业务应用有 models、services、selectors、views、tests">
+  <rect class="bx-d" x="14" y="14" width="240" height="300" rx="12"/>
+  <text class="ttl" x="134" y="40" text-anchor="middle">项目根目录</text>
+  <text class="mono sm on-b" x="32" y="70">config/</text>
+  <text class="mono sm" x="52" y="92">settings/base.py</text>
+  <text class="mono sm" x="52" y="112">settings/local.py</text>
+  <text class="mono sm" x="52" y="132">settings/test.py</text>
+  <text class="mono sm" x="52" y="152">settings/production.py</text>
+  <text class="mono sm" x="52" y="172">urls.py asgi.py wsgi.py</text>
+  <text class="mono sm on-g" x="32" y="202">requirements/</text>
+  <text class="mono sm" x="52" y="222">base.txt local.txt production.txt</text>
+  <text class="mono sm on-a" x="32" y="252">apps/</text>
+  <text class="mono sm" x="32" y="282">.env.example  Dockerfile</text>
+  <text class="mono sm" x="32" y="302">docker-compose.yml  pyproject.toml</text>
+
+  <path class="ln-a" d="M100 248 H290" marker-end="url(#ar-a)"/>
+
+  <rect class="bx-b" x="294" y="30" width="200" height="120" rx="12"/>
+  <text class="ttl on-b" x="394" y="56" text-anchor="middle">users</text>
+  <text class="mono sm" x="394" y="80" text-anchor="middle">User(AbstractUser)</text>
+  <text class="sm" x="394" y="104" text-anchor="middle">第一天就建好</text>
+  <text class="sm" x="394" y="124" text-anchor="middle">AUTH_USER_MODEL</text>
+
+  <rect class="bx-g" x="294" y="176" width="200" height="120" rx="12"/>
+  <text class="ttl on-g" x="394" y="202" text-anchor="middle">core</text>
+  <text class="mono sm" x="394" y="226" text-anchor="middle">TimeStampedModel</text>
+  <text class="sm" x="394" y="250" text-anchor="middle">公共 mixin、工具函数</text>
+  <text class="sm" x="394" y="270" text-anchor="middle">不放业务逻辑</text>
+
+  <rect class="bx-a" x="520" y="30" width="226" height="266" rx="12"/>
+  <text class="ttl on-a" x="633" y="56" text-anchor="middle">业务应用（如 orders）</text>
+  <text class="mono sm" x="540" y="86">models.py</text><text class="sm" x="650" y="86">数据 + 约束</text>
+  <text class="mono sm" x="540" y="112">services.py</text><text class="sm" x="650" y="112">写操作</text>
+  <text class="mono sm" x="540" y="138">selectors.py</text><text class="sm" x="650" y="138">复杂查询</text>
+  <text class="mono sm" x="540" y="164">views.py</text><text class="sm" x="650" y="164">薄薄一层</text>
+  <text class="mono sm" x="540" y="190">forms.py</text><text class="sm" x="650" y="190">校验</text>
+  <text class="mono sm" x="540" y="216">tasks.py</text><text class="sm" x="650" y="216">Celery</text>
+  <text class="mono sm" x="540" y="242">api/</text><text class="sm" x="650" y="242">DRF</text>
+  <text class="mono sm" x="540" y="268">tests/</text><text class="sm" x="650" y="268">工厂 + 用例</text>
+</svg>
+<figcaption>图 A-2　services / selectors 的拆分来自社区的 “Django Styleguide”，与 Two Scoops 的 fat models 并不冲突：简单逻辑放模型方法，跨模型的流程放服务函数</figcaption>
+</figure>
+
+<div class="code" data-lang="py" data-file="apps/core/models.py">
+<pre>
+from django.db import models
+from django.db.models.functions import Now
+
+
+class TimeStampedModel(models.Model):
+    created = models.DateTimeField(db_default=Now(), editable=False)
+    updated = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        abstract = True
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="apps/users/models.py">
+<pre>
+from django.contrib.auth.models import AbstractUser
+
+
+class User(AbstractUser):
+    pass          # 先空着也行，重要的是“有”
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="apps/orders/services.py（示例）">
+<pre>
+from django.db import transaction
+
+from .models import Order, OrderItem
+from .tasks import order_created
+
+
+@transaction.atomic
+def create_order_from_cart(*, cart, user, form) -&gt; Order:
+    order = form.save(commit=False)
+    order.user = user
+    order.save()
+    OrderItem.objects.bulk_create([
+        OrderItem(order=order, product=item['product'],
+                  price=item['price'], quantity=item['quantity'])
+        for item in cart
+    ])
+    cart.clear()
+    order_created.delay_on_commit(order.id)     # 事务提交后才派发
+    return order
+</pre>
+</div>
+
+<div class="code" data-lang="py" data-file="apps/orders/tests/test_services.py（示例）">
+<pre>
+import pytest
+
+from apps.orders.services import create_order_from_cart
+from .factories import ProductFactory, UserFactory
+
+
+@pytest.mark.django_db
+def test_create_order_copies_price(cart_with, order_form):
+    product = ProductFactory(price='10.00')
+    cart = cart_with(product, quantity=2)
+    order = create_order_from_cart(cart=cart, user=UserFactory(), form=order_form)
+
+    product.price = '99.00'
+    product.save()
+
+    item = order.items.get()
+    assert item.price == 10          # 价格快照不随商品改价变化
+    assert order.get_total_cost() == 20
+</pre>
+</div>
+
+<h2 id="howto">怎样用这份清单</h2>
+
+<ol class="steps">
+  <li>先把书里的项目跑通 —— 教学代码的价值在于清晰，不要一开始就按清单全部改写。</li>
+  <li>每学完一章，回到该章的“代码点评”，挑一两条<span class="tag bad">有问题</span>动手修复，并为它写一个测试。</li>
+  <li>开始自己的项目时，从上面的“项目骨架”和“10 个习惯”起步。</li>
+  <li>上线前逐项核对“安全”和“部署与运维”两张表，并运行 <code>python manage.py check --deploy</code>。</li>
+</ol>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>
