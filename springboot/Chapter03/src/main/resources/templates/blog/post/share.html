@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{blog/base}">
+<head>
+  <title>Share a post</title>
+</head>
+<body>
+<div layout:fragment="content">
+  <th:block th:if="${sent}">
+    <h1>E-mail successfully sent</h1>
+    <p>"<span th:text="${post.title}">title</span>" was successfully sent to <span th:text="${form.to}">to</span>.</p>
+  </th:block>
+  <th:block th:unless="${sent}">
+    <h1>Share "<span th:text="${post.title}">title</span>" by e-mail</h1>
+    <!--/* novalidate：关掉浏览器自带校验，好观察服务端校验的效果 */-->
+    <form method="post" th:action="@{/blog/{id}/share/(id=${post.id})}" th:object="${form}" novalidate>
+      <div th:replace="~{fragments/forms :: field('name', 'Name', 'text')}"></div>
+      <div th:replace="~{fragments/forms :: field('email', 'Email', 'email')}"></div>
+      <div th:replace="~{fragments/forms :: field('to', 'To', 'email')}"></div>
+      <div th:replace="~{fragments/forms :: field('comments', 'Comments', 'textarea')}"></div>
+      <input type="submit" value="Send e-mail">
+    </form>
+  </th:block>
+</div>
+</body>
+</html>

@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{admin/layout}">
+<head>
+  <title>Select post to change</title>
+</head>
+<body>
+<div layout:fragment="content">
+  <div class="toolbar">
+    <h1>Select post to change</h1>
+    <a class="button" th:href="@{/admin/blog/post/add/}">Add post +</a>
+  </div>
+
+  <!--/* search_fields：GET 表单，参数名 q 和 Django admin 相同 */-->
+  <form method="get" class="search">
+    <input type="search" name="q" th:value="${q}" placeholder="Search title or body">
+    <input th:if="${status}" type="hidden" name="status" th:value="${status}">
+    <button type="submit">Search</button>
+  </form>
+
+  <div class="layout">
+    <table>
+      <thead>
+        <tr><th>Title</th><th>Slug</th><th>Author</th><th>Publish</th><th>Status</th></tr>
+      </thead>
+      <tbody>
+        <tr th:each="post : ${page.content}">
+          <td><a th:href="@{/admin/blog/post/{id}/change/(id=${post.id})}" th:text="${post.title}">title</a></td>
+          <td th:text="${post.slug}">slug</td>
+          <td th:text="${post.author}">author</td>
+          <td th:text="${#temporals.format(post.publish, 'yyyy-MM-dd HH:mm')}">publish</td>
+          <td th:text="${post.status.label}">status</td>
+        </tr>
+        <tr th:if="${page.empty}"><td colspan="5">0 posts</td></tr>
+      </tbody>
+    </table>
+
+    <!--/* list_filter + show_facets：每个选项后面显示数量 */-->
+    <aside class="filter">
+      <h3>By status</h3>
+      <ul>
+        <li th:classappend="${status == null} ? 'selected'"><a th:href="@{/admin/blog/post/(q=${q})}">All</a></li>
+        <li th:classappend="${status?.name() == 'DRAFT'} ? 'selected'">
+          <a th:href="@{/admin/blog/post/(q=${q},status=DRAFT)}">Draft ([[${draftCount}]])</a>
+        </li>
+        <li th:classappend="${status?.name() == 'PUBLISHED'} ? 'selected'">
+          <a th:href="@{/admin/blog/post/(q=${q},status=PUBLISHED)}">Published ([[${publishedCount}]])</a>
+        </li>
+      </ul>
+    </aside>
+  </div>
+
+  <p class="paginator">
+    <span th:text="|${page.totalElements} posts|">0 posts</span>
+    <th:block th:if="${page.totalPages > 1}">
+      <a th:if="${page.hasPrevious()}" th:href="@{/admin/blog/post/(q=${q},status=${status},page=${page.number})}">‹ prev</a>
+      <span th:text="|Page ${page.number + 1} of ${page.totalPages}|"></span>
+      <a th:if="${page.hasNext()}" th:href="@{/admin/blog/post/(q=${q},status=${status},page=${page.number + 2})}">next ›</a>
+    </th:block>
+  </p>
+</div>
+</body>
+</html>

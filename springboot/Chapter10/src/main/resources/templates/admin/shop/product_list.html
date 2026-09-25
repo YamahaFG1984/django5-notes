@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{admin/layout}">
+<head><title>Select product to change</title></head>
+<body>
+<div layout:fragment="content">
+  <div class="toolbar">
+    <h1>Select product to change</h1>
+    <a class="button" th:href="@{/admin/shop/product/add/}">Add product +</a>
+  </div>
+  <div class="layout">
+    <!--/* list_editable：整张表是一个表单，每行的输入框名字是 rows[i].price、rows[i].available */-->
+    <form method="post" th:action="@{/admin/shop/product/}" th:object="${form}" style="flex:1">
+      <table style="width:100%">
+        <thead><tr><th>Name</th><th>Slug</th><th>Price</th><th>Available</th><th>Created</th><th>Updated</th></tr></thead>
+        <tbody>
+          <tr th:each="p, stat : ${products}">
+            <td>
+              <input type="hidden" th:field="*{rows[__${stat.index}__].id}">
+              <a th:href="@{/admin/shop/product/{id}/change/(id=${p.id})}" th:text="${p.name}">name</a>
+            </td>
+            <td th:text="${p.slug}">slug</td>
+            <td><input type="text" th:field="*{rows[__${stat.index}__].price}"></td>
+            <td><input type="checkbox" th:field="*{rows[__${stat.index}__].available}"></td>
+            <td th:text="${#temporals.format(p.created, 'yyyy-MM-dd HH:mm')}">created</td>
+            <td th:text="${#temporals.format(p.updated, 'yyyy-MM-dd HH:mm')}">updated</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="submit-row"><button type="submit">Save</button></div>
+    </form>
+    <aside class="filter">
+      <h3>By available</h3>
+      <ul>
+        <li th:classappend="${available == null} ? 'selected'"><a th:href="@{/admin/shop/product/}">All</a></li>
+        <li th:classappend="${available == true} ? 'selected'"><a th:href="@{/admin/shop/product/(available=true)}">Yes</a></li>
+        <li th:classappend="${available == false} ? 'selected'"><a th:href="@{/admin/shop/product/(available=false)}">No</a></li>
+      </ul>
+    </aside>
+  </div>
+</div>
+</body>
+</html>

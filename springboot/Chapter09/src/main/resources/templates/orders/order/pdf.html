@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<!--/* PDF 发票模板。openhtmltopdf 需要 XHTML：所有标签都要闭合（<br/>、<link ... />）。
+       样式表路径相对于 InvoicePdfRenderer 设置的基准地址（classpath:/static/）。 */-->
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+  <meta charset="utf-8"/>
+  <link rel="stylesheet" href="css/pdf.css"/>
+</head>
+<body>
+  <h1>My Shop</h1>
+  <p>
+    Invoice no. <span th:text="${order.id}">1</span><br/>
+    <span class="secondary" th:text="${#temporals.format(order.created, 'MMM dd, yyyy')}">Jan 01, 2025</span>
+  </p>
+  <h3>Bill to</h3>
+  <p>
+    <span th:text="|${order.firstName} ${order.lastName}|">name</span><br/>
+    <span th:text="${order.email}">email</span><br/>
+    <span th:text="${order.address}">address</span><br/>
+    <span th:text="|${order.postalCode}, ${order.city}|">postal code, city</span>
+  </p>
+  <h3>Items bought</h3>
+  <table>
+    <thead>
+      <tr><th>Product</th><th>Price</th><th>Quantity</th><th>Cost</th></tr>
+    </thead>
+    <tbody>
+      <tr th:each="item, stat : ${order.items}" th:class="${stat.odd} ? 'row1' : 'row2'">
+        <td th:text="${item.product.name}">name</td>
+        <td class="num" th:text="${'$' + item.price}">$0</td>
+        <td class="num" th:text="${item.quantity}">1</td>
+        <td class="num" th:text="${'$' + item.cost}">$0</td>
+      </tr>
+      <tr class="total">
+        <td colspan="3">Total</td>
+        <td class="num" th:text="${'$' + order.totalCost}">$0</td>
+      </tr>
+    </tbody>
+  </table>
+  <span th:class="${order.paid} ? 'paid' : 'pending'" th:text="${order.paid} ? 'Paid' : 'Pending payment'">Paid</span>
+</body>
+</html>

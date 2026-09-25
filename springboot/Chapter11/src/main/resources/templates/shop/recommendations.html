@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<body>
+<div class="recommendations" th:fragment="recommendations(products, extraClass)" th:if="${!#lists.isEmpty(products)}"
+     th:classappend="${extraClass}">
+  <h3 th:text="#{recommendations}">People who bought this also bought</h3>
+  <div class="item" th:each="p : ${products}">
+    <a th:href="@{${p.absoluteUrl}}"><img th:src="@{${p.imageUrl}}"></a>
+    <p><a th:href="@{${p.absoluteUrl}}" th:text="${p.name}">name</a></p>
+  </div>
+</div>
+</body>
+</html>

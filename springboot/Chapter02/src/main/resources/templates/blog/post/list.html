@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{blog/base}">
+<head>
+  <title>My Blog</title>
+</head>
+<body>
+<div layout:fragment="content">
+  <h1>My Blog</h1>
+  <!--/* posts 是一个 Page<Post>：既能遍历，又带着分页信息（≈ Django 的 Page 对象） */-->
+  <th:block th:each="post : ${posts}">
+    <h2>
+      <!--/* {{ post.get_absolute_url }} */-->
+      <a th:href="@{${post.absoluteUrl}}" th:text="${post.title}">Post title</a>
+    </h2>
+    <p class="date">
+      Published <span th:text="${#temporals.format(post.publish, 'MMM d, yyyy, HH:mm')}">date</span>
+      by <span th:text="${post.author}">author</span>
+    </p>
+    <div th:utext="${#text.linebreaks(#text.truncatewords(post.body, 30))}"></div>
+  </th:block>
+  <!--/* {% include "pagination.html" with page=page_obj %} */-->
+  <div th:replace="~{pagination :: pagination(${posts})}"></div>
+</div>
+</body>
+</html>

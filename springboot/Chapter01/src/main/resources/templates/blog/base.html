@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<!--/* 基础模板 ≈ blog/templates/blog/base.html。
+       layout:fragment 相当于 Django 的 {% block %}，子模板用 layout:decorate 继承它。 */-->
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      xmlns:sec="http://www.thymeleaf.org/extras/spring-security">
+<head>
+  <meta charset="utf-8">
+  <title layout:title-pattern="$CONTENT_TITLE">My blog</title>
+  <link th:href="@{/static/css/blog.css}" rel="stylesheet">
+</head>
+<body>
+  <div id="content">
+    <div layout:fragment="content"></div>
+  </div>
+  <div id="sidebar">
+    <h2>My blog</h2>
+    <p>This is my blog.</p>
+    <p sec:authorize="isAuthenticated()">
+      Hello, <span sec:authentication="name">user</span>.
+      <a th:href="@{/blog/favourites/}">Your favourites</a>
+    </p>
+    <form sec:authorize="isAuthenticated()" th:action="@{/logout}" method="post">
+      <button type="submit">Log out</button>
+    </form>
+    <p sec:authorize="!isAuthenticated()"><a th:href="@{/login}">Log in</a></p>
+  </div>
+</body>
+</html>

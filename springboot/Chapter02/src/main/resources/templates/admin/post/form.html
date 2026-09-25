@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{admin/layout}">
+<head>
+  <title th:text="${post == null} ? 'Add post' : 'Change post'">Post</title>
+</head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="${post == null} ? 'Add post' : 'Change post'">Post</h1>
+
+  <!--/* th:object + th:field 负责回填数据和显示错误，≈ Django 的 {{ form.as_p }} */-->
+  <form th:object="${form}" method="post"
+        th:action="${post == null} ? @{/admin/blog/post/add/} : @{/admin/blog/post/{id}/change/(id=${post.id})}">
+    <div class="errornote" th:if="${#fields.hasErrors('*')}">Please correct the errors below.</div>
+
+    <div class="row">
+      <label for="title">Title:</label>
+      <input type="text" th:field="*{title}" maxlength="250">
+      <ul class="errorlist" th:if="${#fields.hasErrors('title')}"><li th:each="e : ${#fields.errors('title')}" th:text="${e}"></li></ul>
+    </div>
+    <div class="row">
+      <label for="slug">Slug:</label>
+      <input type="text" th:field="*{slug}" maxlength="250">
+      <ul class="errorlist" th:if="${#fields.hasErrors('slug')}"><li th:each="e : ${#fields.errors('slug')}" th:text="${e}"></li></ul>
+    </div>
+    <div class="row">
+      <label for="authorId">Author:</label>
+      <select th:field="*{authorId}">
+        <option value="">---------</option>
+        <option th:each="u : ${authors}" th:value="${u.id}" th:text="${u.username}">admin</option>
+      </select>
+      <ul class="errorlist" th:if="${#fields.hasErrors('authorId')}"><li th:each="e : ${#fields.errors('authorId')}" th:text="${e}"></li></ul>
+    </div>
+    <div class="row">
+      <label for="body">Body:</label>
+      <textarea th:field="*{body}" rows="12"></textarea>
+      <ul class="errorlist" th:if="${#fields.hasErrors('body')}"><li th:each="e : ${#fields.errors('body')}" th:text="${e}"></li></ul>
+    </div>
+    <div class="row">
+      <label for="publish">Publish (UTC):</label>
+      <input type="datetime-local" th:field="*{publish}">
+      <ul class="errorlist" th:if="${#fields.hasErrors('publish')}"><li th:each="e : ${#fields.errors('publish')}" th:text="${e}"></li></ul>
+    </div>
+    <div class="row">
+      <label for="status">Status:</label>
+      <select th:field="*{status}">
+        <option th:each="s : ${statuses}" th:value="${s}" th:text="${s.label}">Draft</option>
+      </select>
+    </div>
+    <div class="submit-row">
+      <button type="submit">Save</button>
+      <a th:href="@{/admin/blog/post/}">Cancel</a>
+    </div>
+  </form>
+
+  <form th:if="${post != null}" th:action="@{/admin/blog/post/{id}/delete/(id=${post.id})}" method="post"
+        onsubmit="return confirm('Are you sure?')">
+    <button type="submit" class="danger">Delete</button>
+  </form>
+
+  <!--/* prepopulated_fields = {'slug': ('title',)}：新建时根据标题自动填 slug */-->
+  <script th:if="${post == null}">
+    const title = document.getElementById('title');
+    const slug = document.getElementById('slug');
+    let touched = slug.value !== '';
+    slug.addEventListener('input', () => { touched = true; });
+    title.addEventListener('input', () => {
+      if (touched) return;
+      slug.value = title.value.normalize('NFKD').replace(/[̀-ͯ]/g, '')
+        .toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/[\s-]+/g, '-');
+    });
+  </script>
+</div>
+</body>
+</html>

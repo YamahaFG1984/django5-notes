@@ -1,0 +1,44 @@
+# ≈ Django 的 settings.py。Spring Boot 的配置项都有默认值，这里只写需要改的。
+spring:
+  application:
+    name: mysite
+  config:
+    # 读取项目根目录下的 .env（≈ python-decouple）；文件不存在也不报错
+    import: optional:file:.env[.properties]
+  datasource:
+    url: jdbc:h2:file:./data/mysite;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  mvc:
+    static-path-pattern: /static/**
+
+mysite:
+  default-from-email: ${DEFAULT_FROM_EMAIL:My Blog <noreply@example.com>}
+
+logging:
+  level:
+    org.hibernate.SQL: info
+
+---
+# 真正通过 SMTP 发信：java -jar app.jar --spring.profiles.active=smtp
+# 用户名、密码从环境变量或 .env 读取，不要写死在代码里
+spring:
+  config:
+    activate:
+      on-profile: smtp
+  mail:
+    host: ${EMAIL_HOST:smtp.gmail.com}
+    port: ${EMAIL_PORT:587}
+    username: ${EMAIL_HOST_USER}
+    password: ${EMAIL_HOST_PASSWORD}
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true   # ≈ EMAIL_USE_TLS = True

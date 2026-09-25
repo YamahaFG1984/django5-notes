@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<!--/* 可复用的表单片段。field(...) ≈ Django 5.0 的 {{ form.name.as_field_group }}：
+       一次渲染 label、控件和错误信息。必须放在带 th:object 的 <form> 里使用。 */-->
+<html xmlns:th="http://www.thymeleaf.org">
+<body>
+<th:block th:fragment="field(name, label, type)">
+  <div class="field">
+    <label th:for="${name}" th:text="|${label}:|">Label:</label>
+    <ul class="errorlist" th:if="${#fields.hasErrors(name)}">
+      <li th:each="err : ${#fields.errors(name)}" th:text="${err}">error</li>
+    </ul>
+    <textarea th:if="${type == 'textarea'}" th:field="*{__${name}__}" rows="6"></textarea>
+    <input th:unless="${type == 'textarea'}" th:type="${type}" th:field="*{__${name}__}">
+  </div>
+</th:block>
+</body>
+</html>

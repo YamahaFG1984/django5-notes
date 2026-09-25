@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{blog/base}">
+<head>
+  <title>Add a comment</title>
+</head>
+<body>
+<div layout:fragment="content">
+  <th:block th:if="${comment}">
+    <h2>Your comment has been added.</h2>
+    <p><a th:href="@{${post.absoluteUrl}}">Back to the post</a></p>
+  </th:block>
+  <div th:unless="${comment}" th:replace="~{blog/post/includes/comment_form :: commentForm}"></div>
+</div>
+</body>
+</html>

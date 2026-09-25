@@ -1,0 +1,12 @@
+<!--/* 既能被 list.html 引入（:: images 片段），也能作为 images_only=1 请求的完整响应 */-->
+<th:block xmlns:th="http://www.thymeleaf.org" th:fragment="images">
+  <div class="image" th:each="image : ${images}">
+    <!--/* {% thumbnail image.image 300x300 crop="smart" as im %} */-->
+    <a th:href="@{${image.absoluteUrl}}">
+      <img th:src="${#thumbnail.url(image.image, 300, 300, true)}">
+    </a>
+    <div class="info">
+      <a th:href="@{${image.absoluteUrl}}" class="title" th:text="${image.title}">title</a>
+    </div>
+  </div>
+</th:block>

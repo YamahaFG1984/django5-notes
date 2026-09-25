@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Log-in</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Log-in</h1>
+  <div class="module">
+    <!--/* ${param.error}：这里只判断参数是否存在，不输出参数值 */-->
+    <p th:if="${param.error}">Your username and password didn't match. Please try again.</p>
+    <p th:unless="${param.error}">Please, use the following form to log-in:</p>
+    <div class="login-form">
+      <form th:action="@{/accounts/login/}" method="post">
+        <p><label for="username">Username:</label> <input type="text" name="username" id="username" required autofocus></p>
+        <p><label for="password">Password:</label> <input type="password" name="password" id="password" required></p>
+        <p><input type="submit" value="Log-in"></p>
+      </form>
+    </div>
+  </div>
+</div>
+</body>
+</html>

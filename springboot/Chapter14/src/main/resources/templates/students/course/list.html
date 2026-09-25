@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>My courses</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>My courses</h1>
+  <div class="module">
+    <div class="course-info" th:each="course : ${courses}">
+      <h3 th:text="${course.title}">Course</h3>
+      <p><a th:href="@{/students/course/{id}/(id=${course.id})}">Access contents</a></p>
+    </div>
+    <p th:if="${courses.isEmpty()}">
+      You are not enrolled in any courses yet.
+      <a th:href="@{/}">Browse courses</a>
+      to enroll on a course.
+    </p>
+  </div>
+</div>
+</body>
+</html>

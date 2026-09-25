@@ -1,0 +1,4 @@
+# 测试用内存数据库，每次运行都是全新的；Flyway 照样会跑迁移
+spring:
+  datasource:
+    url: jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1

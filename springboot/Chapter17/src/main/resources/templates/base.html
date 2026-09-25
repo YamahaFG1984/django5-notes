@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      xmlns:sec="http://www.thymeleaf.org/extras/spring-security">
+<head>
+  <meta charset="utf-8">
+  <title layout:title-pattern="$CONTENT_TITLE">Educa</title>
+  <link th:href="@{/static/css/base.css}" rel="stylesheet">
+  <!--/* 给 JavaScript 用的 CSRF 令牌（拖拽排序的 fetch 请求要带上） */-->
+  <meta name="_csrf" th:content="${_csrf?.token}">
+  <meta name="_csrf_header" th:content="${_csrf?.headerName}">
+</head>
+<body>
+  <div id="header">
+    <a th:href="@{/}" class="logo">Educa</a>
+    <ul class="menu">
+      <li sec:authorize="isAuthenticated()">
+        <form th:action="@{/accounts/logout/}" method="post"><button type="submit">Sign out</button></form>
+      </li>
+      <li sec:authorize="!isAuthenticated()"><a th:href="@{/accounts/login/}">Sign in</a></li>
+    </ul>
+  </div>
+  <div id="content">
+    <div layout:fragment="content"></div>
+  </div>
+  <!--/* ≈ {% block include_js %} */-->
+  <th:block layout:fragment="include_js"></th:block>
+  <script>
+    const csrfToken = document.querySelector('meta[name="_csrf"]').content;
+    const csrfHeader = document.querySelector('meta[name="_csrf_header"]').content;
+  </script>
+  <!--/* ≈ {% block domready %}：子模板在这里放自己的脚本 */-->
+  <script layout:fragment="domready"></script>
+</body>
+</html>

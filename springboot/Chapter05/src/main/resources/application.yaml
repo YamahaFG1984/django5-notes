@@ -1,0 +1,68 @@
+spring:
+  application:
+    name: bookmarks
+  config:
+    import: optional:file:.env[.properties]
+  datasource:
+    # 原书第 4–7 章仍用 SQLite，这里对应地使用 H2 文件库
+    url: jdbc:h2:file:./data/bookmarks;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  mvc:
+    static-path-pattern: /static/**
+  security:
+    oauth2:
+      client:
+        registration:
+          # ≈ SOCIAL_AUTH_GOOGLE_OAUTH2_KEY / SECRET。在 Google Cloud Console 创建 OAuth 客户端，
+          # 回调地址填 https://mysite.com:8443/login/oauth2/code/google
+          google:
+            client-id: ${GOOGLE_OAUTH2_KEY:set-GOOGLE_OAUTH2_KEY-in-.env}
+            client-secret: ${GOOGLE_OAUTH2_SECRET:set-GOOGLE_OAUTH2_SECRET-in-.env}
+            scope: openid, profile, email
+  servlet:
+    multipart:
+      max-file-size: 5MB        # ≈ DATA_UPLOAD_MAX_MEMORY_SIZE / FILE_UPLOAD_MAX_MEMORY_SIZE
+      max-request-size: 6MB
+
+bookmarks:
+  default-from-email: ${DEFAULT_FROM_EMAIL:Bookmarks <noreply@example.com>}
+  # ≈ SECRET_KEY：给密码重置链接签名。生产环境务必用环境变量 SECRET_KEY 覆盖！
+  secret-key: ${SECRET_KEY:dev-insecure-7c1f0d2b-change-me}
+  media-root: ${MEDIA_ROOT:media}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: smtp
+  mail:
+    host: ${EMAIL_HOST:smtp.gmail.com}
+    port: ${EMAIL_PORT:587}
+    username: ${EMAIL_HOST_USER}
+    password: ${EMAIL_HOST_PASSWORD}
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true
+
+---
+# 开发环境用 HTTPS 运行（≈ python manage.py runserver_plus --cert-file cert.crt）
+# 先执行 ./scripts/dev-cert.sh 生成自签名证书，再用 --spring.profiles.active=https 启动
+spring:
+  config:
+    activate:
+      on-profile: https
+server:
+  port: 8443
+  ssl:
+    key-store: file:certs/dev.p12
+    key-store-password: ${SSL_KEYSTORE_PASSWORD:changeit}
+    key-store-type: PKCS12

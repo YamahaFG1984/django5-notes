@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      xmlns:sec="http://www.thymeleaf.org/extras/spring-security">
+<head>
+  <meta charset="utf-8">
+  <title layout:title-pattern="$CONTENT_TITLE">Educa</title>
+  <link th:href="@{/static/css/base.css}" rel="stylesheet">
+</head>
+<body>
+  <div id="header">
+    <a th:href="@{/}" class="logo">Educa</a>
+    <ul class="menu">
+      <li sec:authorize="isAuthenticated()">
+        <form th:action="@{/accounts/logout/}" method="post"><button type="submit">Sign out</button></form>
+      </li>
+      <li sec:authorize="!isAuthenticated()"><a th:href="@{/accounts/login/}">Sign in</a></li>
+    </ul>
+  </div>
+  <div id="content">
+    <div layout:fragment="content"></div>
+  </div>
+</body>
+</html>

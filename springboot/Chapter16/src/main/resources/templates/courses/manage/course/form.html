@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title th:text="${object} ? |Edit course &quot;${object.title}&quot;| : 'Create a new course'">Course</title></head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="${object} ? |Edit course &quot;${object.title}&quot;| : 'Create a new course'">Course</h1>
+  <div class="module">
+    <h2>Course info</h2>
+    <form method="post" th:object="${form}">
+      <div class="field">
+        <label for="subjectId">Subject:</label>
+        <ul class="errorlist" th:if="${#fields.hasErrors('subjectId')}">
+          <li th:each="err : ${#fields.errors('subjectId')}" th:text="${err}">error</li>
+        </ul>
+        <select th:field="*{subjectId}">
+          <option value="">---------</option>
+          <option th:each="s : ${subjects}" th:value="${s.id}" th:text="${s.title}">Subject</option>
+        </select>
+      </div>
+      <th:block th:replace="~{fragments/forms :: field('title', 'Title', 'text')}"></th:block>
+      <th:block th:replace="~{fragments/forms :: field('slug', 'Slug', 'text')}"></th:block>
+      <th:block th:replace="~{fragments/forms :: field('overview', 'Overview', 'textarea')}"></th:block>
+      <p><input type="submit" value="Save course"></p>
+    </form>
+  </div>
+</div>
+</body>
+</html>

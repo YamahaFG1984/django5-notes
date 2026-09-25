@@ -1,0 +1,72 @@
+# 生产环境配置（≈ educa/settings/prod.py）。所有密码都从环境变量读取，不写进代码仓库（≈ python-decouple 的 config()）。
+spring:
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:db}:${POSTGRES_PORT:5432}/${POSTGRES_DB}
+    username: ${POSTGRES_USER}
+    password: ${POSTGRES_PASSWORD}
+  data:
+    redis:
+      host: ${REDIS_HOST:cache}      # ≈ REDIS_URL = 'redis://cache:6379'
+  # 不在生产环境启动 docker compose（jar 里本来也不包含这个模块，这里再显式关掉）
+  docker:
+    compose:
+      enabled: false
+  thymeleaf:
+    cache: true
+  mail:
+    host: ${EMAIL_HOST:}
+    port: ${EMAIL_PORT:587}
+    username: ${EMAIL_HOST_USER:}
+    password: ${EMAIL_HOST_PASSWORD:}
+    properties:
+      mail.smtp.starttls.enable: true
+  web:
+    resources:
+      # 静态文件带上内容哈希（base.css → base-3f2a….css）并长期缓存，≈ ManifestStaticFilesStorage。
+      # 模板里用 @{/static/...} 生成的链接会自动换成带哈希的地址。
+      chain:
+        strategy:
+          content:
+            enabled: true
+            paths: /**
+      cache:
+        cachecontrol:
+          max-age: 365d
+          cache-public: true
+
+server:
+  # 在 Nginx 后面：根据 X-Forwarded-Proto / X-Forwarded-For 还原真实的协议和客户端地址
+  #（≈ SECURE_PROXY_SSL_HEADER），否则应用以为自己跑在 http 上，生成的链接和重定向都会是 http://
+  forward-headers-strategy: native
+  servlet:
+    session:
+      cookie:
+        secure: true        # ≈ SESSION_COOKIE_SECURE = True（CSRF 令牌存在会话里，不需要单独的 CSRF cookie）
+        http-only: true
+        same-site: lax
+  error:
+    include-stacktrace: never   # ≈ DEBUG = False：出错时不向用户展示堆栈
+
+logging:
+  structured:
+    format:
+      console: ecs            # 输出 JSON 格式日志，方便日志系统收集
+
+management:
+  endpoint:
+    health:
+      show-details: never
+
+educa:
+  media-root: ${MEDIA_ROOT:/app/media}
+  site-domain: ${SITE_DOMAIN:educaproject.com}
+  require-https: true                             # ≈ SECURE_SSL_REDIRECT = True
+  # ≈ ALLOWED_HOSTS = ['.educaproject.com']；localhost 留给容器内部的健康检查
+  allowed-hosts: .${SITE_DOMAIN:educaproject.com}, localhost
+
+# 接口文档（/v3/api-docs、/swagger-ui.html）只在开发环境开放
+springdoc:
+  api-docs:
+    enabled: false
+  swagger-ui:
+    enabled: false

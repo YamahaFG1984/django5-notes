@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>People</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>People</h1>
+  <div id="people-list">
+    <div class="user" th:each="profile : ${profiles}" th:with="user=${profile.user}">
+      <a th:href="@{${user.absoluteUrl}}">
+        <img th:src="${#thumbnail.url(profile.photo, 180, 180, true)}">
+      </a>
+      <div class="info">
+        <a th:href="@{${user.absoluteUrl}}" class="title" th:text="${user.fullName ?: user.username}">name</a>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

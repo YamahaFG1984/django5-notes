@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{admin/layout}">
+<head><title>Select order to change</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Select order to change</h1>
+  <div class="layout">
+    <!--/* 管理动作：选择动作 + 勾选行 + Go，≈ Django admin 列表页顶部的 actions 下拉框 */-->
+    <form method="post" th:action="@{/admin/orders/order/action/}" style="flex:1">
+      <div class="actions">
+        <label>Action:
+          <select name="action">
+            <option value="">---------</option>
+            <option value="export_to_csv">Export to CSV</option>
+          </select>
+        </label>
+        <button type="submit">Go</button>
+      </div>
+      <table style="width:100%">
+        <thead>
+          <tr><th><input type="checkbox" onclick="document.querySelectorAll('input[name=ids]').forEach(c => c.checked = this.checked)"></th>
+              <th>ID</th><th>First name</th><th>Last name</th><th>Email</th><th>City</th><th>Paid</th>
+              <th>Stripe payment</th><th>Created</th><th></th><th>Invoice</th></tr>
+        </thead>
+        <tbody>
+          <tr th:each="o : ${orders}">
+            <td><input type="checkbox" name="ids" th:value="${o.id}"></td>
+            <td th:text="${o.id}">1</td>
+            <td th:text="${o.firstName}">first</td>
+            <td th:text="${o.lastName}">last</td>
+            <td th:text="${o.email}">email</td>
+            <td th:text="${o.city}">city</td>
+            <td th:text="${o.paid} ? '✔' : '✘'">✘</td>
+            <!--/* order_payment：自定义列，链接到 Stripe 控制台 */-->
+            <td><a th:if="${o.stripeId != ''}" th:href="${o.stripeUrl(stripeTestMode)}" target="_blank" th:text="${o.stripeId}">pi_</a></td>
+            <td th:text="${#temporals.format(o.created, 'yyyy-MM-dd HH:mm')}">created</td>
+            <td><a th:href="@{/admin/orders/order/{id}/detail/(id=${o.id})}">View</a></td>
+            <td><a th:href="@{/admin/orders/order/{id}/pdf/(id=${o.id})}">PDF</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </form>
+    <aside class="filter">
+      <h3>By paid</h3>
+      <ul>
+        <li th:classappend="${paid == null} ? 'selected'"><a th:href="@{/admin/orders/order/}">All</a></li>
+        <li th:classappend="${paid == true} ? 'selected'"><a th:href="@{/admin/orders/order/(paid=true)}">Yes</a></li>
+        <li th:classappend="${paid == false} ? 'selected'"><a th:href="@{/admin/orders/order/(paid=false)}">No</a></li>
+      </ul>
+    </aside>
+  </div>
+</div>
+</body>
+</html>

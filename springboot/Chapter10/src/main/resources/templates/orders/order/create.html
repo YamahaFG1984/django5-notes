@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{shop/base}">
+<head><title>Checkout</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Checkout</h1>
+  <div class="order-info">
+    <h3>Your order</h3>
+    <ul>
+      <li th:each="line : ${lines}">
+        <th:block th:text="|${line.quantity}x ${line.product.name}|">1x name</th:block>
+        <span th:text="${'$' + line.totalPrice}">$0</span>
+      </li>
+      <li th:if="${totals.coupon != null}">
+        <th:block th:text="|&quot;${totals.coupon.code}&quot; (${totals.coupon.discount}% off)|">"CODE" (10% off)</th:block>
+        <span class="neg" th:text="${'- $' + totals.discount}">- $0</span>
+      </li>
+    </ul>
+    <p th:text="${'Total: $' + totals.total}">Total: $0</p>
+  </div>
+  <form method="post" class="order-form" th:action="@{/orders/create/}" th:object="${form}">
+    <div th:replace="~{fragments/forms :: field('firstName', 'First name', 'text')}"></div>
+    <div th:replace="~{fragments/forms :: field('lastName', 'Last name', 'text')}"></div>
+    <div th:replace="~{fragments/forms :: field('email', 'Email', 'email')}"></div>
+    <div th:replace="~{fragments/forms :: field('address', 'Address', 'text')}"></div>
+    <div th:replace="~{fragments/forms :: field('postalCode', 'Postal code', 'text')}"></div>
+    <div th:replace="~{fragments/forms :: field('city', 'City', 'text')}"></div>
+    <p><input type="submit" value="Place order"></p>
+  </form>
+</div>
+</body>
+</html>

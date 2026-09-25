@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<!--/* Spring Boot 找到 templates/error/404.html 就用它渲染 404，≈ Django 的 templates/404.html */-->
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+  <meta charset="utf-8">
+  <title>Page not found</title>
+  <link th:href="@{/static/css/blog.css}" rel="stylesheet">
+</head>
+<body>
+  <div id="content">
+    <h1>Page not found</h1>
+    <p>The requested resource was not found on this server.</p>
+    <p><a th:href="@{/blog/}">Back to the blog</a></p>
+  </div>
+</body>
+</html>

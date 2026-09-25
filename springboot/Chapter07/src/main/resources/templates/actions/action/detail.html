@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<!--/* 一条动态。参数 item 是 ActionService.ActionView：actor、actorPhoto、targetLabel、targetUrl、targetImage */-->
+<html xmlns:th="http://www.thymeleaf.org">
+<body>
+<div class="action" th:fragment="action(item)" th:with="user=${item.actor}">
+  <div class="images">
+    <a th:if="${item.actorPhoto != ''}" th:href="@{${user.absoluteUrl}}">
+      <img th:src="${#thumbnail.url(item.actorPhoto, 80, 80, true)}" th:alt="${user.fullName}" class="item-img">
+    </a>
+    <a th:if="${item.targetImage}" th:href="@{${item.targetUrl}}">
+      <img th:src="${#thumbnail.url(item.targetImage, 80, 80, true)}" class="item-img">
+    </a>
+  </div>
+  <div class="info">
+    <p>
+      <!--/* {{ action.created|timesince }} ago */-->
+      <span class="date" th:text="|${#text.timesince(item.action.created)} ago|">1 minute ago</span>
+      <br>
+      <a th:href="@{${user.absoluteUrl}}" th:text="${user.displayName}">user</a>
+      <span th:text="${item.action.verb}">verb</span>
+      <a th:if="${item.targetUrl}" th:href="@{${item.targetUrl}}" th:text="${item.targetLabel}">target</a>
+    </p>
+  </div>
+</div>
+</body>
+</html>

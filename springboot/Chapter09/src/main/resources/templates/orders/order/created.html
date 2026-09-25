@@ -1,0 +1,10 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{shop/base}">
+<head><title>Thank you</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Thank you</h1>
+  <p>Your order has been successfully completed. Your order number is <strong th:text="${order.id}">1</strong>.</p>
+</div>
+</body>
+</html>

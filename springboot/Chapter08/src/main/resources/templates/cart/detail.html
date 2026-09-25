@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{shop/base}">
+<head><title>Your shopping cart</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Your shopping cart</h1>
+  <table class="cart">
+    <thead>
+      <tr><th>Image</th><th>Product</th><th>Quantity</th><th>Remove</th><th>Unit price</th><th>Price</th></tr>
+    </thead>
+    <tbody>
+      <tr th:each="line : ${lines}" th:with="product=${line.product}">
+        <td><a th:href="@{${product.absoluteUrl}}"><img th:src="@{${product.imageUrl}}"></a></td>
+        <td th:text="${product.name}">name</td>
+        <td>
+          <!--/* 更新数量：override=true 表示“设为这个数量”而不是“再加这么多” */-->
+          <form th:action="@{/cart/add/{id}/(id=${product.id})}" method="post">
+            <select name="quantity">
+              <option th:each="i : ${quantityChoices}" th:value="${i}" th:text="${i}" th:selected="${i == line.quantity}">1</option>
+            </select>
+            <input type="hidden" name="override" value="true">
+            <input type="submit" value="Update">
+          </form>
+        </td>
+        <td>
+          <form th:action="@{/cart/remove/{id}/(id=${product.id})}" method="post">
+            <input type="submit" value="Remove">
+          </form>
+        </td>
+        <td class="num" th:text="${'$' + line.price}">$0</td>
+        <td class="num" th:text="${'$' + line.totalPrice}">$0</td>
+      </tr>
+      <tr class="total">
+        <td>Total</td>
+        <td colspan="4"></td>
+        <td class="num" th:text="${'$' + cartSummary.totalPrice}">$0</td>
+      </tr>
+    </tbody>
+  </table>
+  <p class="text-right">
+    <a th:href="@{/}" class="button light">Continue shopping</a>
+    <a th:href="@{/orders/create/}" class="button">Checkout</a>
+  </p>
+</div>
+</body>
+</html>

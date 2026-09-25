@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{blog/base}">
+<head>
+  <title>Search</title>
+</head>
+<body>
+<div layout:fragment="content">
+  <th:block th:if="${query}">
+    <h1>Posts containing "<span th:text="${query}">query</span>"</h1>
+    <h3 th:with="total=${#lists.size(results)}" th:text="|Found ${total} result${total == 1 ? '' : 's'}|">Found 0 results</h3>
+    <th:block th:each="post : ${results}">
+      <h4><a th:href="@{${post.absoluteUrl}}" th:text="${post.title}">title</a></h4>
+      <div th:utext="${#text.truncatewordsHtml(#blog.markdown(post.body), 12)}"></div>
+    </th:block>
+    <p th:if="${#lists.isEmpty(results)}">There are no results for your query.</p>
+    <p><a th:href="@{/blog/search/}">Search again</a></p>
+  </th:block>
+  <th:block th:unless="${query}">
+    <h1>Search for posts</h1>
+    <form method="get" th:action="@{/blog/search/}" th:object="${form}">
+      <div th:replace="~{fragments/forms :: field('query', 'Query', 'text')}"></div>
+      <input type="submit" value="Search">
+    </form>
+  </th:block>
+</div>
+</body>
+</html>

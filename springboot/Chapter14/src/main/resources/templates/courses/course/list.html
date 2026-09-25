@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title th:text="${subject} ? |${subject.title} courses| : 'All courses'">All courses</title></head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="${subject} ? |${subject.title} courses| : 'All courses'">All courses</h1>
+  <div class="contents">
+    <h3>Subjects</h3>
+    <ul id="modules">
+      <li th:classappend="${subject == null} ? 'selected'"><a th:href="@{/}">All</a></li>
+      <li th:each="s : ${subjects}" th:classappend="${subject != null and subject.id == s.id} ? 'selected'">
+        <a th:href="@{/course/subject/{slug}/(slug=${s.slug})}">
+          <th:block th:text="${s.title}">Subject</th:block>
+          <br>
+          <!--/* {{ s.total_courses }} course{{ s.total_courses|pluralize }} */-->
+          <span th:text="|${s.totalCourses} course${s.totalCourses == 1 ? '' : 's'}|">0 courses</span>
+        </a>
+      </li>
+    </ul>
+  </div>
+  <div class="module">
+    <th:block th:each="course : ${courses}">
+      <h3><a th:href="@{/course/{slug}/(slug=${course.slug})}" th:text="${course.title}">Course</a></h3>
+      <p>
+        <a th:href="@{/course/subject/{slug}/(slug=${course.subjectSlug})}" th:text="${course.subjectTitle}">Subject</a>.
+        <th:block th:text="|${course.totalModules} modules.|">0 modules.</th:block>
+        Instructor: <th:block th:text="${course.instructor()}">name</th:block>
+      </p>
+    </th:block>
+  </div>
+</div>
+</body>
+</html>

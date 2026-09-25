@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout">
+<head>
+  <meta charset="utf-8">
+  <title layout:title-pattern="$CONTENT_TITLE">Bookmarks</title>
+  <link th:href="@{/static/css/base.css}" rel="stylesheet">
+</head>
+<body>
+  <div id="header">
+    <span class="logo">Bookmarks</span>
+    <!--/* requestUser 由 CurrentUserAdvice 放进模型（≈ {{ request.user }}）；section 用来高亮当前菜单 */-->
+    <ul class="menu" th:if="${requestUser}">
+      <li th:classappend="${section == 'dashboard'} ? 'selected'">
+        <a th:href="@{/account/}">My dashboard</a>
+      </li>
+      <li th:classappend="${section == 'images'} ? 'selected'"><a href="#">Images</a></li>
+      <li th:classappend="${section == 'people'} ? 'selected'"><a href="#">People</a></li>
+    </ul>
+    <span class="user">
+      <th:block th:if="${requestUser}">
+        Hello <span th:text="${requestUser.displayName}">user</span>,
+        <!--/* 登出必须用 POST：Spring Security 开启 CSRF 时只接受 POST /account/logout/ */-->
+        <form th:action="@{/account/logout/}" method="post">
+          <button type="submit">Logout</button>
+        </form>
+      </th:block>
+      <a th:unless="${requestUser}" th:href="@{/account/login/}">Log-in</a>
+    </span>
+  </div>
+  <div id="content">
+    <div layout:fragment="content"></div>
+  </div>
+</body>
+</html>

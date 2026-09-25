@@ -1,0 +1,48 @@
+# ≈ Django 的 settings.py。Spring Boot 的配置项都有默认值，这里只写需要改的。
+spring:
+  application:
+    name: mysite
+  config:
+    # 读取项目根目录下的 .env（≈ python-decouple）；文件不存在也不报错
+    import: optional:file:.env[.properties]
+  datasource:
+    # 从本章起使用 PostgreSQL（≈ DATABASES['default']['ENGINE'] = 'django.db.backends.postgresql'）
+    # 用 mvn spring-boot:run 时这几项会被 docker compose 自动提供的连接信息覆盖
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${DB_NAME:blog}
+    username: ${DB_USER:blog}
+    password: ${DB_PASSWORD:blog}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        # 懒加载集合时一次取一批（WHERE post_id IN (...)），相当于全局开启 prefetch_related
+        default_batch_fetch_size: 50
+  mvc:
+    static-path-pattern: /static/**
+
+mysite:
+  default-from-email: ${DEFAULT_FROM_EMAIL:My Blog <noreply@example.com>}
+
+logging:
+  level:
+    org.hibernate.SQL: info
+
+---
+# 真正通过 SMTP 发信：java -jar app.jar --spring.profiles.active=smtp
+# 用户名、密码从环境变量或 .env 读取，不要写死在代码里
+spring:
+  config:
+    activate:
+      on-profile: smtp
+  mail:
+    host: ${EMAIL_HOST:smtp.gmail.com}
+    port: ${EMAIL_PORT:587}
+    username: ${EMAIL_HOST_USER}
+    password: ${EMAIL_HOST_PASSWORD}
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true   # ≈ EMAIL_USE_TLS = True

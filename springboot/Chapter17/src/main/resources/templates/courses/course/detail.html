@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      xmlns:sec="http://www.thymeleaf.org/extras/spring-security" layout:decorate="~{base}">
+<head><title th:text="${object.title}">Course</title></head>
+<body>
+<div layout:fragment="content" th:with="subject=${object.subject}">
+  <h1 th:text="${object.title}">Course</h1>
+  <div class="module">
+    <h2>Overview</h2>
+    <p>
+      <a th:href="@{/course/subject/{slug}/(slug=${subject.slug})}" th:text="${subject.title}">Subject</a>.
+      <th:block th:text="|${object.modules.size()} modules.|">0 modules.</th:block>
+      Instructor: <th:block th:text="${!#strings.isEmpty(object.owner.fullName) ? object.owner.fullName : object.owner.username}">name</th:block>
+    </p>
+    <div th:utext="${#text.linebreaks(object.overview)}"></div>
+    <th:block sec:authorize="isAuthenticated()">
+      <a th:if="${enrolled}" th:href="@{/students/course/{id}/(id=${object.id})}" class="button">Access contents</a>
+      <!--/* CourseEnrollForm：只有一个隐藏字段 course */-->
+      <form th:unless="${enrolled}" th:action="@{/students/enroll-course/}" method="post">
+        <input type="hidden" name="course" th:value="${object.id}">
+        <input type="submit" value="Enroll now">
+      </form>
+    </th:block>
+    <a sec:authorize="!isAuthenticated()" th:href="@{/students/register/}" class="button">Register to enroll</a>
+  </div>
+</div>
+</body>
+</html>

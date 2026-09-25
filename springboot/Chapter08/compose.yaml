@@ -1,0 +1,15 @@
+# 开发环境依赖的服务。mvn spring-boot:run 时由 spring-boot-docker-compose 自动启动，
+# RabbitMQ 的连接信息会自动注入 spring.rabbitmq.*；Mailpit 没有自动集成，用 spring.mail.* 配置。
+services:
+  rabbitmq:
+    # ≈ 书中的 docker run -it --rm --name rabbitmq -p 5672:5672 -p 15672:15672 rabbitmq:3.13.1-management
+    image: rabbitmq:3.13-management
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_UI_PORT:-15672}:15672"   # 管理界面 http://localhost:15672（guest/guest），部分替代 Flower
+  mailpit:
+    # 假的 SMTP 服务器：收下所有邮件，在 http://localhost:8025 查看（≈ console 邮件后端，但能看附件）
+    image: axllent/mailpit:latest
+    ports:
+      - "${MAIL_PORT:-1025}:1025"
+      - "${MAIL_UI_PORT:-8025}:8025"

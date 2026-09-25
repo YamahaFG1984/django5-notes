@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<!--/* PDF 发票模板。openhtmltopdf 需要 XHTML：所有标签都要闭合（<br/>、<link ... />）。
+       样式表路径相对于 InvoicePdfRenderer 设置的基准地址（classpath:/static/）。 */-->
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+  <meta charset="utf-8"/>
+  <link rel="stylesheet" href="css/pdf.css"/>
+</head>
+<body>
+  <h1 th:text="#{site.title}">My Shop</h1>
+  <p>
+    <th:block th:text="#{invoice.number}">Invoice no.</th:block> <span th:text="${order.id}">1</span><br/>
+    <span class="secondary" th:text="${#temporals.format(order.created, 'MMM dd, yyyy')}">Jan 01, 2025</span>
+  </p>
+  <h3 th:text="#{invoice.bill-to}">Bill to</h3>
+  <p>
+    <span th:text="|${order.firstName} ${order.lastName}|">name</span><br/>
+    <span th:text="${order.email}">email</span><br/>
+    <span th:text="${order.address}">address</span><br/>
+    <span th:text="|${order.postalCode}, ${order.city}|">postal code, city</span>
+  </p>
+  <h3 th:text="#{invoice.items}">Items bought</h3>
+  <table>
+    <thead>
+      <tr><th th:text="#{cart.product}">Product</th><th th:text="#{cart.price}">Price</th><th th:text="#{quantity}">Quantity</th><th th:text="#{invoice.cost}">Cost</th></tr>
+    </thead>
+    <tbody>
+      <tr th:each="item, stat : ${order.items}" th:class="${stat.odd} ? 'row1' : 'row2'">
+        <td th:text="${item.product.name}">name</td>
+        <td class="num" th:text="${#fmt.money(item.price)}">$0</td>
+        <td class="num" th:text="${item.quantity}">1</td>
+        <td class="num" th:text="${#fmt.money(item.cost)}">$0</td>
+      </tr>
+      <tr class="subtotal" th:if="${order.coupon != null}">
+        <td colspan="3" th:text="#{cart.subtotal}">Subtotal</td>
+        <td class="num" th:text="${#fmt.money(order.totalCostBeforeDiscount)}">$0</td>
+      </tr>
+      <tr th:if="${order.coupon != null}">
+        <td colspan="3" th:text="#{order.coupon(${order.coupon.code}, ${order.discount})}">coupon</td>
+        <td class="num neg" th:text="${'- ' + #fmt.money(order.discountAmount)}">- $0</td>
+      </tr>
+      <tr class="total">
+        <td colspan="3" th:text="#{cart.total}">Total</td>
+        <td class="num" th:text="${#fmt.money(order.totalCost)}">$0</td>
+      </tr>
+    </tbody>
+  </table>
+  <span th:class="${order.paid} ? 'paid' : 'pending'" th:text="${order.paid} ? #{invoice.paid} : #{invoice.pending}">Paid</span>
+</body>
+</html>

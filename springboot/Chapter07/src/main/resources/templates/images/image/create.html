@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Bookmark an image</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Bookmark an image</h1>
+  <img th:src="${form.url}" class="image-preview" th:if="${form.url}">
+  <form method="post" th:action="@{/images/create/}" th:object="${form}">
+    <div th:replace="~{fragments/forms :: field('title', 'Title', 'text')}"></div>
+    <!--/* widgets = {'url': forms.HiddenInput} */-->
+    <input type="hidden" th:field="*{url}">
+    <ul class="errorlist" th:if="${#fields.hasErrors('url')}"><li th:each="e : ${#fields.errors('url')}" th:text="${e}"></li></ul>
+    <ul class="errorlist" th:if="${#fields.hasErrors('urlExtensionValid')}"><li th:each="e : ${#fields.errors('urlExtensionValid')}" th:text="${e}"></li></ul>
+    <div th:replace="~{fragments/forms :: field('description', 'Description', 'textarea')}"></div>
+    <input type="submit" value="Bookmark it!">
+  </form>
+</div>
+</body>
+</html>

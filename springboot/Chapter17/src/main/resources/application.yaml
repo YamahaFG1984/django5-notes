@@ -1,0 +1,57 @@
+# 公共配置 + 本地开发的默认值（≈ settings/base.py + settings/local.py）。
+# 生产环境用 --spring.profiles.active=prod 叠加 application-prod.yaml（≈ settings/prod.py）。
+spring:
+  application:
+    name: educa
+  datasource:
+    # 本地开发：H2 文件库；生产环境（prod）：PostgreSQL
+    url: jdbc:h2:file:./data/educa;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        default_batch_fetch_size: 50
+  mvc:
+    static-path-pattern: /static/**
+  jackson:
+    # JSON 字段用下划线风格（total_courses），和 DRF 的输出保持一致
+    property-naming-strategy: SNAKE_CASE
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 11MB
+  data:
+    redis:
+      # 开发时 mvn spring-boot:run 会自动 docker compose up，并覆盖 host/port
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      # 用到的是缓存和发布/订阅，不需要 Spring Data Redis 仓库（关掉启动时的扫描提示）
+      repositories:
+        enabled: false
+  cache:
+    # ≈ CACHES = {'default': {'BACKEND': '...RedisCache', 'LOCATION': 'redis://127.0.0.1:6379'}}
+    type: redis
+    redis:
+      time-to-live: 15m          # ≈ CACHE_MIDDLEWARE_SECONDS = 60 * 15
+      key-prefix: "educa::"      # ≈ CACHE_MIDDLEWARE_KEY_PREFIX = 'educa'
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, caches
+  endpoint:
+    health:
+      # /actuator/health/liveness 和 /readiness：给容器编排（Docker 健康检查、Kubernetes 探针）用
+      probes:
+        enabled: true
+
+educa:
+  media-root: ${MEDIA_ROOT:media}
+  default-from-email: ${DEFAULT_FROM_EMAIL:Educa <noreply@example.com>}

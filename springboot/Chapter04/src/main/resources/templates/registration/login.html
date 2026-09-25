@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Log-in</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Log-in</h1>
+  <p th:if="${loginError}">Your username and password didn't match. Please try again.</p>
+  <p th:unless="${loginError}">
+    Please, use the following form to log-in.
+    If you don't have an account <a th:href="@{/account/register/}">register here</a>.
+  </p>
+  <div class="login-form">
+    <!--/* 字段名 username / password 是 Spring Security 的默认值；
+           登录后跳回原页面靠的是 Spring Security 保存的请求（RequestCache），不需要 Django 的 next 隐藏字段 */-->
+    <form th:action="@{/account/login/}" method="post">
+      <p><label for="username">Username:</label> <input type="text" name="username" id="username" autofocus required></p>
+      <p><label for="password">Password:</label> <input type="password" name="password" id="password" required></p>
+      <p><input type="submit" value="Log-in"></p>
+    </form>
+    <p><a th:href="@{/account/password-reset/}">Forgotten your password?</a></p>
+  </div>
+</div>
+</body>
+</html>

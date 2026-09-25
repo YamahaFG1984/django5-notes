@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title th:text="${object} ? |Edit content &quot;${object.title}&quot;| : 'Add new content'">Content</title></head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="${object} ? |Edit content &quot;${object.title}&quot;| : 'Add new content'">Content</h1>
+  <div class="module">
+    <h2>Course info</h2>
+    <!--/* modelform_factory 按模型动态生成字段；这里按 modelName 选择显示哪个字段 */-->
+    <form method="post" enctype="multipart/form-data" th:object="${form}">
+      <th:block th:replace="~{fragments/forms :: field('title', 'Title', 'text')}"></th:block>
+      <th:block th:if="${modelName == 'text'}">
+        <th:block th:replace="~{fragments/forms :: field('content', 'Content', 'textarea')}"></th:block>
+      </th:block>
+      <th:block th:if="${modelName == 'video'}">
+        <th:block th:replace="~{fragments/forms :: field('url', 'Url', 'url')}"></th:block>
+      </th:block>
+      <th:block th:if="${modelName == 'image' or modelName == 'file'}">
+        <p th:if="${currentFile}">Currently: <a th:href="@{|/media/${currentFile}|}" th:text="${currentFile}">file</a></p>
+        <th:block th:replace="~{fragments/forms :: field('file', ${currentFile} ? 'Change' : 'File', 'file')}"></th:block>
+      </th:block>
+      <p><input type="submit" value="Save content"></p>
+    </form>
+  </div>
+</div>
+</body>
+</html>
