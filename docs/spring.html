@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 重构版 · 导读 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="S">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<div class="hero">
+  <span class="chapter-eyebrow">Spring Boot 重构版 · 导读</span>
+  <h1>同样四个项目，用 Spring Boot 再做一遍</h1>
+  <p class="sub">
+    这一部分把《Django 5 By Example》配套仓库里 17 章的代码，逐章用 <strong>Spring Boot 4.1 + Java 21</strong> 重写，
+    每章一个可以独立运行、带测试的 Maven 项目，放在仓库的 <code>springboot/ChapterNN/</code> 目录。
+    教程页面始终把 <strong>Django 5.2</strong> 的写法放在左边、Spring 的写法放在右边，讲清楚“同一个需求，两个框架各自怎么想”。
+  </p>
+  <p style="margin-top:14px">
+    <span class="pill">Spring Boot 4.1</span><span class="pill">Java 21</span><span class="pill">Spring MVC + Thymeleaf</span>
+    <span class="pill">Spring Data JPA / Hibernate 7</span><span class="pill">Flyway</span><span class="pill">Spring Security 7</span>
+    <span class="pill">PostgreSQL</span><span class="pill">Redis</span><span class="pill">RabbitMQ</span><span class="pill">Testcontainers</span>
+  </p>
+</div>
+
+<h2 id="why">为什么要对照着学</h2>
+
+<p>
+  Django 和 Spring Boot 解决的是同一类问题：接收 HTTP 请求、读写数据库、渲染页面或 JSON、处理登录和权限。
+  但两者的“性格”很不一样：
+</p>
+
+<div class="cards">
+  <div class="card"><span class="ic">&#128267;</span><h4>Django：电池全包</h4><p>ORM、迁移、表单、Admin、认证、缓存、国际化都在一个框架里，约定大于配置，一个 <code>models.py</code> 就能生成表、表单和后台。</p></div>
+  <div class="card"><span class="ic">&#129513;</span><h4>Spring Boot：拼装式</h4><p>核心是依赖注入容器；Web、数据、安全、消息各是独立项目，Boot 负责“自动配置”把它们拼好。更显式，也更啰嗦。</p></div>
+  <div class="card"><span class="ic">&#128737;</span><h4>类型与编译期检查</h4><p>Java 的静态类型让很多 Django 里运行时才暴露的错误（拼错字段名、传错参数类型）在编译时就被发现。</p></div>
+  <div class="card"><span class="ic">&#128295;</span><h4>要自己动手的地方</h4><p>Spring 生态没有 Django Admin、没有自动生成迁移、没有 ModelForm。这些“差距”正是对照学习时最有收获的部分。</p></div>
+</div>
+
+<div class="box key">
+  <div class="t">&#128273; 读法建议</div>
+  <p>
+    每一章的 Spring 页面都假设你已经读过（或大致了解）对应的 Django 章节。
+    概念第一次出现时会解释清楚，但 Django 那一侧的原理不再重复 —— 需要时点页面里的“Django 版第 N 章”链接回去看。
+  </p>
+</div>
+
+<h2 id="map">概念对照表</h2>
+
+<p>下面这张表是全书的“字典”，后面每一章都会展开其中的几行。</p>
+
+<div class="tw">
+<table>
+  <tr><th>Django 5.2</th><th>Spring Boot 4.1</th><th>首次出现</th></tr>
+  <tr><td>项目（project）+ 应用（app）</td><td>一个 Maven 项目 + 按功能划分的 Java 包（<code>blog</code>、<code>account</code>…）</td><td>第 1 章</td></tr>
+  <tr><td><code>requirements.txt</code> / <code>pip</code></td><td><code>pom.xml</code> / Maven；<code>spring-boot-starter-parent</code> 统一管理版本</td><td>第 1 章</td></tr>
+  <tr><td><code>settings.py</code></td><td><code>application.yaml</code> + <code>@ConfigurationProperties</code> + Profile</td><td>第 1、2、17 章</td></tr>
+  <tr><td><code>manage.py runserver</code></td><td><code>mvn spring-boot:run</code>（内嵌 Tomcat）+ DevTools 自动重启</td><td>第 1 章</td></tr>
+  <tr><td><code>models.Model</code></td><td>JPA <code>@Entity</code>（Hibernate 实现）</td><td>第 1 章</td></tr>
+  <tr><td><code>makemigrations</code> / <code>migrate</code></td><td>Flyway：手写 <code>V1__xxx.sql</code>，启动时自动执行；Hibernate 只做 <code>validate</code></td><td>第 1 章</td></tr>
+  <tr><td>Manager / QuerySet</td><td>Spring Data 仓库接口：方法名派生查询、<code>@Query</code>（JPQL/SQL）、<code>Specification</code></td><td>第 1 章</td></tr>
+  <tr><td><code>select_related</code> / <code>prefetch_related</code></td><td><code>@EntityGraph</code> / <code>join fetch</code> / <code>default_batch_fetch_size</code></td><td>第 1、3 章</td></tr>
+  <tr><td><code>views.py</code> + <code>urls.py</code></td><td><code>@Controller</code> 类，方法上的 <code>@GetMapping</code> / <code>@PostMapping</code> 就是路由</td><td>第 1 章</td></tr>
+  <tr><td>Django 模板语言（DTL）</td><td>Thymeleaf + Layout Dialect（<code>layout:decorate</code> ≈ <code>{% extends %}</code>）</td><td>第 1 章</td></tr>
+  <tr><td>模板过滤器 / 自定义模板标签</td><td>表达式对象（<code>#temporals</code>、自定义方言 <code>#text</code>、<code>#blog</code>）+ 片段（fragment）</td><td>第 1、3 章</td></tr>
+  <tr><td>Django Admin</td><td>没有等价物 —— 本书手写一个“迷你后台”</td><td>第 1、9 章</td></tr>
+  <tr><td><code>forms.Form</code> / <code>ModelForm</code></td><td>表单对象（普通 Java 类）+ Bean Validation 注解 + <code>BindingResult</code></td><td>第 2 章</td></tr>
+  <tr><td><code>Paginator</code> / <code>ListView</code></td><td><code>Pageable</code> / <code>Page&lt;T&gt;</code></td><td>第 2 章</td></tr>
+  <tr><td><code>send_mail</code> + 邮件后端</td><td><code>MailSender</code> / <code>JavaMailSender</code>（开发时换成打印到日志的实现）</td><td>第 2 章</td></tr>
+  <tr><td><code>django.contrib.auth</code> + 中间件</td><td>Spring Security：<code>SecurityFilterChain</code>、<code>UserDetailsService</code>、<code>PasswordEncoder</code></td><td>第 1、4、5 章</td></tr>
+  <tr><td>messages 框架</td><td><code>RedirectAttributes.addFlashAttribute</code>（闪存属性）</td><td>第 5 章</td></tr>
+  <tr><td>python-social-auth</td><td><code>spring-boot-starter-security-oauth2-client</code></td><td>第 5 章</td></tr>
+  <tr><td>信号（signals）</td><td><code>ApplicationEventPublisher</code> + <code>@EventListener</code> / <code>@TransactionalEventListener</code></td><td>第 7 章</td></tr>
+  <tr><td>上下文处理器</td><td><code>@ControllerAdvice</code> + <code>@ModelAttribute</code></td><td>第 8 章</td></tr>
+  <tr><td>会话 <code>request.session</code></td><td><code>HttpSession</code> / <code>@SessionScope</code> Bean</td><td>第 8 章</td></tr>
+  <tr><td>Celery + RabbitMQ</td><td>Spring AMQP（<code>RabbitTemplate</code> + <code>@RabbitListener</code>）</td><td>第 8 章</td></tr>
+  <tr><td>国际化 <code>gettext</code> / <code>.po</code></td><td><code>MessageSource</code> + <code>messages_xx.properties</code> + <code>LocaleResolver</code></td><td>第 11 章</td></tr>
+  <tr><td>fixtures（<code>loaddata</code>）</td><td>读取同格式 JSON 的 <code>--loaddata</code> 命令（按主键 upsert）</td><td>第 12 章</td></tr>
+  <tr><td>模型继承、<code>GenericForeignKey</code></td><td>JPA <code>@Inheritance</code>（JOINED）</td><td>第 12、13 章</td></tr>
+  <tr><td>权限、组、<code>PermissionRequiredMixin</code></td><td>角色/权限（authority）+ <code>@PreAuthorize</code> 方法级安全</td><td>第 13 章</td></tr>
+  <tr><td>缓存框架</td><td>Spring Cache 抽象（<code>@Cacheable</code>）+ Redis</td><td>第 14 章</td></tr>
+  <tr><td>Django REST framework</td><td><code>@RestController</code> + Jackson + DTO（record）+ springdoc-openapi</td><td>第 15 章</td></tr>
+  <tr><td>Channels + WebSocket</td><td>Spring WebSocket（<code>TextWebSocketHandler</code>）+ Redis 发布/订阅</td><td>第 16 章</td></tr>
+  <tr><td>中间件（middleware）</td><td>Servlet <code>Filter</code>（<code>OncePerRequestFilter</code>）</td><td>第 11、17 章</td></tr>
+  <tr><td>管理命令（management commands）</td><td><code>ApplicationRunner</code> / <code>CommandLineRunner</code></td><td>第 1、17 章</td></tr>
+  <tr><td>系统检查框架（system checks）/ <code>check --deploy</code></td><td>Actuator 健康检查 + 生产配置的测试</td><td>第 17 章</td></tr>
+  <tr><td>测试客户端 <code>self.client</code></td><td><code>MockMvc</code> + <code>@SpringBootTest</code>；真实数据库用 Testcontainers</td><td>第 1、3 章</td></tr>
+</table>
+</div>
+
+<h2 id="stack">每章的技术选型</h2>
+
+<p>原则：<strong>优先用 Spring 官方项目</strong>；官方没有的，选 Java 生态里最常用、维护活跃的库；实在没有对应物的（比如 Django Admin），就手写一个最小可用的版本，并在页面里说明差距。</p>
+
+<div class="tw">
+<table>
+  <tr><th>章节</th><th>Django 原书用到的</th><th>Spring Boot 版选用</th></tr>
+  <tr><td>1</td><td>Django ORM、SQLite、Admin</td><td>Spring Data JPA、H2 文件库、Flyway、Thymeleaf、手写后台</td></tr>
+  <tr><td>2</td><td>Paginator、Form、send_mail、python-decouple</td><td>Spring Data 分页、Bean Validation、spring-boot-starter-mail、<code>.env</code> 导入</td></tr>
+  <tr><td>3</td><td>django-taggit、Markdown、sitemaps、syndication、PostgreSQL 搜索</td><td>JPA 多对多、commonmark-java、jsoup、ROME、PostgreSQL <code>pg_trgm</code>、Testcontainers</td></tr>
+  <tr><td>4</td><td>auth 视图、注册、Profile</td><td>Spring Security 表单登录、密码重置令牌、一对一 Profile</td></tr>
+  <tr><td>5</td><td>messages、自定义认证后端、python-social-auth、django-extensions</td><td>闪存属性、自定义 <code>UserDetailsService</code>、OAuth2 Client、自签名证书 HTTPS</td></tr>
+  <tr><td>6</td><td>easy-thumbnails、requests、fetch API</td><td>Thumbnailator、<code>RestClient</code>、fetch + CSRF 头</td></tr>
+  <tr><td>7</td><td>signals、django-debug-toolbar、Redis</td><td>Spring 事件、SQL 日志与 Actuator、Spring Data Redis</td></tr>
+  <tr><td>8</td><td>session、context processor、Celery + RabbitMQ</td><td><code>HttpSession</code>、<code>@ControllerAdvice</code>、Spring AMQP + RabbitMQ</td></tr>
+  <tr><td>9</td><td>Stripe、Admin actions、CSV、WeasyPrint</td><td>stripe-java、Commons CSV、OpenHTMLtoPDF</td></tr>
+  <tr><td>10</td><td>优惠券、Redis 推荐</td><td>JPA + Stripe Coupon、Redis 有序集合</td></tr>
+  <tr><td>11</td><td>gettext、Rosetta、i18n_patterns、django-parler、localflavor</td><td><code>MessageSource</code>、URL 语言前缀、翻译表、<code>LocaleResolver</code>、自定义校验器</td></tr>
+  <tr><td>12–13</td><td>fixtures、模型继承、GenericForeignKey、CBV + Mixin、formset</td><td>数据迁移、JPA 继承、方法级安全、列表绑定</td></tr>
+  <tr><td>14</td><td>缓存框架、Memcached/Redis</td><td>Spring Cache + Redis</td></tr>
+  <tr><td>15</td><td>Django REST framework、requests</td><td><code>@RestController</code>、springdoc-openapi、JDK <code>HttpClient</code></td></tr>
+  <tr><td>16</td><td>Channels、Daphne、Redis channel layer</td><td>Spring WebSocket、Redis 发布/订阅</td></tr>
+  <tr><td>17</td><td>多环境设置、Docker Compose、uWSGI、Daphne、Nginx</td><td>Profile、PostgreSQL、多阶段 Dockerfile、内嵌 Tomcat、Nginx、Actuator</td></tr>
+</table>
+</div>
+
+<h2 id="run">如何运行每章的代码</h2>
+
+<p>准备 <strong>JDK 21</strong>、<strong>Maven 3.9+</strong> 和 <strong>Docker</strong>（第 3 章起用来跑 PostgreSQL、Redis 等服务，测试也用它启动一次性数据库）。每个章节目录都是一个独立的 Maven 项目：</p>
+
+<div class="code" data-lang="bash">
+<pre>
+cd springboot/Chapter01
+mvn test                 # 运行测试（≈ python manage.py test）
+mvn spring-boot:run      # 启动开发服务器，默认 http://localhost:8080（≈ runserver）
+
+# 打包成可执行 jar，再用它执行“管理命令”：创建超级用户
+mvn package -DskipTests
+java -jar target/mysite-1.0.0.jar --spring.main.web-application-type=none \
+     --createsuperuser --username=admin --email=admin@example.com --password=change-me
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 从第 3 章起需要 Docker</div>
+  <p>
+    项目里有 <code>compose.yaml</code>。用 <code>mvn spring-boot:run</code> 启动时，<code>spring-boot-docker-compose</code>
+    会自动执行 <code>docker compose up</code>，并把数据库地址注入到应用配置里；应用停止时再把容器停掉。
+    测试则用 Testcontainers 临时起一个 PostgreSQL，测完就删 —— 不需要你手动准备任何数据库。
+  </p>
+</div>
+
+<h3>目录结构</h3>
+
+<div class="code" data-lang="text">
+<pre>
+django5-notes/
+├── Django-5-By-Example-main/   # 原书配套的 Django 代码（Chapter01…Chapter17）
+├── springboot/                 # Spring Boot 重构版（Chapter01…Chapter17）
+│   └── Chapter01/
+│       ├── pom.xml
+│       ├── compose.yaml        # 第 3 章起
+│       └── src/
+│           ├── main/java/com/example/mysite/
+│           │   ├── MysiteApplication.java     # 入口 ≈ manage.py
+│           │   ├── config/                    # 安全、邮件等配置 ≈ settings.py 的一部分
+│           │   ├── account/                   # 用户 ≈ django.contrib.auth
+│           │   └── blog/                      # 博客功能 ≈ blog 应用
+│           ├── main/resources/
+│           │   ├── application.yaml           # ≈ settings.py
+│           │   ├── db/migration/              # Flyway 脚本 ≈ migrations/
+│           │   ├── templates/                 # Thymeleaf 模板
+│           │   └── static/                    # 静态文件
+│           └── test/java/…                    # 测试
+└── docs/                       # 本教程（sbNN.html 是 Spring 版）
+</pre>
+</div>
+
+<h2 id="principles">重构时遵循的几条原则</h2>
+
+<ol class="steps">
+  <li><strong>一章一个快照。</strong>和原书仓库一样，每个 <code>ChapterNN</code> 都是在上一章基础上演进出来的完整项目，可以单独运行、单独测试。</li>
+  <li><strong>URL、表名、页面尽量和 Django 版一致。</strong>比如文章表叫 <code>blog_post</code>、用户表叫 <code>auth_user</code>、后台地址是 <code>/admin/blog/post/</code>，方便两边对照。</li>
+  <li><strong>顺手修掉 Django 版代码点评里指出的问题。</strong>比如第 1 章“收藏”改成 POST + 登录校验、第 3 章 Markdown 默认转义原始 HTML。页面里会标出这些地方。</li>
+  <li><strong>每章都有测试。</strong>Django 仓库里的 <code>tests.py</code> 基本是空的；Spring 版每章都有覆盖核心流程的测试，既是验收，也是“怎么在 Spring 里写测试”的示范。</li>
+  <li><strong>不追求“最 Spring”的写法，追求讲得清楚。</strong>比如第 1 章先不引入 service 层，控制器直接调用仓库，和 Django 的视图函数一一对应；需要事务的时候再引入。</li>
+</ol>
+
+<h2 id="toc">目录</h2>
+
+<div id="toc-grid"></div>
+
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

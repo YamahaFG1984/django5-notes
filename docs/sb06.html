@@ -1,0 +1,599 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 6 章 · 分享内容 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="6">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 6 章 · 项目二：图片书签社交网站</span>
+<h1>分享内容</h1>
+<p class="lede">
+  网站的核心功能来了：用户在任意网页上点一下浏览器书签栏里的按钮，就能把页面上的图片“收藏”到我们的网站；
+  其他人可以点赞，列表页滚到底部自动加载更多。这一章涉及多对多关系、服务端下载远程图片、缩略图、
+  前端 <code>fetch</code> 与后端 JSON 接口，以及跨站嵌入的 JavaScript。Spring 版还要额外处理一个书中忽略的安全问题：SSRF。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>给同一对实体建两种关系：多对一（谁收藏的）和多对多（谁点了赞）</li>
+    <li>用 JPA 生命周期回调代替重写 <code>save()</code></li>
+    <li>用 <code>RestClient</code> 下载远程图片，并加上 SSRF 防护、超时和大小上限</li>
+    <li>用 Thumbnailator 实现 easy-thumbnails 的“按需生成缩略图”</li>
+    <li>写 JSON 接口，在 <code>fetch</code> 里正确携带 Spring Security 的 CSRF 令牌</li>
+    <li>理解书签小工具的工作原理，并去掉硬编码的站点地址</li>
+    <li>用 Thymeleaf 片段实现无限滚动</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch06.html">Django 版第 6 章</a>；本章代码在 <code>springboot/Chapter06/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="model">Image 模型：两种指向用户的关系</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · images/models.py</div>
+<div class="code" data-lang="py"><pre>
+class Image(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        related_name='images_created',
+        on_delete=models.CASCADE)
+    title = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=200, blank=True)
+    url = models.URLField(max_length=2000)
+    image = models.ImageField(upload_to='images/%Y/%m/%d/')
+    description = models.TextField(blank=True)
+    created = models.DateTimeField(auto_now_add=True)
+    users_like = models.ManyToManyField(
+        settings.AUTH_USER_MODEL,
+        related_name='images_liked',
+        blank=True)
+
+    def save(self, *args, **kwargs):
+        if not self.slug:
+            self.slug = slugify(self.title)
+        super().save(*args, **kwargs)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · images/Image.java（节选）</div>
+<div class="code" data-lang="java"><pre>
+@Entity
+@Table(name = "images_image", indexes = @Index(
+        name = "images_image_created_idx", columnList = "created DESC"))
+public class Image {
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "user_id")
+    private User user;                     // 谁收藏的
+
+    @Column(nullable = false, length = 200) private String title;
+    @Column(nullable = false, length = 200) private String slug = "";
+    @Column(nullable = false, length = 2000) private String url;
+    @Column(nullable = false, length = 100) private String image;
+    @Column(nullable = false, columnDefinition = "text")
+    private String description = "";
+    @CreationTimestamp private OffsetDateTime created;
+
+    @ManyToMany                            // 谁点了赞
+    @JoinTable(name = "images_image_users_like",
+            joinColumns = @JoinColumn(name = "image_id"),
+            inverseJoinColumns = @JoinColumn(name = "user_id"))
+    private Set&lt;User&gt; usersLike = new LinkedHashSet&lt;&gt;();
+
+    @PrePersist                            // ≈ 重写 save()
+    void prePersist() {
+        if (slug == null || slug.isBlank()) {
+            slug = Slugs.slugify(title);
+        }
+    }
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li>Django 必须给两个关系起不同的 <code>related_name</code>（<code>images_created</code>、<code>images_liked</code>），否则反向名字冲突。JPA 的反向关系是可选的，这里没有在 <code>User</code> 上声明，也就不存在冲突；需要时用仓库查询（<code>countByUserId</code>）。</li>
+  <li>重写 <code>save()</code> 在 JPA 里对应<strong>生命周期回调</strong>：<code>@PrePersist</code>（插入前）、<code>@PreUpdate</code>（更新前）、<code>@PostLoad</code>（加载后）等。注意它们和 Django 的 <code>save()</code> 一样，批量 <code>update</code> 语句不会触发。</li>
+</ul>
+
+<h2 id="flow">书签流程全景</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="书签流程：用户在第三方网站点击书签栏按钮，加载本站的 bookmarklet.js，脚本列出页面上的大图，用户选中一张后打开本站的 /images/create/?url=…&amp;title=…，提交表单后服务器下载图片并保存">
+  <rect class="bx-d" x="10" y="20" width="330" height="250" rx="12"/>
+  <text class="ttl" x="175" y="44" text-anchor="middle">任意第三方网页</text>
+  <rect class="bx" x="30" y="60" width="290" height="44" rx="8"/>
+  <text class="sm" x="175" y="87" text-anchor="middle">① 点击书签栏里的“Bookmark it”（javascript: 链接）</text>
+  <rect class="bx-a" x="30" y="122" width="290" height="44" rx="8"/>
+  <text class="sm" x="175" y="149" text-anchor="middle">② 注入 &lt;script src="本站/static/js/bookmarklet.js"&gt;</text>
+  <rect class="bx" x="30" y="184" width="290" height="66" rx="8"/>
+  <text class="sm" x="175" y="208" text-anchor="middle">③ 脚本找出 ≥250×250 的 jpg/png 图片</text>
+  <text class="sm" x="175" y="228" text-anchor="middle">弹层列出来，用户选一张</text>
+
+  <rect class="bx-g" x="420" y="20" width="330" height="250" rx="12"/>
+  <text class="ttl on-g" x="585" y="44" text-anchor="middle">本站</text>
+  <rect class="bx" x="440" y="60" width="290" height="50" rx="8"/>
+  <text class="mono sm" x="585" y="82" text-anchor="middle">GET /images/create/?url=…&amp;title=…</text>
+  <text class="sm" x="585" y="100" text-anchor="middle">④ 新窗口打开，表单已预填</text>
+  <rect class="bx" x="440" y="128" width="290" height="50" rx="8"/>
+  <text class="mono sm" x="585" y="150" text-anchor="middle">POST /images/create/</text>
+  <text class="sm" x="585" y="168" text-anchor="middle">⑤ 用户填描述后提交</text>
+  <rect class="bx-a" x="440" y="196" width="290" height="54" rx="8"/>
+  <text class="sm on-a" x="585" y="219" text-anchor="middle">⑥ 服务器下载图片 → 校验 → 保存 → 写库</text>
+  <text class="sm" x="585" y="238" text-anchor="middle">重定向到图片详情页</text>
+
+  <path class="ln" d="M175 106 V118" marker-end="url(#ar)"/>
+  <path class="ln" d="M175 168 V180" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M322 217 C 380 217, 380 85, 436 85" marker-end="url(#ar-g)"/>
+  <path class="ln" d="M585 112 V124" marker-end="url(#ar)"/>
+  <path class="ln" d="M585 180 V192" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 S6-1　书签小工具跨越两个网站：左边的脚本运行在别人的页面里，右边的表单和下载发生在本站</figcaption>
+</figure>
+
+<h2 id="download">下载远程图片：RestClient 与 SSRF</h2>
+
+<p>书中在 <code>ImageCreateForm.save()</code> 里直接 <code>requests.get(image_url)</code>。这是一个典型的 <strong>SSRF（服务端请求伪造）</strong>漏洞：</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 用户能让你的服务器去访问任何地址</div>
+  <p>
+    <code>url</code> 来自用户提交的表单。攻击者可以提交 <code>http://127.0.0.1:8080/actuator/env.png</code>、<code>http://10.0.0.5/admin.png</code>，
+    或者云服务器的元数据地址 <code>http://169.254.169.254/latest/meta-data/xx.png</code>。服务器会乖乖去请求 —— 从内网里面。
+    扩展名检查挡不住，因为 URL 的路径部分可以随便写。
+  </p>
+</div>
+
+<p>Spring 版把下载单独放进 <code>ImageDownloader</code>，加上了几道防线：</p>
+
+<div class="code" data-lang="java" data-file="images/ImageDownloader.java（节选）">
+<pre>
+public ImageDownloader(RestClient.Builder builder,
+                       @Value("${bookmarks.download.block-private-networks:true}") boolean blockPrivateNetworks) {
+    HttpClient httpClient = HttpClient.newBuilder()
+            .connectTimeout(Duration.ofSeconds(5))
+            .followRedirects(HttpClient.Redirect.NEVER)   // ① 重定向可能把请求“拐”到内网
+            .build();
+    JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
+    requestFactory.setReadTimeout(Duration.ofSeconds(10));    // ② 超时
+    this.restClient = builder.requestFactory(requestFactory).build();
+    ...
+}
+
+public byte[] download(String url) {
+    URI uri = checkUrl(url);
+    return restClient.get().uri(uri).exchange((request, response) -&gt; {
+        if (!response.getStatusCode().is2xxSuccessful()) {
+            throw new DownloadException("The image could not be downloaded ...");
+        }
+        try (InputStream body = response.getBody()) {
+            byte[] bytes = body.readNBytes(MAX_BYTES + 1);      // ③ 最多读 5MB + 1 字节
+            if (bytes.length &gt; MAX_BYTES) {
+                throw new DownloadException("The image is too large.");
+            }
+            return bytes;
+        }
+    });
+}
+
+URI checkUrl(String url) {
+    ...                                                        // ④ 只允许 http / https
+    for (InetAddress address : InetAddress.getAllByName(uri.getHost())) {
+        if (address.isLoopbackAddress() || address.isSiteLocalAddress() || address.isLinkLocalAddress()
+                || address.isAnyLocalAddress() || address.isMulticastAddress()) {
+            throw new DownloadException("Downloading from this address is not allowed.");   // ⑤ 拒绝内网
+        }
+    }
+    return uri;
+}
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>Python requests</th><th>Spring RestClient</th></tr>
+  <tr><td><code>requests.get(url)</code></td><td><code>restClient.get().uri(url).retrieve().body(byte[].class)</code></td></tr>
+  <tr><td><code>timeout=(5, 10)</code></td><td>在底层 <code>HttpClient</code> / 请求工厂上设置连接与读取超时</td></tr>
+  <tr><td><code>allow_redirects=False</code></td><td><code>HttpClient.Redirect.NEVER</code></td></tr>
+  <tr><td><code>stream=True</code> + 分块读取</td><td><code>exchange(...)</code> 拿到原始响应流，自己控制读取量</td></tr>
+  <tr><td><code>response.raise_for_status()</code></td><td><code>retrieve()</code> 默认对 4xx/5xx 抛异常；<code>exchange</code> 里自己判断</td></tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 这还不是完美的 SSRF 防护</div>
+  <p>
+    检查 IP 和真正发请求之间有时间差，攻击者可以用“DNS 重绑定”让第二次解析返回内网地址。更彻底的做法是自定义 DNS 解析、把连接固定到检查过的 IP，
+    或者干脆让下载请求经过一个只能访问公网的出口代理。本地调试时想收藏 <code>localhost</code> 上的图片，可以把 <code>bookmarks.download.block-private-networks</code> 设为 <code>false</code>。
+  </p>
+</div>
+
+<h3>表单：@AssertTrue 代替 clean_url</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+class ImageCreateForm(forms.ModelForm):
+    class Meta:
+        model = Image
+        fields = ['title', 'url', 'description']
+        widgets = {'url': forms.HiddenInput}
+
+    def clean_url(self):
+        url = self.cleaned_data['url']
+        valid_extensions = ['jpg', 'jpeg', 'png']
+        extension = url.rsplit('.', 1)[1].lower()
+        if extension not in valid_extensions:
+            raise forms.ValidationError(
+                'The given URL does not match valid image extensions.')
+        return url
+</pre></div></div>
+  <div class="sb"><div class="h">Spring</div>
+<div class="code" data-lang="java"><pre>
+public class ImageCreateForm {
+    static final Set&lt;String&gt; VALID_EXTENSIONS =
+            Set.of("jpg", "jpeg", "png");
+
+    @NotBlank @Size(max = 200) private String title;
+    @NotBlank @Size(max = 2000) private String url;
+    private String description = "";
+
+    /** 方法名 isUrlExtensionValid → 错误挂在
+        属性 urlExtensionValid 上 */
+    @AssertTrue(message = "The given URL does not match valid image extensions.")
+    public boolean isUrlExtensionValid() {
+        return url == null || url.isBlank()
+                || VALID_EXTENSIONS.contains(extension());
+    }
+
+    /** 去掉 ?query 和 #fragment 再取扩展名 */
+    public String extension() { ... }
+}
+</pre></div></div>
+</div>
+
+<p>
+  书中的 <code>url.rsplit('.', 1)[1]</code> 在整个 URL 没有点号时（比如 <code>http://localhost/photo</code>）会抛 <code>IndexError</code>（500 错误），URL 带查询参数（<code>a.jpg?w=800</code>）时又会误判。Spring 版一并处理了。
+  另外，GET 请求的查询参数可以直接绑定到表单对象：<code>@ModelAttribute("form") ImageCreateForm form</code> 会把 <code>?url=…&amp;title=…</code> 填进去，
+  相当于书中的 <code>ImageCreateForm(data=request.GET)</code>（但不触发校验）。
+</p>
+
+<h2 id="thumbnails">缩略图：按需生成</h2>
+
+<p>
+  easy-thumbnails 的做法是：模板里第一次用到 <code>{% thumbnail image.image 300x300 crop="smart" %}</code> 时生成文件并保存，之后直接复用。
+  我们用 Thumbnailator 写一个同样思路的 <code>ThumbnailService</code>，再通过第 1 章的自定义方言暴露为 <code>#thumbnail</code>：
+</p>
+
+<div class="code" data-lang="java" data-file="common/ThumbnailService.java（节选）">
+<pre>
+public String url(String relativePath, int width, int height, boolean crop) {
+    String thumbPath = thumbPath(relativePath, width, height, crop);   // thumbs/images/…/x_300x300_crop.png
+    Path source = media.resolve(relativePath);
+    Path target = media.resolve(thumbPath);
+    if (!Files.exists(target) &amp;&amp; Files.exists(source)) {
+        Files.createDirectories(target.getParent());
+        var builder = Thumbnails.of(source.toFile());
+        if (height &lt;= 0) {
+            builder.width(width);                                   // 300x0：只限定宽度
+        } else if (crop) {
+            builder.size(width, height).crop(Positions.CENTER);     // 居中裁剪成正方形
+        } else {
+            builder.size(width, height);                            // 等比缩放
+        }
+        builder.toFile(target.toFile());
+    }
+    return Files.exists(target) ? "/media/" + thumbPath : null;
+}
+</pre>
+</div>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django 模板</div>
+<div class="code" data-lang="html"><pre>
+{% load thumbnail %}
+&lt;img src="{% thumbnail image.image 300x0 %}"&gt;
+
+{% thumbnail image.image 300x300 crop="smart" as im %}
+&lt;img src="{{ im.url }}"&gt;
+</pre></div></div>
+  <div class="sb"><div class="h">Thymeleaf</div>
+<div class="code" data-lang="th"><pre>
+&lt;img th:src="${#thumbnail.url(image.image, 300, 0, false)}"&gt;
+
+&lt;img th:src="${#thumbnail.url(image.image, 300, 300, true)}"&gt;
+</pre></div></div>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; crop="smart" 与 CENTER</div>
+  <p>easy-thumbnails 的 <code>smart</code> 裁剪会根据图像“信息量”（熵）选择裁剪区域；Thumbnailator 没有这个功能，这里用居中裁剪。模板渲染时同步生成缩略图，第一次访问会稍慢 —— 两个库都是这样。流量大时应改为上传后异步生成，或交给图片 CDN。</p>
+</div>
+
+<h2 id="detail">详情页：避开 N+1</h2>
+
+<p>详情页要显示“谁赞过”以及每个人的头像。Django 模板里 <code>{{ user.profile.photo }}</code> 会对每个点赞用户各查一次资料表。Spring 版在 service 里分两步批量取：</p>
+
+<div class="code" data-lang="java" data-file="images/ImageService.java（节选）">
+<pre>
+@Transactional(readOnly = true)
+public ImageDetail detail(Long id, String slug, Long currentUserId) {
+    Image image = images.findWithLikesByIdAndSlug(id, slug)                 // @EntityGraph("usersLike")：一条 JOIN
+            .orElseThrow(() -&gt; new NotFoundException("No Image matches the given query."));
+    List&lt;User&gt; likedBy = image.getUsersLike().stream().sorted(comparing(User::getId)).toList();
+    Map&lt;Long, String&gt; photos = profiles.findByUserIdIn(ids(likedBy)).stream()   // 一条 IN 查询
+            .collect(toMap(p -&gt; p.getUser().getId(), Profile::getPhoto));
+    ...
+    boolean likedByMe = likedBy.stream().anyMatch(u -&gt; u.getId().equals(currentUserId));
+    return new ImageDetail(image, likers, likedByMe);
+}
+</pre>
+</div>
+
+<p>返回的 <code>ImageDetail</code> 是一个 record，把模板需要的数据一次准备好 —— 这就是常说的“视图模型”。它让模板不再触发任何数据库查询，也方便在测试里直接断言。</p>
+
+<h2 id="ajax">AJAX 点赞：JSON 接口与 CSRF</h2>
+
+<h3>后端：@ResponseBody</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+@login_required
+@require_POST
+def image_like(request):
+    image_id = request.POST.get('id')
+    action = request.POST.get('action')
+    if image_id and action:
+        try:
+            image = Image.objects.get(id=image_id)
+            if action == 'like':
+                image.users_like.add(request.user)
+            else:
+                image.users_like.remove(request.user)
+            return JsonResponse({'status': 'ok'})
+        except Image.DoesNotExist:
+            pass
+    return JsonResponse({'status': 'error'})
+</pre></div></div>
+  <div class="sb"><div class="h">Spring</div>
+<div class="code" data-lang="java"><pre>
+@PostMapping("/like/")
+@ResponseBody          // 返回值序列化成 JSON，而不是视图名
+public Map&lt;String, String&gt; like(
+        @AuthenticationPrincipal CurrentUser me,
+        @RequestParam(required = false) Long id,
+        @RequestParam(required = false) String action) {
+    if (id != null &amp;&amp; action != null
+            &amp;&amp; imageService.like(id, me.id(), "like".equals(action))) {
+        return Map.of("status", "ok");
+    }
+    return Map.of("status", "error");
+}
+
+// ImageService（@Transactional）
+boolean alreadyLiked = image.getUsersLike().stream()
+        .anyMatch(u -&gt; u.getId().equals(userId));
+if (like &amp;&amp; !alreadyLiked) {
+    image.getUsersLike().add(users.getReferenceById(userId));
+} else if (!like) {
+    image.getUsersLike().removeIf(u -&gt; u.getId().equals(userId));
+}
+</pre></div></div>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; Set 里的实体与 equals</div>
+  <p>
+    Django 的 <code>users_like.add(user)</code> 会自动忽略已存在的关系。JPA 的 <code>Set.add()</code> 依赖 <code>equals</code>：<code>User</code> 没有重写 <code>equals</code> 时按对象身份比较，
+    如果集合里的用户对象和 <code>getReferenceById</code> 返回的不是同一个实例，就会被当成“新元素”，Hibernate 再插一行，撞上中间表的主键约束。
+    所以这里按 id 显式判断。另一种做法是给实体实现基于业务键或 id 的 <code>equals/hashCode</code>（要小心“保存前 id 为 null”的情况）。
+  </p>
+</div>
+
+<h3>前端：把 CSRF 令牌放进请求头</h3>
+
+<p>
+  Django 把令牌放在名为 <code>csrftoken</code> 的 cookie 里，书中用 js-cookie 读出来放进 <code>X-CSRFToken</code> 头。
+  Spring Security 默认把令牌放在会话里（不是 cookie），推荐的做法是渲染到 <code>&lt;meta&gt;</code> 标签：
+</p>
+
+<div class="code" data-lang="th" data-file="templates/base.html（节选）">
+<pre>
+&lt;meta name="_csrf" th:content="${_csrf.token}"&gt;
+&lt;meta name="_csrf_header" th:content="${_csrf.headerName}"&gt;   &lt;!-- X-CSRF-TOKEN --&gt;
+...
+&lt;script&gt;
+  const csrfToken = document.querySelector('meta[name="_csrf"]').content;
+  const csrfHeader = document.querySelector('meta[name="_csrf_header"]').content;
+&lt;/script&gt;
+&lt;!-- ≈ {% block domready %} --&gt;
+&lt;script layout:fragment="domready"&gt;&lt;/script&gt;
+</pre>
+</div>
+
+<div class="code" data-lang="th" data-file="templates/images/image/detail.html（节选）">
+<pre>
+&lt;script layout:fragment="domready" th:inline="javascript"&gt;
+  const url = /*[[@{/images/like/}]]*/ '/images/like/';     // 内联表达式：输出安全的 JS 字符串
+  document.querySelector('a.like').addEventListener('click', function (e) {
+    e.preventDefault();
+    const formData = new FormData();
+    formData.append('id', this.dataset.id);
+    formData.append('action', this.dataset.action);
+    fetch(url, {
+      method: 'POST',
+      headers: {[csrfHeader]: csrfToken},
+      mode: 'same-origin',
+      body: formData
+    }).then(response =&gt; response.json()).then(data =&gt; { ... });
+  });
+&lt;/script&gt;
+</pre>
+</div>
+
+<ul>
+  <li><code>th:inline="javascript"</code> 让 <code>/*[[ ... ]]*/</code> 里的表达式输出成经过转义的 JS 字面量，注释后面的 <code>'/images/like/'</code> 是用浏览器直接打开模板时的占位值（“自然模板”）。</li>
+  <li><code>th:data-id="${image.id}"</code> 生成 <code>data-id</code> 属性，和 Django 模板里的 <code>data-id="{{ image.id }}"</code> 一样。</li>
+</ul>
+
+<h2 id="bookmarklet">书签小工具</h2>
+
+<p>书中把站点地址 <code>//127.0.0.1:8000</code> 硬编码在两个地方：启动器和 <code>bookmarklet.js</code>。换端口、换域名、上线都要改代码。Spring 版做了两处改动：</p>
+
+<div class="code" data-lang="java" data-file="images/BookmarkletLauncher.java（节选）">
+<pre>
+/** 根据当前请求地址生成 javascript: 链接，交给仪表盘模板 th:href="${bookmarklet}" */
+public String href() {
+    String base = ServletUriComponentsBuilder.fromCurrentContextPath().toUriString();
+    String scriptUrl = base.replaceFirst("^https?:", "") + "/static/js/bookmarklet.js";   // //host:port/...
+    return "javascript:(function(){"
+            + "if(!window.bookmarklet){"
+            + "var s=document.body.appendChild(document.createElement('script'));"
+            + "s.src='" + scriptUrl + "?r='+Math.floor(Math.random()*9999999999999999);"
+            + "window.bookmarklet=true;"
+            + "}else{bookmarkletLaunch();}"
+            + "})();";
+}
+</pre>
+</div>
+
+<div class="code" data-lang="js" data-file="static/js/bookmarklet.js（第一行）">
+<pre>
+// 书中：const siteUrl = '//127.0.0.1:8000/';
+// 这里：从“本脚本自己是从哪里加载的”推算站点地址
+const siteUrl = new URL(document.currentScript.src).origin + '/';
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 为什么书签小工具需要 HTTPS</div>
+  <p>书签脚本运行在第三方页面里。如果那个页面是 HTTPS，而脚本从 <code>http://</code> 加载，浏览器会以“混合内容”为由拦截。这正是第 5 章要在本地跑 HTTPS 的另一个原因。用 <code>//host</code> 这种“协议相对”地址，脚本会跟随当前页面的协议。</p>
+</div>
+
+<h2 id="infinite">无限滚动：返回 HTML 片段</h2>
+
+<p>列表页滚动到底部时，前端请求 <code>?images_only=1&amp;page=N</code>，服务器只返回图片卡片的 HTML 片段，追加到列表末尾；页码超出范围时返回空内容，前端据此停止。</p>
+
+<div class="code" data-lang="java" data-file="images/ImageController.java（节选）">
+<pre>
+@GetMapping("/")
+public String list(@RequestParam(name = "page", required = false) String pageParam,
+                   @RequestParam(name = "images_only", required = false) String imagesOnly,
+                   Model model) {
+    int pageNumber = parsePage(pageParam);
+    Page&lt;Image&gt; page = images.findAllByOrderByCreatedDesc(PageRequest.of(pageNumber - 1, PAGE_SIZE));
+    if (page.getContent().isEmpty() &amp;&amp; page.getTotalPages() &gt; 0 &amp;&amp; imagesOnly == null) {
+        page = images.findAllByOrderByCreatedDesc(PageRequest.of(page.getTotalPages() - 1, PAGE_SIZE));
+    }
+    model.addAttribute("images", page.getContent());
+    // 同一份数据，两种渲染方式：完整页面或只有片段
+    return imagesOnly != null ? "images/image/list_images" : "images/image/list";
+}
+</pre>
+</div>
+
+<div class="code" data-lang="th" data-file="templates/images/image/list_images.html">
+<pre>
+&lt;!-- 既能被 list.html 引入（:: images 片段），也能作为 images_only=1 的完整响应 --&gt;
+&lt;th:block xmlns:th="http://www.thymeleaf.org" th:fragment="images"&gt;
+  &lt;div class="image" th:each="image : ${images}"&gt;
+    &lt;a th:href="@{${image.absoluteUrl}}"&gt;
+      &lt;img th:src="${#thumbnail.url(image.image, 300, 300, true)}"&gt;
+    &lt;/a&gt;
+    ...
+  &lt;/div&gt;
+&lt;/th:block&gt;
+</pre>
+</div>
+
+<p>越界时列表为空，模板只输出空白字符，所以前端用 <code>html.trim() === ''</code> 判断（书中是 <code>html === ''</code>，因为 Django 视图直接返回 <code>HttpResponse('')</code>）。这种“服务端渲染片段 + 少量 JS”的做法，正是 htmx 等库的核心思想。</p>
+
+<h2 id="tests">测试</h2>
+
+<ul>
+  <li>用 <code>@MockitoBean ImageDownloader</code> 替换下载器，让它直接返回一张内存里生成的 PNG —— 测试不依赖网络。</li>
+  <li>SSRF 防护单独写纯单元测试：<code>127.0.0.1</code>、<code>localhost</code>、<code>10.x</code>、<code>192.168.x</code>、<code>169.254.169.254</code>、<code>file://</code>、<code>ftp://</code> 全部应被拒绝。</li>
+  <li>JSON 接口用 <code>jsonPath("$.status").value("ok")</code> 断言；<code>csrf().asHeader()</code> 模拟前端把令牌放在请求头里，同时验证“不带令牌返回 403”。</li>
+  <li>缩略图用 JUnit 的 <code>@TempDir</code> 作为 MEDIA_ROOT，验证裁剪后尺寸正好是 300×300、只限宽度时按比例缩放。</li>
+</ul>
+
+<div class="code" data-lang="java" data-file="ImageFlowTests.java（节选）">
+<pre>
+@Test
+void ajaxPostWithoutCsrfTokenIsRejected() throws Exception {
+    Image image = bookmark("sunset");
+    mvc.perform(post("/images/like/").with(asAlice).param("id", image.getId().toString()).param("action", "like"))
+            .andExpect(status().isForbidden());
+    mvc.perform(post("/images/like/").with(asAlice).with(csrf().asHeader())
+                    .param("id", image.getId().toString()).param("action", "like"))
+            .andExpect(jsonPath("$.status").value("ok"));
+}
+</pre>
+</div>
+
+<p>本章共 27 个测试（新增 11 个）。另外做了一次端到端验证：用本地 HTTP 服务器提供图片，真实下载、生成缩略图，并用从 <code>&lt;meta&gt;</code> 取出的令牌以请求头方式点赞。</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 6 章 Spring 版点评 <small>springboot/Chapter06</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 补上了 SSRF 防护</h4>
+    <p>书中的 <code>requests.get(image_url)</code> 没有任何限制。Spring 版限制协议、拒绝内网地址、不跟随重定向、设置超时和大小上限，并有单元测试覆盖。这些措施在 Django 版里同样应该加上。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 去掉了硬编码的站点地址</h4>
+    <p>启动器由服务端按当前地址生成，<code>bookmarklet.js</code> 通过 <code>document.currentScript</code> 推算地址，本地、测试、生产都不用改代码。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 列表页仍有 N+1 的可能</h4>
+    <p>图片卡片只用到图片自身的字段，所以没有问题；如果将来要显示“收藏者头像”，记得像详情页一样批量取数据，或者用 <code>@EntityGraph</code>。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 同步下载会占用请求线程</h4>
+    <p>下载最多等 15 秒，期间一个 Tomcat 线程被占着。Java 21 的虚拟线程可以大大缓解这个问题：设置 <code>spring.threads.virtual.enabled=true</code>，阻塞 IO 就不再占用平台线程。Django 的同步视图没有这个选项。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 为什么点赞接口返回 Map 而不是 DTO</h4>
+    <p>为了和 <code>JsonResponse({'status': 'ok'})</code> 一一对应。正式的 API 建议用 record 定义响应类型（第 15 章），类型明确，文档工具也能识别。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>JPA 的 <code>@ManyToMany</code> + <code>@JoinTable</code> 对应 <code>ManyToManyField</code>；<code>@PrePersist</code> 对应重写 <code>save()</code>。</li>
+  <li><code>RestClient</code> 下载远程资源时要做 SSRF 防护：协议、目标地址、重定向、超时、大小。</li>
+  <li>缩略图用 Thumbnailator 按需生成并缓存到磁盘，通过自定义方言在模板里调用。</li>
+  <li><code>@ResponseBody</code> 返回 JSON；前端 fetch 从 <code>&lt;meta&gt;</code> 取 CSRF 令牌放进请求头。</li>
+  <li>同一份模板既可以作为片段被引入，也可以单独渲染，实现无限滚动。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>打开 <code>spring.threads.virtual.enabled=true</code>，在下载方法里打印 <code>Thread.currentThread()</code>，观察线程类型的变化。</li>
+    <li>给 <code>User</code> 实现基于 id 的 <code>equals/hashCode</code>，然后简化 <code>ImageService.like()</code>，并确认测试仍然通过。</li>
+    <li>让 <code>ImageDownloader</code> 同时校验响应的 <code>Content-Type</code> 必须是 <code>image/*</code>。</li>
+    <li>用 htmx 重写无限滚动：列表最后一个元素加上 <code>hx-get="?images_only=1&amp;page=N" hx-trigger="revealed" hx-swap="afterend"</code>，删掉手写的滚动监听。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

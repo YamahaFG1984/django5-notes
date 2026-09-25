@@ -1,0 +1,474 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 10 章 · 扩展商店 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="10">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 10 章 · 项目三：在线商店</span>
+<h1>扩展商店</h1>
+<p class="lede">
+  这一章给商店加两个常见功能：优惠券（输入代码打折，并把折扣带到 Stripe 支付页）和“买了这个的人也买了”推荐。
+  优惠券涉及会话、金额计算和外键的 <code>SET NULL</code>；推荐引擎用 Redis 有序集合统计商品共同购买的次数。
+  顺带还要解决一个测试基础设施的问题：为什么多个测试类会把机器拖垮。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>建模优惠券，按“代码 + 有效期 + 启用”查询有效券</li>
+    <li>把优惠券 id 存进会话，计算折扣时统一处理金额的精度和舍入</li>
+    <li>订单记录优惠券和折扣百分比，理解 <code>ON DELETE SET NULL</code> 和“冗余保存”</li>
+    <li>在 Stripe 上即时创建优惠券并附加到 Checkout Session</li>
+    <li>用 Redis 有序集合（<code>ZINCRBY</code>、<code>ZUNIONSTORE</code>）实现推荐引擎</li>
+    <li>在支付成功事件的 <code>AFTER_COMMIT</code> 阶段写 Redis</li>
+    <li>让所有集成测试共享同一个 Spring 上下文和同一组容器</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch10.html">Django 版第 10 章</a>；本章代码在 <code>springboot/Chapter10/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="coupon-model">优惠券模型</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · coupons/models.py</div>
+<div class="code" data-lang="py"><pre>
+class Coupon(models.Model):
+    code = models.CharField(max_length=50, unique=True)
+    valid_from = models.DateTimeField()
+    valid_to = models.DateTimeField()
+    discount = models.IntegerField(
+        validators=[MinValueValidator(0),
+                    MaxValueValidator(100)],
+        help_text='Percentage vaule (0 to 100)')
+    active = models.BooleanField()
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · coupons/Coupon.java（节选）</div>
+<div class="code" data-lang="java"><pre>
+@Column(nullable = false, unique = true, length = 50)
+private String code;
+
+@Column(name = "valid_from", nullable = false)
+private OffsetDateTime validFrom;
+
+@Column(name = "valid_to", nullable = false)
+private OffsetDateTime validTo;
+
+@Min(0) @Max(100)
+@Column(nullable = false)
+private int discount;
+
+@Column(nullable = false)
+private boolean active;
+</pre></div></div>
+</div>
+
+<div class="code" data-lang="sql" data-file="db/migration/V5__create_coupons.sql（节选）">
+<pre>
+discount    INTEGER     NOT NULL CHECK (discount BETWEEN 0 AND 100),
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 校验器 vs 数据库约束</div>
+  <p>Django 的 <code>MinValueValidator</code>/<code>MaxValueValidator</code> 只在表单（ModelForm、admin）校验时生效，直接 <code>Coupon.objects.create(discount=150)</code> 不会报错。Spring 版除了表单上的 <code>@Min/@Max</code>，还在迁移里加了 <code>CHECK</code> 约束，由数据库兜底。Django 也可以用 <code>Meta.constraints = [CheckConstraint(...)]</code> 做到。</p>
+</div>
+
+<h3>查找有效的券</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · coupons/views.py</div>
+<div class="code" data-lang="py"><pre>
+@require_POST
+def coupon_apply(request):
+    now = timezone.now()
+    form = CouponApplyForm(request.POST)
+    if form.is_valid():
+        code = form.cleaned_data['code']
+        try:
+            coupon = Coupon.objects.get(
+                code__iexact=code,
+                valid_from__lte=now,
+                valid_to__gte=now,
+                active=True)
+            request.session['coupon_id'] = coupon.id
+        except Coupon.DoesNotExist:
+            request.session['coupon_id'] = None
+    return redirect('cart:cart_detail')
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · CouponRepository + CouponController</div>
+<div class="code" data-lang="java"><pre>
+@Query("""
+    select c from Coupon c
+    where lower(c.code) = lower(:code)
+      and c.validFrom &lt;= :now and c.validTo &gt;= :now
+      and c.active = true
+    """)
+Optional&lt;Coupon&gt; findValid(@Param("code") String code,
+                           @Param("now") OffsetDateTime now);
+
+public record CouponApplyForm(@NotBlank String code) { }
+
+@PostMapping("/coupons/apply/")
+public String apply(@Validated @ModelAttribute CouponApplyForm form) {
+    cart.setCouponId(coupons.findValid(form.code().strip(),
+                                       OffsetDateTime.now())
+            .map(Coupon::getId)
+            .orElse(null));
+    return "redirect:/cart/";
+}
+</pre></div></div>
+</div>
+
+<p><code>code__iexact</code> 在 JPQL 里写成 <code>lower(c.code) = lower(:code)</code>。表单对象这次用了 record：只有一个字段、只读，record 更简洁（Spring 会通过构造器把请求参数绑定到 record）。</p>
+
+<h2 id="discount">折扣与金额</h2>
+
+<p>优惠券 id 存在会话里（第 8 章的 <code>Cart</code> 多了一个 <code>couponId</code> 字段）。购物车的金额计算集中在 <code>CartService</code>：</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · cart/cart.py</div>
+<div class="code" data-lang="py"><pre>
+@property
+def coupon(self):
+    if self.coupon_id:
+        try:
+            return Coupon.objects.get(id=self.coupon_id)
+        except Coupon.DoesNotExist:
+            pass
+    return None
+
+def get_discount(self):
+    if self.coupon:
+        return (self.coupon.discount / Decimal(100)) \
+               * self.get_total_price()
+    return Decimal(0)
+
+def get_total_price_after_discount(self):
+    return self.get_total_price() - self.get_discount()
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · cart/CartService.java</div>
+<div class="code" data-lang="java"><pre>
+public record Totals(BigDecimal subtotal, Coupon coupon,
+                     BigDecimal discount) {
+    public BigDecimal total() {
+        return subtotal.subtract(discount);
+    }
+}
+
+public Totals totals() {
+    BigDecimal subtotal = cart.totalPrice();
+    Coupon coupon = coupon();
+    BigDecimal discount = coupon == null ? BigDecimal.ZERO
+            : Money.percentOf(subtotal, coupon.getDiscount());
+    return new Totals(subtotal, coupon, discount);
+}
+
+// common/Money.java
+public static BigDecimal percentOf(BigDecimal amount, int percent) {
+    return amount.multiply(BigDecimal.valueOf(percent))
+            .divide(BigDecimal.valueOf(100), 2, RoundingMode.HALF_UP);
+}
+</pre></div></div>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 舍入要在计算时做，而不是显示时</div>
+  <p>
+    书中 <code>get_discount()</code> 返回的是任意精度的 <code>Decimal</code>（比如 13.550000），模板里用 <code>floatformat:2</code> 显示时才四舍五入。
+    这样页面上显示的“小计 − 折扣”可能和“总计”差一分钱。Spring 版在计算时就统一保留两位小数、四舍五入，显示和存储的数字完全一致。
+    <code>BigDecimal.divide</code> 不指定精度时，遇到除不尽的数还会直接抛异常 —— 这反而是好事，逼你想清楚舍入规则。
+  </p>
+</div>
+
+<h3>订单记录优惠券</h3>
+
+<div class="code" data-lang="java" data-file="orders/Order.java（节选）">
+<pre>
+/** ForeignKey(Coupon, null=True, on_delete=SET_NULL)：优惠券被删了，订单还在 */
+@ManyToOne(fetch = FetchType.LAZY)
+@JoinColumn(name = "coupon_id")
+private Coupon coupon;
+
+/** 下单时的折扣百分比。单独保存一份：以后改了优惠券，历史订单的金额不变 */
+@Column(nullable = false)
+private int discount;
+
+public void applyCoupon(Coupon coupon) {
+    this.coupon = coupon;
+    this.discount = coupon == null ? 0 : coupon.getDiscount();
+}
+</pre>
+</div>
+
+<div class="code" data-lang="sql" data-file="db/migration/V6__add_order_coupon.sql">
+<pre>
+ALTER TABLE orders_order ADD COLUMN coupon_id BIGINT REFERENCES coupons_coupon (id) ON DELETE SET NULL;
+ALTER TABLE orders_order ADD COLUMN discount INTEGER NOT NULL DEFAULT 0 CHECK (discount BETWEEN 0 AND 100);
+</pre>
+</div>
+
+<p>
+  Django 的 <code>on_delete=SET_NULL</code> 是在 ORM 层模拟的（删除优惠券前先 <code>UPDATE</code> 订单）；Spring 版直接写成数据库的外键动作。
+  <code>discount</code> 冗余保存和订单项保存下单时的价格是一个道理：订单是“历史记录”，不应该随着别的数据变化。
+</p>
+
+<h3>显示折扣：一个可复用的模板片段</h3>
+
+<p>购物车、支付页、PDF、后台订单详情都要显示“小计 / 优惠券 / 折扣”三行。Django 版把同样的 HTML 复制了四遍；Spring 版写成一个带参数的片段：</p>
+
+<div class="code" data-lang="th" data-file="templates/fragments/money.html（节选）">
+<pre>
+&lt;th:block th:fragment="discountRows(subtotal, coupon, percent, discount, span)"&gt;
+  &lt;tr class="subtotal" th:if="${coupon != null}"&gt;
+    &lt;td&gt;Subtotal&lt;/td&gt;&lt;td th:colspan="${span}"&gt;&lt;/td&gt;
+    &lt;td class="num" th:text="${'$' + subtotal}"&gt;$0&lt;/td&gt;
+  &lt;/tr&gt;
+  &lt;tr th:if="${coupon != null}"&gt;
+    &lt;td th:text="|&amp;quot;${coupon.code}&amp;quot; coupon (${percent}% off)|"&gt;&lt;/td&gt;
+    &lt;td th:colspan="${span}"&gt;&lt;/td&gt;
+    &lt;td class="num neg" th:text="${'- $' + discount}"&gt;- $0&lt;/td&gt;
+  &lt;/tr&gt;
+&lt;/th:block&gt;
+
+&lt;!-- 购物车里（表格有 6 列，中间空 4 列） --&gt;
+&lt;th:block th:replace="~{fragments/money :: discountRows(${totals.subtotal}, ${totals.coupon},
+          ${totals.coupon?.discount}, ${totals.discount}, 4)}"&gt;&lt;/th:block&gt;
+</pre>
+</div>
+
+<p><code>${totals.coupon?.discount}</code> 里的 <code>?.</code> 是 SpEL 的安全导航：<code>coupon</code> 为 null 时整个表达式为 null，而不是抛异常。</p>
+
+<h2 id="stripe">Stripe 折扣</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · payment/views.py</div>
+<div class="code" data-lang="py"><pre>
+if order.coupon:
+    stripe_coupon = stripe.Coupon.create(
+        name=order.coupon.code,
+        percent_off=order.discount,
+        duration='once')
+    session_data['discounts'] = [{
+        'coupon': stripe_coupon.id
+    }]
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · StripeCheckoutGateway</div>
+<div class="code" data-lang="java"><pre>
+if (order.getCoupon() != null) {
+    Coupon stripeCoupon = stripe.v1().coupons().create(
+        CouponCreateParams.builder()
+            .setName(order.getCoupon().getCode())
+            .setPercentOff(BigDecimal.valueOf(order.getDiscount()))
+            .setDuration(CouponCreateParams.Duration.ONCE)
+            .build());
+    params.addDiscount(SessionCreateParams.Discount.builder()
+            .setCoupon(stripeCoupon.getId()).build());
+}
+</pre></div></div>
+</div>
+
+<p>每次支付都在 Stripe 上新建一张优惠券，和书中一样。实际项目里可以在创建本地优惠券时同步创建 Stripe 优惠券并保存它的 id，避免在 Stripe 后台堆积大量一次性优惠券。</p>
+
+<h2 id="recommender">推荐引擎：Redis 有序集合</h2>
+
+<p>思路：每卖出一笔订单，就把订单里的商品两两“配对”，给每个商品记一个有序集合：<code>product:{id}:purchased_with</code>，成员是一起买过的商品 id，分数是一起买的次数。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="推荐引擎数据结构：订单包含绿茶和红茶时，分别给两个商品的有序集合加分；给多个商品推荐时，用 ZUNIONSTORE 合并它们的有序集合，去掉已在购物车中的商品，按分数取前几名">
+  <rect class="bx" x="10" y="20" width="180" height="60" rx="10"/>
+  <text class="ttl" x="100" y="44" text-anchor="middle">一笔已付款订单</text>
+  <text class="sm" x="100" y="64" text-anchor="middle">绿茶、红茶</text>
+
+  <rect class="bx-r" x="260" y="10" width="240" height="40" rx="8"/>
+  <text class="mono sm" x="380" y="35" text-anchor="middle">product:1:purchased_with {2: +1}</text>
+  <rect class="bx-r" x="260" y="60" width="240" height="40" rx="8"/>
+  <text class="mono sm" x="380" y="85" text-anchor="middle">product:2:purchased_with {1: +1}</text>
+  <path class="ln-r" d="M192 44 L256 30" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M192 56 L256 80" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="560" y="45">ZINCRBY：两两加分</text>
+
+  <rect class="bx" x="10" y="150" width="180" height="60" rx="10"/>
+  <text class="ttl" x="100" y="174" text-anchor="middle">购物车里有</text>
+  <text class="sm" x="100" y="194" text-anchor="middle">商品 1、商品 2</text>
+
+  <rect class="bx-p" x="260" y="150" width="240" height="60" rx="10"/>
+  <text class="mono sm on-p" x="380" y="172" text-anchor="middle">ZUNIONSTORE tmp_&lt;uuid&gt;</text>
+  <text class="sm" x="380" y="192" text-anchor="middle">分数相加 → ZREM 1 2 → ZREVRANGE</text>
+
+  <rect class="bx-g" x="560" y="150" width="190" height="60" rx="10"/>
+  <text class="ttl on-g" x="655" y="174" text-anchor="middle">推荐列表</text>
+  <text class="sm" x="655" y="194" text-anchor="middle">按分数从高到低</text>
+  <path class="ln" d="M192 180 H256" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M502 180 H556" marker-end="url(#ar-g)"/>
+</svg>
+<figcaption>图 S10-1　写入时两两加分；读取多个商品的推荐时，先合并再去掉自己</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="shop/Recommender.java（节选）">
+<pre>
+public void productsBought(Collection&lt;Long&gt; productIds) {
+    for (Long productId : productIds) {
+        for (Long withId : productIds) {
+            if (!productId.equals(withId)) {
+                redis.opsForZSet().incrementScore(key(productId), withId.toString(), 1);   // ZINCRBY
+            }
+        }
+    }
+}
+
+public List&lt;Product&gt; suggestProductsFor(Collection&lt;Long&gt; productIds, int maxResults) {
+    ...
+    if (ids.size() == 1) {
+        suggestions = redis.opsForZSet().reverseRange(key(ids.getFirst()), 0, maxResults - 1L);
+    } else {
+        String tmpKey = "tmp_" + UUID.randomUUID();
+        List&lt;String&gt; keys = ids.stream().map(Recommender::key).toList();
+        redis.opsForZSet().unionAndStore(keys.getFirst(), keys.subList(1, keys.size()), tmpKey);   // ZUNIONSTORE
+        redis.opsForZSet().remove(tmpKey, ids.stream().map(String::valueOf).toArray());             // ZREM
+        suggestions = redis.opsForZSet().reverseRange(tmpKey, 0, maxResults - 1L);                  // ZREVRANGE
+        redis.delete(tmpKey);
+    }
+    ... // 按 Redis 给出的顺序取回商品
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 书中临时键名的问题</div>
+  <p>
+    书中用 <code>''.join([str(id) for id in product_ids])</code> 拼临时键名：<code>[1, 23]</code> 和 <code>[12, 3]</code> 都会得到 <code>tmp_123</code>，
+    两个用户同时查看这样的购物车，就会读到对方的合并结果（甚至被对方删掉）。Spring 版用 UUID 生成唯一的临时键。更进一步，可以用 Lua 脚本或事务（MULTI/EXEC）把这几步合成一个原子操作。
+  </p>
+</div>
+
+<h3>什么时候记录“一起购买”</h3>
+
+<p>书中在 Webhook 视图里、标记已付款之后直接调用 <code>r.products_bought(products)</code>。Spring 版把它放在支付成功事件的监听器里，而且等事务提交后再执行：</p>
+
+<div class="code" data-lang="java" data-file="shop/RecommendationListener.java（节选）">
+<pre>
+@TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+@Transactional(propagation = Propagation.REQUIRES_NEW, readOnly = true)
+public void onPaymentCompleted(PaymentCompletedEvent event) {
+    orders.findWithItemsById(event.orderId()).ifPresent(order -&gt;
+            recommender.productsBought(order.getItems().stream()
+                    .map(item -&gt; item.getProduct().getId()).distinct().toList()));
+}
+</pre>
+</div>
+
+<ul>
+  <li><strong>为什么 AFTER_COMMIT</strong>：Redis 不参与数据库事务。如果支付状态的事务回滚了，Redis 里的计数却已经加上，就会“凭空”多出购买记录。</li>
+  <li><strong>为什么 REQUIRES_NEW</strong>：<code>AFTER_COMMIT</code> 阶段原来的事务已经结束，这里要查订单项，得开一个新的（只读）事务。</li>
+  <li>同一个 <code>PaymentCompletedEvent</code> 现在有两个监听者：发发票任务（第 9 章）和记推荐数据（本章）。发布事件的 <code>PaymentService</code> 一行都不用改 —— 这就是事件解耦的好处。</li>
+</ul>
+
+<h2 id="tests">测试基础设施：共享上下文</h2>
+
+<p>
+  本章第一次运行测试时，有一个测试类等了将近 15 分钟，最后 RabbitMQ 容器启动超时。原因是：各测试类的 <code>@MockitoBean</code> 组合不同
+  （有的 mock 了邮件，有的还 mock 了 Stripe 网关），Spring 就为每种组合创建一个新的应用上下文，每个上下文又启动一套 RabbitMQ + Redis 容器。
+  几套容器同时运行，把机器拖垮了。
+</p>
+
+<div class="code" data-lang="java" data-file="src/test/java/.../IntegrationTest.java">
+<pre>
+/**
+ * Spring 会缓存测试用的应用上下文，但前提是“配置完全一样”——包括 @MockitoBean 替换了哪些 Bean。
+ * 把会用到的 mock 统一放在基类里，所有测试类共享同一个上下文。
+ */
+@SpringBootTest
+@AutoConfigureMockMvc
+@ActiveProfiles("test")
+@Import(TestcontainersConfiguration.class)
+public abstract class IntegrationTest {
+
+    @MockitoBean
+    protected JavaMailSender mailSender;
+
+    @MockitoBean
+    protected StripeGateway gateway;
+}
+
+// TestcontainersConfiguration：容器放在静态字段里，即使有多个上下文也只启动一次
+static final RabbitMQContainer RABBIT = new RabbitMQContainer("rabbitmq:3.13-management");
+static final GenericContainer&lt;?&gt; REDIS = new GenericContainer&lt;&gt;("redis:7.2").withExposedPorts(6379);
+</pre>
+</div>
+
+<p>改完之后，20 个测试共用一个上下文，整套测试从十几分钟（最后超时失败）降到一两分钟。这个结构也同步回了第 8、9 章。Django 的测试运行器只有一个进程级的设置，天然不会有这个问题；Spring 的上下文缓存是提速利器，但要有意识地“喂”它相同的配置。</p>
+
+<div class="box note">
+  <div class="t">&#9432; 共享的 Redis 不会回滚</div>
+  <p>测试事务只回滚数据库。推荐测试和发票测试都会写 Redis，所以相关测试在开始前执行 <code>FLUSHDB</code>，否则上一个测试留下的购买记录会让断言失败 —— 这也是本章实际踩到的坑。</p>
+</div>
+
+<p>本章共 20 个测试：优惠券（大小写不敏感、过期和停用、订单保存折扣、后台校验）、推荐引擎（单个与多个商品、临时键已删除、顺序）、支付成功后写入推荐数据，以及前两章的全部测试。</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 10 章 Spring 版点评 <small>springboot/Chapter10</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 金额在计算时统一舍入</h4>
+    <p>页面、Stripe、PDF 看到的是同一个两位小数，不会差一分钱。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 临时键唯一、Redis 写入时机正确</h4>
+    <p>修正了书中临时键名冲突的问题；推荐数据在支付状态提交后才写入。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 优惠券没有使用次数限制</h4>
+    <p>和书中一样，一张券在有效期内可以无限次使用。实际业务通常要“每人一次”或“总量有限”，那就需要记录使用情况，并在下单时加锁或用条件更新防止超发（见 <a href="t04.html">专题 4</a> 的并发一节）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 下单时没有重新校验优惠券</h4>
+    <p>会话里的券在“应用”时有效，下单时可能已经过期或被停用。<code>OrderService.create()</code> 应该再调用一次 <code>findValid</code>。书中也有同样的问题。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 推荐数据可以离线重建</h4>
+    <p>Redis 里的推荐数据完全可以从订单表重新计算出来。书中提供了 <code>clear_purchases()</code>；可以再写一个“命令”遍历所有已付款订单重建推荐（第 17 章讲命令行任务）。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>优惠券：JPQL 查询有效券，id 存会话；表单用 record。</li>
+  <li>金额计算用 <code>BigDecimal</code> + 明确的舍入规则；订单冗余保存折扣百分比，外键 <code>SET NULL</code>。</li>
+  <li>重复的 HTML 抽成带参数的 Thymeleaf 片段；<code>?.</code> 安全导航。</li>
+  <li>推荐引擎：<code>incrementScore</code>、<code>unionAndStore</code>、<code>reverseRange</code>；临时键要唯一。</li>
+  <li>同一事件可以有多个监听者；写 Redis 放在 <code>AFTER_COMMIT</code>。</li>
+  <li>集成测试共享一个基类和一组静态容器，充分利用上下文缓存。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>在 <code>OrderService.create()</code> 里重新校验优惠券，无效就不应用折扣，并在支付页提示顾客。</li>
+    <li>给优惠券加一个 <code>maxUses</code> 字段，用一条 <code>update Coupon c set c.uses = c.uses + 1 where c.id = :id and c.uses &lt; c.maxUses</code> 防止超发。</li>
+    <li>写一个 <code>--rebuild-recommendations</code> 命令，从所有已付款订单重建 Redis 推荐数据。</li>
+    <li>用 Redis 的 Lua 脚本把 <code>ZUNIONSTORE</code>、<code>ZREM</code>、<code>ZREVRANGE</code>、<code>DEL</code> 合成一个原子操作。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

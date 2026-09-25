@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 5 章 · 社交登录 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="5">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 5 章 · 项目二：图片书签社交网站</span>
+<h1>社交登录</h1>
+<p class="lede">
+  这一章给用户系统补上三块：操作后的提示消息、用邮箱登录、用 Google 账号登录，最后让开发服务器跑在 HTTPS 上。
+  Django 靠 messages 框架、自定义认证后端和 python-social-auth 完成；Spring 对应的是闪存属性、多个 <code>AuthenticationProvider</code>
+  和 Spring Security 自带的 OAuth2 客户端 —— 后两者正是 Spring Security 最擅长的地方。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用闪存属性（flash attributes）实现 Django 的 messages 框架，并采用 PRG 模式</li>
+    <li>理解 <code>ProviderManager</code> 按顺序尝试多个认证提供者，实现“用户名或邮箱都能登录”</li>
+    <li>给注册和编辑资料加上“邮箱不能重复”的校验</li>
+    <li>走通 OAuth2 / OpenID Connect 的授权码流程，把 Google 账号映射成本站用户</li>
+    <li>让一个主体类同时支持表单登录和 OIDC 登录</li>
+    <li>用自签名证书在本地跑 HTTPS</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch05.html">Django 版第 5 章</a>；本章代码在 <code>springboot/Chapter05/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="messages">消息：闪存属性</h2>
+
+<p>
+  Django 的 messages 框架把一次性提示存进会话（或 cookie），下一个请求在模板里读出来就删掉。
+  Spring MVC 有同样的底层机制 —— <strong>闪存属性</strong>：<code>RedirectAttributes.addFlashAttribute()</code> 存进会话，重定向后的那个请求读到后自动清除。
+  我们在它上面包了一层小工具，让用法接近 Django：
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+from django.contrib import messages
+
+messages.success(request, 'Profile updated successfully')
+messages.error(request, 'Error updating your profile')
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · common/Messages.java 的用法</div>
+<div class="code" data-lang="java"><pre>
+// 重定向前：放进闪存，下一个请求可见一次
+Messages.success(redirect, "Profile updated successfully");
+
+// 直接渲染页面：放进当前模型
+Messages.error(model, "Error updating your profile");
+</pre></div></div>
+</div>
+
+<div class="code" data-lang="java" data-file="common/Messages.java（节选）">
+<pre>
+public final class Messages {
+
+    public static final String ATTRIBUTE = "messages";
+
+    /** 对应 Django 的 message.tags（debug/info/success/warning/error） */
+    public record Message(String level, String text) { }
+
+    public static void success(RedirectAttributes redirect, String text) {
+        add(redirect.getFlashAttributes(), redirect::addFlashAttribute, "success", text);
+    }
+
+    public static void error(Model model, String text) {
+        add(model.asMap(), model::addAttribute, "error", text);
+    }
+
+    // add(...)：取出已有的列表，追加一条，再放回去 —— 一个请求里可以有多条消息
+}
+</pre>
+</div>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · base.html</div>
+<div class="code" data-lang="html"><pre>
+{% if messages %}
+  &lt;ul class="messages"&gt;
+    {% for message in messages %}
+      &lt;li class="{{ message.tags }}"&gt;
+        {{ message|safe }}
+        &lt;a href="#" class="close"&gt;x&lt;/a&gt;
+      &lt;/li&gt;
+    {% endfor %}
+  &lt;/ul&gt;
+{% endif %}
+</pre></div></div>
+  <div class="sb"><div class="h">Thymeleaf · base.html</div>
+<div class="code" data-lang="th"><pre>
+&lt;ul class="messages" th:if="${messages}"&gt;
+  &lt;li th:each="message : ${messages}" th:class="${message.level}"&gt;
+    &lt;span th:text="${message.text}"&gt;message&lt;/span&gt;
+    &lt;a href="#" class="close"
+       onclick="this.parentElement.remove(); return false;"&gt;x&lt;/a&gt;
+  &lt;/li&gt;
+&lt;/ul&gt;
+</pre></div></div>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; {{ message|safe }} 的隐患</div>
+  <p>书中用 <code>|safe</code> 输出消息，以便在消息里放链接。一旦消息里拼进了用户输入（比如“图片 <em>标题</em> 已保存”），就是 XSS。Spring 版用 <code>th:text</code>，一律转义。</p>
+</div>
+
+<h3>顺手改成 PRG</h3>
+
+<p>第 4 章的编辑页保存后直接渲染页面，刷新会弹出“重新提交表单”。有了闪存消息，就可以改成 <strong>Post/Redirect/Get</strong>：</p>
+
+<div class="code" data-lang="java" data-file="account/AccountController.java（节选）">
+<pre>
+if (!userErrors.hasErrors() &amp;&amp; !profileErrors.hasErrors()) {
+    try {
+        accounts.updateAccount(me.id(), userForm, profileForm);
+        Messages.success(redirect, "Profile updated successfully");
+        return "redirect:/account/edit/";                 // 成功：重定向，消息跟着闪存走
+    } catch (InvalidImageException e) {
+        profileErrors.rejectValue("photo", "invalid_image", e.getMessage());
+    }
+}
+Messages.error(model, "Error updating your profile");     // 失败：直接渲染，保留用户输入和错误
+return renderEdit(me, model);
+</pre>
+</div>
+
+<h2 id="email-backend">用邮箱登录：多个认证提供者</h2>
+
+<p>Django 的 <code>AUTHENTICATION_BACKENDS</code> 是一个列表，<code>authenticate()</code> 依次尝试每个后端，第一个返回用户的生效。Spring Security 的 <code>ProviderManager</code> 做的是一模一样的事：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 210" role="img" aria-label="ProviderManager 依次尝试两个 DaoAuthenticationProvider：第一个按用户名查用户，第二个按邮箱查用户，第一个成功的生效，都失败则登录失败">
+  <rect class="bx" x="10" y="75" width="150" height="56" rx="10"/>
+  <text class="ttl" x="85" y="99" text-anchor="middle">登录表单</text>
+  <text class="mono sm" x="85" y="118" text-anchor="middle">username=a@x.com</text>
+
+  <rect class="bx-b" x="200" y="75" width="160" height="56" rx="10"/>
+  <text class="ttl on-b" x="280" y="99" text-anchor="middle">ProviderManager</text>
+  <text class="sm" x="280" y="118" text-anchor="middle">按顺序尝试</text>
+
+  <rect class="bx" x="410" y="20" width="200" height="56" rx="10"/>
+  <text class="ttl" x="510" y="44" text-anchor="middle">① 按用户名</text>
+  <text class="mono sm" x="510" y="63" text-anchor="middle">JpaUserDetailsService</text>
+
+  <rect class="bx-g" x="410" y="130" width="200" height="56" rx="10"/>
+  <text class="ttl on-g" x="510" y="154" text-anchor="middle">② 按邮箱</text>
+  <text class="mono sm" x="510" y="173" text-anchor="middle">EmailUserDetailsService</text>
+
+  <rect class="bx-g" x="650" y="130" width="100" height="56" rx="10"/>
+  <text class="ttl on-g" x="700" y="163" text-anchor="middle">登录成功</text>
+
+  <path class="ln" d="M162 103 H196" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M362 95 L406 55" marker-end="url(#ar-b)"/>
+  <path class="ln-r" d="M510 78 V126" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="518" y="106">找不到该用户名</text>
+  <path class="ln-g" d="M612 158 H646" marker-end="url(#ar-g)"/>
+  <text class="sm" x="622" y="52">≈ ModelBackend</text>
+  <text class="sm" x="270" y="176">≈ EmailAuthBackend</text>
+</svg>
+<figcaption>图 S5-1　ProviderManager ≈ AUTHENTICATION_BACKENDS：前一个提供者找不到用户，就交给下一个</figcaption>
+</figure>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · account/authentication.py</div>
+<div class="code" data-lang="py"><pre>
+class EmailAuthBackend:
+    def authenticate(self, request,
+                     username=None, password=None):
+        try:
+            user = User.objects.get(email=username)
+            if user.check_password(password):
+                return user
+            return None
+        except (User.DoesNotExist,
+                User.MultipleObjectsReturned):
+            return None
+
+    def get_user(self, user_id):
+        ...
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · EmailUserDetailsService.java</div>
+<div class="code" data-lang="java"><pre>
+@Service
+public class EmailUserDetailsService implements UserDetailsService {
+
+    @Override
+    @Transactional(readOnly = true)
+    public UserDetails loadUserByUsername(String email) {
+        List&lt;User&gt; matches = users.findByEmailIgnoreCase(email);
+        // 找不到或找到多个都视为失败
+        if (email.isBlank() || matches.size() != 1) {
+            throw new UsernameNotFoundException(email);
+        }
+        return CurrentUser.from(matches.getFirst());
+    }
+}
+// 比对密码交给 DaoAuthenticationProvider，不用自己写 check_password
+</pre></div></div>
+</div>
+
+<div class="code" data-lang="java" data-file="config/SecurityConfig.java（节选）">
+<pre>
+@Bean
+AuthenticationManager authenticationManager(JpaUserDetailsService byUsername,
+                                            EmailUserDetailsService byEmail,
+                                            PasswordEncoder passwordEncoder,
+                                            AuthenticationEventPublisher eventPublisher) {
+    DaoAuthenticationProvider usernameProvider = new DaoAuthenticationProvider(byUsername);
+    usernameProvider.setPasswordEncoder(passwordEncoder);
+    DaoAuthenticationProvider emailProvider = new DaoAuthenticationProvider(byEmail);
+    emailProvider.setPasswordEncoder(passwordEncoder);
+    ProviderManager manager = new ProviderManager(usernameProvider, emailProvider);
+    manager.setAuthenticationEventPublisher(eventPublisher);   // 否则收不到登录成功事件
+    return manager;
+}
+
+// 过滤器链里显式使用它
+http.authenticationManager(authenticationManager) ...
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 自己定义 AuthenticationManager 时别忘了事件发布器</div>
+  <p>
+    Spring Boot 自动配置的认证管理器会发布登录成功/失败事件；自己 <code>new ProviderManager(...)</code> 时默认是“不发布”。
+    第 4 章的 <code>LastLoginListener</code> 依赖这个事件，所以这里要把 Boot 提供的 <code>AuthenticationEventPublisher</code> 设置进去 —— 测试里“登录后 last_login 不为空”的断言会帮你发现这个问题。
+  </p>
+</div>
+
+<h3>邮箱唯一</h3>
+
+<p>允许邮箱登录后，邮箱就必须唯一。书中给两个表单加了 <code>clean_email</code>：</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+# UserRegistrationForm
+def clean_email(self):
+    data = self.cleaned_data['email']
+    if User.objects.filter(email=data).exists():
+        raise forms.ValidationError('Email already in use.')
+    return data
+
+# UserEditForm：排除自己
+def clean_email(self):
+    data = self.cleaned_data['email']
+    qs = User.objects.exclude(id=self.instance.id
+                              ).filter(email=data)
+    if qs.exists():
+        raise forms.ValidationError('Email already in use.')
+    return data
+</pre></div></div>
+  <div class="sb"><div class="h">Spring</div>
+<div class="code" data-lang="java"><pre>
+// 注册
+if (!errors.hasFieldErrors("email") &amp;&amp; !form.getEmail().isBlank()
+        &amp;&amp; users.existsByEmailIgnoreCase(form.getEmail())) {
+    errors.rejectValue("email", "unique", "Email already in use.");
+}
+
+// 编辑资料：方法名里的 IdNot ≈ exclude(id=...)
+if (!userErrors.hasFieldErrors("email") &amp;&amp; !userForm.getEmail().isBlank()
+        &amp;&amp; users.existsByEmailIgnoreCaseAndIdNot(userForm.getEmail(), me.id())) {
+    userErrors.rejectValue("email", "unique", "Email already in use.");
+}
+</pre></div></div>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 书中代码的一个边界问题</div>
+  <p>Django 的 <code>User.email</code> 可以为空。注册时不填邮箱，<code>filter(email='')</code> 会匹配所有同样没填邮箱的用户，于是第二个不填邮箱的人就注册不了了。Spring 版只检查非空邮箱，并且忽略大小写。</p>
+</div>
+
+<h2 id="oauth">用 Google 登录：OAuth2 / OpenID Connect</h2>
+
+<p>
+  书中用 python-social-auth。Spring Security 内置了完整的 OAuth2 客户端，只需一个 starter 和几行配置，
+  授权码流程、state 防 CSRF、令牌交换、校验 ID Token 签名都由框架完成。整个流程如下：
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="OAuth2 授权码流程时序图：浏览器访问 /oauth2/authorization/google，被重定向到 Google 登录并授权，Google 带着 code 回调本站，本站用 code 向 Google 换令牌，再由 SocialUserService 映射本站用户并写入会话">
+  <rect class="bx" x="20" y="16" width="120" height="40" rx="8"/>
+  <text class="ttl" x="80" y="41" text-anchor="middle">浏览器</text>
+  <rect class="bx-g" x="320" y="16" width="160" height="40" rx="8"/>
+  <text class="ttl on-g" x="400" y="41" text-anchor="middle">本站 Spring Security</text>
+  <rect class="bx-b" x="620" y="16" width="120" height="40" rx="8"/>
+  <text class="ttl on-b" x="680" y="41" text-anchor="middle">Google</text>
+  <path class="ln-d" d="M80 58 V305"/>
+  <path class="ln-d" d="M400 58 V305"/>
+  <path class="ln-d" d="M680 58 V305"/>
+
+  <path class="ln" d="M80 84 H396" marker-end="url(#ar)"/>
+  <text class="mono sm" x="240" y="78" text-anchor="middle">① GET /oauth2/authorization/google</text>
+  <path class="ln-g" d="M400 112 H84" marker-end="url(#ar-g)"/>
+  <text class="sm" x="240" y="106" text-anchor="middle">② 302 重定向到 Google（带 state）</text>
+  <path class="ln-b" d="M80 140 H676" marker-end="url(#ar-b)"/>
+  <text class="sm" x="540" y="134" text-anchor="middle">③ 用户在 Google 登录并同意授权</text>
+  <path class="ln-b" d="M680 168 H84" marker-end="url(#ar-b)"/>
+  <text class="sm" x="540" y="162" text-anchor="middle">④ 302 → 本站回调地址 ?code=…&amp;state=…</text>
+  <path class="ln" d="M80 196 H396" marker-end="url(#ar)"/>
+  <text class="mono sm" x="240" y="190" text-anchor="middle">⑤ GET /login/oauth2/code/google</text>
+  <path class="ln-b" d="M400 224 H676" marker-end="url(#ar-b)"/>
+  <text class="sm" x="540" y="218" text-anchor="middle">⑥ 用 code 换令牌，取用户信息</text>
+  <rect class="bx-a" x="300" y="240" width="200" height="50" rx="8"/>
+  <text class="sm on-a" x="400" y="261" text-anchor="middle">⑦ SocialUserService.link()</text>
+  <text class="sm" x="400" y="279" text-anchor="middle">找到或创建本站用户，写入会话</text>
+</svg>
+<figcaption>图 S5-2　授权码流程。①②⑤⑥ 由 Spring Security 自动完成，⑦ 是我们要写的“管道”</figcaption>
+</figure>
+
+<h3>配置</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · settings.py</div>
+<div class="code" data-lang="py"><pre>
+INSTALLED_APPS += ['social_django']
+AUTHENTICATION_BACKENDS += [
+    'social_core.backends.google.GoogleOAuth2',
+]
+SOCIAL_AUTH_GOOGLE_OAUTH2_KEY = config('GOOGLE_OAUTH2_KEY')
+SOCIAL_AUTH_GOOGLE_OAUTH2_SECRET = config('GOOGLE_OAUTH2_SECRET')
+
+# urls.py
+path('social-auth/',
+     include('social_django.urls', namespace='social')),
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · pom.xml + application.yaml</div>
+<div class="code" data-lang="yaml"><pre>
+# pom.xml: spring-boot-starter-security-oauth2-client
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          google:           # Google 是内置提供者，端点都不用写
+            client-id: ${GOOGLE_OAUTH2_KEY:...}
+            client-secret: ${GOOGLE_OAUTH2_SECRET:...}
+            scope: openid, profile, email
+</pre></div></div>
+</div>
+
+<div class="code" data-lang="java" data-file="config/SecurityConfig.java（节选）">
+<pre>
+.oauth2Login(oauth -&gt; oauth
+        .loginPage("/account/login/")
+        .defaultSuccessUrl("/account/")
+        .userInfoEndpoint(userInfo -&gt; userInfo.oidcUserService(socialUserService)))
+</pre>
+</div>
+
+<p>登录页上的按钮链接到固定的入口 <code>/oauth2/authorization/google</code>（≈ <code>{% url "social:begin" "google-oauth2" %}</code>）；Google 控制台里的回调地址填 <code>https://mysite.com:8443/login/oauth2/code/google</code>。</p>
+
+<h3>管道：把 Google 账号映射成本站用户</h3>
+
+<p>python-social-auth 用 <code>SOCIAL_AUTH_PIPELINE</code> 里的一串函数完成“查找或创建用户”；书中还插入了自定义的 <code>create_profile</code>。Spring 里继承 <code>OidcUserService</code>，在 <code>loadUser</code> 里做同样的事：</p>
+
+<div class="code" data-lang="java" data-file="account/SocialUserService.java（节选）">
+<pre>
+@Service
+public class SocialUserService extends OidcUserService {
+
+    @Override
+    public OidcUser loadUser(OidcUserRequest request) {
+        OidcUser oidc = super.loadUser(request);   // social_details / social_uid：向 Google 取用户信息
+        return link(request.getClientRegistration().getRegistrationId(), oidc);
+    }
+
+    /** 与网络无关的部分单独成方法，方便测试 */
+    @Transactional
+    public CurrentUser link(String provider, OidcUser oidc) {
+        User user = socialAuths.findByProviderAndUid(provider, oidc.getSubject())   // social_user
+                .map(UserSocialAuth::getUser)
+                .orElseGet(() -&gt; createUser(provider, oidc));
+        if (!user.isActive()) {                                                   // auth_allowed
+            throw new DisabledException("User is disabled");
+        }
+        user.setLastLogin(OffsetDateTime.now(ZoneOffset.UTC));
+        return CurrentUser.from(user, oidc);
+    }
+
+    private User createUser(String provider, OidcUser oidc) {
+        // get_username + create_user：邮箱前缀做用户名，重名加数字
+        ...
+        User user = new User(username, passwordEncoder.encode(UUID.randomUUID().toString()), email);
+        user.setFirstName(oidc.getGivenName());                                  // user_details
+        user.setLastName(oidc.getFamilyName());
+        users.save(user);
+        profiles.save(new Profile(user));                                         // create_profile
+        socialAuths.save(new UserSocialAuth(user, provider, oidc.getSubject()));  // associate_user
+        return user;
+    }
+}
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>SOCIAL_AUTH_PIPELINE 步骤</th><th>Spring 版</th></tr>
+  <tr><td><code>social_details</code>、<code>social_uid</code></td><td><code>super.loadUser(request)</code>：Spring 调用 Google 的 userinfo 端点</td></tr>
+  <tr><td><code>auth_allowed</code></td><td><code>user.isActive()</code> 检查</td></tr>
+  <tr><td><code>social_user</code></td><td><code>socialAuths.findByProviderAndUid(...)</code></td></tr>
+  <tr><td><code>get_username</code>、<code>create_user</code></td><td><code>createUser(...)</code></td></tr>
+  <tr><td><code>account.authentication.create_profile</code></td><td><code>profiles.save(new Profile(user))</code></td></tr>
+  <tr><td><code>associate_user</code></td><td><code>socialAuths.save(new UserSocialAuth(...))</code>，表名沿用 <code>social_auth_usersocialauth</code></td></tr>
+  <tr><td><code>user_details</code></td><td>从 <code>given_name</code>、<code>family_name</code> 填写姓名</td></tr>
+</table>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 用 sub 识别用户，不要用邮箱</div>
+  <p>OIDC 的 <code>sub</code>（subject）是 Google 给这个账号的永久唯一标识；邮箱可能改变，也可能被别的账号“接手”。所以绑定表存的是 <code>(provider, uid=sub)</code>，并加了唯一约束。测试 <code>secondLoginReusesTheSameUser</code> 验证了邮箱变了仍然识别为同一个人。</p>
+</div>
+
+<h3>一个主体类，两种登录方式</h3>
+
+<p>
+  表单登录时，会话里的主体是 <code>UserDetails</code>；OIDC 登录时是 <code>OidcUser</code>。如果两者类型不同，控制器里的
+  <code>@AuthenticationPrincipal CurrentUser me</code> 在 Google 登录后就会是 <code>null</code>。解决办法是让 <code>CurrentUser</code> 同时实现两个接口：
+</p>
+
+<div class="code" data-lang="java" data-file="account/CurrentUser.java（节选）">
+<pre>
+public record CurrentUser(Long id, String username, String password, boolean enabled,
+                          List&lt;GrantedAuthority&gt; authorities, OidcUser oidc)
+        implements UserDetails, OidcUser {
+
+    /** Authentication.getName() 最终返回它：两种方式下都是本站用户名 */
+    @Override
+    public String getName() { return username; }
+
+    @Override
+    public Map&lt;String, Object&gt; getClaims() { return oidc == null ? Map.of() : oidc.getClaims(); }
+
+    @Override
+    public OidcIdToken getIdToken() { return oidc == null ? null : oidc.getIdToken(); }
+    ...
+}
+</pre>
+</div>
+
+<p>这相当于 Django 里无论用哪个后端登录，<code>request.user</code> 都是同一个 <code>User</code> 模型 —— 在 Spring 里需要我们自己保证这一点。</p>
+
+<h2 id="https">本地 HTTPS</h2>
+
+<p>Google 要求回调地址使用 HTTPS（<code>localhost</code> 除外）。书中用 django-extensions 的 <code>runserver_plus --cert-file</code>；Spring Boot 的内嵌 Tomcat 直接支持 SSL，只需要一个证书：</p>
+
+<div class="code" data-lang="bash" data-file="scripts/dev-cert.sh（节选）">
+<pre>
+keytool -genkeypair -alias dev -keyalg RSA -keysize 2048 -validity 365 \
+  -storetype PKCS12 -keystore certs/dev.p12 -storepass changeit \
+  -dname "CN=mysite.com" -ext "SAN=dns:mysite.com,dns:localhost,ip:127.0.0.1"
+</pre>
+</div>
+
+<div class="code" data-lang="yaml" data-file="application.yaml（节选）">
+<pre>
+---
+spring:
+  config:
+    activate:
+      on-profile: https          # --spring.profiles.active=https
+server:
+  port: 8443
+  ssl:
+    key-store: file:certs/dev.p12
+    key-store-password: ${SSL_KEYSTORE_PASSWORD:changeit}
+    key-store-type: PKCS12
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+./scripts/dev-cert.sh
+echo "127.0.0.1 mysite.com" | sudo tee -a /etc/hosts
+mvn spring-boot:run -Dspring-boot.run.profiles=https
+# 访问 https://mysite.com:8443/ （浏览器会提示证书不受信任，开发时手动信任即可）
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 想要浏览器不报警告</div>
+  <p>用 <code>mkcert</code> 生成一个本机受信任的证书（它会把自己的根证书装进系统信任库），再导出成 PKCS12 使用。生产环境一般由 Nginx 终止 TLS，应用本身仍然跑 HTTP（第 17 章）。</p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; ALLOWED_HOSTS 呢？</div>
+  <p>
+    书中为 <code>mysite.com</code> 修改了 <code>ALLOWED_HOSTS</code>，这是 Django 防御 Host 头攻击的机制。Spring Boot 没有同名设置。
+    而我们的代码确实依赖 Host 头：<code>ServletUriComponentsBuilder</code> 用它生成找回密码邮件里的链接。
+    如果不加限制，攻击者可以伪造 Host 头，让受害者收到指向恶意域名的重置链接。
+    生产环境应该在 Nginx 里只接受已知域名（第 17 章配置），或者把站点地址写进配置而不是从请求里取。
+  </p>
+</div>
+
+<h2 id="tests">测试</h2>
+
+<p>OAuth2 登录不可能在测试里真的连 Google，我们分两层测：</p>
+
+<ul>
+  <li>入口：请求 <code>/oauth2/authorization/google</code>，断言重定向到 <code>https://accounts.google.com/...</code> —— 证明配置生效。</li>
+  <li>映射逻辑：手工构造一个 <code>DefaultOidcUser</code>，直接调用 <code>SocialUserService.link()</code>。这就是为什么要把“联网”和“业务”拆成两个方法。</li>
+</ul>
+
+<div class="code" data-lang="java" data-file="SocialUserServiceTests.java（节选）">
+<pre>
+private OidcUser googleUser(String sub, String email) {
+    OidcIdToken token = new OidcIdToken("token", Instant.now(), Instant.now().plusSeconds(60),
+            Map.of("sub", sub, "email", email, "given_name", "Ada", "family_name", "Lovelace"));
+    return new DefaultOidcUser(List.of(new SimpleGrantedAuthority("OIDC_USER")), token);
+}
+
+@Test
+void firstLoginCreatesUserProfileAndLink() {
+    users.save(new User("ada", "{noop}x", "someone-else@example.com"));   // 用户名 ada 已被占用
+    CurrentUser me = service.link("google", googleUser("google-123", "ada@example.com"));
+    assertThat(me.getUsername()).isEqualTo("ada1");
+    ...
+}
+</pre>
+</div>
+
+<p>本章共 16 个测试。除了第 4 章的内容，还覆盖了：邮箱登录（以及两个账号共用邮箱时失败）、注册和编辑时的邮箱唯一、编辑成功后的闪存消息、Google 登录入口和账号映射。</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 5 章 Spring 版点评 <small>springboot/Chapter05</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> OAuth2 是 Spring Security 的“主场”</h4>
+    <p>不需要第三方库，state 参数、授权码换令牌、ID Token 签名校验都由框架处理。换成 GitHub 登录只需再加一个 <code>registration</code>（GitHub 是 OAuth2 而非 OIDC，要实现 <code>OAuth2UserService</code>）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 消息默认转义、采用 PRG</h4>
+    <p>避免了 <code>|safe</code> 的 XSS 风险，也消除了刷新重复提交。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 按邮箱前缀生成用户名可能暴露信息</h4>
+    <p>用户名会出现在个人主页 URL 里（第 7 章），用邮箱前缀当用户名等于公开了半个邮箱地址。python-social-auth 默认也这么做。可以改为随机用户名，让用户首次登录后自己设置。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 已有本站账号的人用 Google 登录会得到第二个账号</h4>
+    <p>和书中的管道一样，没有“邮箱相同就自动关联”。自动关联需要确认 Google 已验证该邮箱（<code>email_verified</code> 声明），否则可能被人用未验证的邮箱接管账号。更稳妥的是让已登录用户在设置页主动绑定。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 为什么 client-id 有一个“占位默认值”</h4>
+    <p>Spring Boot 校验 OAuth2 注册时要求 <code>client-id</code> 非空，否则启动失败。给一个明显的占位值，让没有配置 Google 的开发者也能启动项目；真正登录时 Google 会报 “invalid_client”。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>闪存属性 ≈ messages：重定向前存进会话，下一个请求读完即删；配合 PRG 使用。</li>
+  <li><code>ProviderManager</code> ≈ <code>AUTHENTICATION_BACKENDS</code>：依次尝试多个提供者。自定义管理器时记得设置事件发布器。</li>
+  <li>OAuth2 登录：配置 <code>registration</code>、开启 <code>oauth2Login()</code>、在 <code>OidcUserService</code> 里把第三方账号映射成本站用户。</li>
+  <li>让主体类同时实现 <code>UserDetails</code> 和 <code>OidcUser</code>，控制器就不必关心用户是怎么登录的。</li>
+  <li>内嵌 Tomcat 配置 <code>server.ssl.*</code> 即可跑 HTTPS。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>在 Google Cloud Console 创建一个 OAuth 客户端，按本章步骤在本地走通真实的 Google 登录。</li>
+    <li>加一个 GitHub 登录（提示：GitHub 不支持 OIDC，要实现 <code>OAuth2UserService&lt;OAuth2UserRequest, OAuth2User&gt;</code>，并让 <code>CurrentUser</code> 也能包装 <code>OAuth2User</code>）。</li>
+    <li>实现“已登录用户绑定 Google 账号”：在设置页放一个按钮，登录回调时如果当前已登录，就把 <code>sub</code> 绑定到当前用户而不是新建用户。</li>
+    <li>给 <code>Messages</code> 加上 <code>warning</code> 和 <code>info</code> 级别，并在 CSS 里为它们设置不同颜色。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

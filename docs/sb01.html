@@ -1,0 +1,1145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 1 章 · 创建博客应用 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="1">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 1 章 · 项目一：博客</span>
+<h1>创建博客应用</h1>
+<p class="lede">
+  和 Django 版第 1 章一样，我们从零搭一个能跑的博客：定义文章模型、建表、做一个管理后台，
+  再用控制器和模板把文章展示出来。区别在于，Django 用一个框架“全包”的事情，
+  在 Spring Boot 里由好几个项目分工完成 —— 这一章的重点就是认识它们各自的位置。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>画出 Spring MVC 处理一个请求的路线，并和 Django 的 MTV 对上号</li>
+    <li>看懂 <code>pom.xml</code>、入口类和 <code>application.yaml</code>，知道它们分别对应 Django 的什么</li>
+    <li>用 JPA 注解写出 <code>Post</code> 实体：字段、枚举、外键、自动时间戳、索引</li>
+    <li>用 Flyway 手写迁移脚本，理解它和 <code>makemigrations</code> 最大的不同</li>
+    <li>用 Spring Data 仓库完成 QuerySet 的常见操作，并用 <code>@EntityGraph</code> 避免 N+1</li>
+    <li>写控制器和 Thymeleaf 模板，掌握布局继承、URL 生成和“过滤器”的替代方案</li>
+    <li>理解为什么要手写后台，以及 Spring Security 在本章承担的最小职责</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch01.html">Django 版第 1 章</a>；本章代码在 <code>springboot/Chapter01/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="overview">Spring MVC 是怎么处理请求的</h2>
+
+<p>
+  Django 用 MTV 描述自己：URL 配置派发请求，视图协调，模型管数据，模板管外观。
+  Spring MVC 的角色几乎一一对应，只是名字不同，而且多了一个“总调度”：<strong>DispatcherServlet</strong>。
+</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 320" role="img" aria-label="Spring MVC 请求流程：浏览器经过滤器链到 DispatcherServlet，再到控制器方法；控制器通过仓库查询数据库，返回视图名和 Model，由 Thymeleaf 渲染 HTML 返回浏览器">
+  <rect class="bx" x="10" y="30" width="140" height="58" rx="10"/>
+  <text class="ttl" x="80" y="55" text-anchor="middle">浏览器</text>
+  <text class="mono sm" x="80" y="74" text-anchor="middle">GET /blog/3/</text>
+
+  <rect class="bx-d" x="190" y="30" width="150" height="58" rx="10"/>
+  <text class="ttl" x="265" y="55" text-anchor="middle">过滤器链</text>
+  <text class="sm" x="265" y="74" text-anchor="middle">Spring Security、CSRF</text>
+
+  <rect class="bx-a" x="380" y="30" width="150" height="58" rx="10"/>
+  <text class="ttl on-a" x="455" y="55" text-anchor="middle">DispatcherServlet</text>
+  <text class="sm" x="455" y="74" text-anchor="middle">按注解找到处理方法</text>
+
+  <rect class="bx-a" x="570" y="30" width="180" height="58" rx="10"/>
+  <text class="ttl on-a" x="660" y="55" text-anchor="middle">@Controller 方法</text>
+  <text class="mono sm" x="660" y="74" text-anchor="middle">postDetail(...)</text>
+
+  <rect class="bx-b" x="570" y="150" width="180" height="58" rx="10"/>
+  <text class="ttl on-b" x="660" y="175" text-anchor="middle">仓库 Repository</text>
+  <text class="mono sm" x="660" y="194" text-anchor="middle">PostRepository</text>
+
+  <rect class="bx" x="570" y="252" width="180" height="50" rx="10"/>
+  <text class="ttl" x="660" y="282" text-anchor="middle">数据库（H2）</text>
+
+  <rect class="bx-g" x="380" y="150" width="150" height="58" rx="10"/>
+  <text class="ttl on-g" x="455" y="175" text-anchor="middle">Thymeleaf</text>
+  <text class="mono sm" x="455" y="194" text-anchor="middle">post/detail.html</text>
+
+  <path class="ln" d="M152 59 H186" marker-end="url(#ar)"/>
+  <text class="sm" x="169" y="51" text-anchor="middle">①</text>
+  <path class="ln" d="M342 59 H376" marker-end="url(#ar)"/>
+  <text class="sm" x="359" y="51" text-anchor="middle">②</text>
+  <path class="ln" d="M532 59 H566" marker-end="url(#ar)"/>
+  <text class="sm" x="549" y="51" text-anchor="middle">③</text>
+  <path class="ln-b" d="M660 90 V146" marker-end="url(#ar-b)"/>
+  <text class="sm on-b" x="668" y="124">④ 查询</text>
+  <path class="ln-b" d="M660 210 V248" marker-end="url(#ar-b)"/>
+  <path class="ln-g" d="M600 90 L520 146" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="552" y="118" text-anchor="end">⑤ 视图名 + Model</text>
+  <path class="ln-a" d="M378 179 H80 V92" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="230" y="171" text-anchor="middle">⑥ 渲染好的 HTML</text>
+</svg>
+<figcaption>图 S1-1　Spring MVC：DispatcherServlet 负责派发，控制器负责协调，仓库管数据，Thymeleaf 管外观</figcaption>
+</figure>
+
+<ol class="steps">
+  <li>请求先进入内嵌的 Tomcat，穿过一串 <strong>Servlet 过滤器</strong>。Spring Security 就是其中之一，它负责登录状态、CSRF 校验等 —— 相当于 Django 的中间件。</li>
+  <li>过滤器放行后，请求交给 <strong>DispatcherServlet</strong>。它启动时已经扫描过所有带 <code>@GetMapping</code> 等注解的方法，建好了“URL → 方法”的映射表，相当于 Django 的 <code>urls.py</code>。</li>
+  <li>DispatcherServlet 调用匹配到的<strong>控制器方法</strong>，并按参数上的注解自动准备好参数（路径变量、查询参数、当前用户……）。</li>
+  <li>控制器通过<strong>仓库</strong>读数据。仓库背后是 JPA/Hibernate，会把方法调用翻译成 SQL。</li>
+  <li>控制器把数据放进 <code>Model</code>，返回一个<strong>视图名</strong>（字符串，例如 <code>"blog/post/detail"</code>）。</li>
+  <li>视图解析器找到 <code>templates/blog/post/detail.html</code>，交给 Thymeleaf 渲染成 HTML 写回响应。</li>
+</ol>
+
+<div class="tw">
+<table>
+  <tr><th>职责</th><th>Django 5.2</th><th>Spring Boot 4.1</th></tr>
+  <tr><td>路由</td><td><code>urls.py</code> 里的 <code>path()</code> 列表</td><td>控制器方法上的 <code>@GetMapping</code> / <code>@PostMapping</code></td></tr>
+  <tr><td>处理请求</td><td>视图函数 / 类视图</td><td><code>@Controller</code> 类里的方法</td></tr>
+  <tr><td>数据访问</td><td>模型 + Manager/QuerySet</td><td>实体（<code>@Entity</code>）+ 仓库接口</td></tr>
+  <tr><td>展示</td><td>Django 模板</td><td>Thymeleaf 模板</td></tr>
+  <tr><td>请求前后的横切逻辑</td><td>中间件</td><td>Servlet 过滤器、拦截器</td></tr>
+  <tr><td>把这些拼起来的“胶水”</td><td>框架本身 + <code>settings.py</code></td><td><strong>IoC 容器</strong> + 自动配置 + <code>application.yaml</code></td></tr>
+</table>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 最大的不同：依赖注入容器</div>
+  <p>
+    Django 的视图里直接 <code>from .models import Post</code>，想用什么就导入什么。
+    Spring 里，控制器、仓库、配置类都是容器管理的 <strong>Bean</strong>：控制器在构造器里声明“我需要一个 <code>PostRepository</code>”，
+    容器创建控制器时自动把仓库实例传进来。这就是<strong>依赖注入</strong>。
+    它的好处在测试时最明显：可以轻松把某个 Bean 替换成假的实现（第 2 章会把邮件发送器换成 Mock）。
+  </p>
+</div>
+
+<h2 id="project">项目结构、依赖与配置</h2>
+
+<p>Django 用 <code>django-admin startproject</code> 生成项目，再 <code>startapp blog</code> 生成应用。Spring Boot 通常用 <a href="https://start.spring.io">start.spring.io</a> 生成一个 Maven 项目，功能按<strong>包</strong>来划分：</p>
+
+<div class="tw">
+<table class="filemap">
+  <tr><th>Django（Chapter01/mysite）</th><th>Spring Boot（springboot/Chapter01）</th><th>说明</th></tr>
+  <tr><td>requirements.txt</td><td>pom.xml</td><td>依赖清单；Spring 的版本由 parent 统一管理</td></tr>
+  <tr><td>manage.py</td><td>MysiteApplication.java</td><td>程序入口</td></tr>
+  <tr><td>mysite/settings.py</td><td>application.yaml、config/SecurityConfig.java</td><td>配置分成“键值”和“Java 配置类”两部分</td></tr>
+  <tr><td>mysite/urls.py、blog/urls.py</td><td>各控制器上的 @RequestMapping</td><td>路由分散在控制器里</td></tr>
+  <tr><td>blog/models.py</td><td>blog/Post.java、PostStatus.java、FavouritePost.java…</td><td>一个类一个文件</td></tr>
+  <tr><td>blog/migrations/</td><td>resources/db/migration/V*.sql</td><td>手写 SQL</td></tr>
+  <tr><td>blog/views.py</td><td>blog/BlogController.java</td><td></td></tr>
+  <tr><td>blog/admin.py</td><td>blog/admin/PostAdminController.java + templates/admin/</td><td>需要手写</td></tr>
+  <tr><td>blog/templates/</td><td>resources/templates/</td><td></td></tr>
+  <tr><td>blog/static/</td><td>resources/static/</td><td></td></tr>
+  <tr><td>django.contrib.auth</td><td>account/（User、CurrentUser、JpaUserDetailsService）</td><td>用户模型要自己写</td></tr>
+</table>
+</div>
+
+<h3>pom.xml：用“starter”声明需要哪些能力</h3>
+
+<p>每个 <code>spring-boot-starter-*</code> 是一组依赖的打包，引入后 Spring Boot 的<strong>自动配置</strong>会检测到它并完成默认配置 —— 这相当于 Django 的 <code>INSTALLED_APPS</code> 加上默认设置。</p>
+
+<div class="code" data-lang="xml" data-file="springboot/Chapter01/pom.xml（节选）">
+<pre>
+&lt;parent&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-starter-parent&lt;/artifactId&gt;
+    &lt;version&gt;4.1.1&lt;/version&gt;          &lt;!-- 一处写版本，所有 Spring 依赖版本都对齐 --&gt;
+&lt;/parent&gt;
+
+&lt;dependencies&gt;
+    &lt;dependency&gt;&lt;artifactId&gt;spring-boot-starter-webmvc&lt;/artifactId&gt;&lt;/dependency&gt;     &lt;!-- MVC + 内嵌 Tomcat --&gt;
+    &lt;dependency&gt;&lt;artifactId&gt;spring-boot-starter-thymeleaf&lt;/artifactId&gt;&lt;/dependency&gt;  &lt;!-- 模板 --&gt;
+    &lt;dependency&gt;&lt;artifactId&gt;thymeleaf-layout-dialect&lt;/artifactId&gt;&lt;/dependency&gt;      &lt;!-- extends/block --&gt;
+    &lt;dependency&gt;&lt;artifactId&gt;spring-boot-starter-data-jpa&lt;/artifactId&gt;&lt;/dependency&gt;   &lt;!-- ORM --&gt;
+    &lt;dependency&gt;&lt;artifactId&gt;spring-boot-starter-flyway&lt;/artifactId&gt;&lt;/dependency&gt;    &lt;!-- 迁移 --&gt;
+    &lt;dependency&gt;&lt;artifactId&gt;spring-boot-starter-validation&lt;/artifactId&gt;&lt;/dependency&gt;&lt;!-- 表单校验 --&gt;
+    &lt;dependency&gt;&lt;artifactId&gt;spring-boot-starter-security&lt;/artifactId&gt;&lt;/dependency&gt;  &lt;!-- 认证授权 --&gt;
+    &lt;dependency&gt;&lt;artifactId&gt;h2&lt;/artifactId&gt;&lt;scope&gt;runtime&lt;/scope&gt;&lt;/dependency&gt;     &lt;!-- ≈ SQLite --&gt;
+    &lt;dependency&gt;&lt;artifactId&gt;spring-boot-devtools&lt;/artifactId&gt;&lt;/dependency&gt;         &lt;!-- 自动重启 --&gt;
+&lt;/dependencies&gt;
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; Spring Boot 4 的新变化：更细的 starter</div>
+  <p>
+    Spring Boot 4 把原来的大模块拆细了：Web MVC 的 starter 叫 <code>spring-boot-starter-webmvc</code>（旧名 <code>starter-web</code> 仍可用），
+    Flyway 需要 <code>spring-boot-starter-flyway</code> 才会自动配置，测试也分成 <code>spring-boot-starter-webmvc-test</code> 等按技术划分的 starter。
+    网上 Spring Boot 3 的教程大多还能用，但依赖名要对照着改。
+  </p>
+</div>
+
+<h3>入口类与 application.yaml</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · mysite/settings.py（节选）</div>
+<div class="code" data-lang="py"><pre>
+INSTALLED_APPS = [
+    'django.contrib.admin',
+    'django.contrib.auth',
+    # ...
+    'blog.apps.BlogConfig',
+]
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
+}
+TIME_ZONE = 'UTC'
+USE_TZ = True
+STATIC_URL = 'static/'
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · application.yaml</div>
+<div class="code" data-lang="yaml"><pre>
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/mysite;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: validate      # 只校验，不建表
+    open-in-view: false       # 见后文“N+1”一节
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  mvc:
+    static-path-pattern: /static/**
+</pre></div></div>
+</div>
+
+<p>
+  注意右边没有“应用列表”。Spring Boot 的入口类上有一个 <code>@SpringBootApplication</code>，
+  它会<strong>扫描入口类所在包及其子包</strong>里所有带 <code>@Controller</code>、<code>@Service</code>、<code>@Component</code>、<code>@Entity</code> 等注解的类。
+  所以“把一个包放在 <code>com.example.mysite</code> 下面”就等于把它“装进了项目”。
+</p>
+
+<div class="code" data-lang="java" data-file="MysiteApplication.java">
+<pre>
+@SpringBootApplication
+public class MysiteApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(MysiteApplication.class, args);
+    }
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 端口与自动重启</div>
+  <p>
+    <code>mvn spring-boot:run</code> 默认监听 <strong>8080</strong>（Django 的 runserver 是 8000），可以用 <code>server.port</code> 修改。
+    引入 <code>spring-boot-devtools</code> 后，编译过的类发生变化会自动重启应用，模板缓存也会被关闭，改完模板刷新即可看到效果 —— 体验接近 runserver 的自动重载。
+  </p>
+</div>
+
+<h2 id="models">实体：用 JPA 注解描述 Post</h2>
+
+<p>下面把 Django 的 <code>Post</code> 模型和 Spring 的实体放在一起比较。先看整体，再逐项拆开。</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · blog/models.py</div>
+<div class="code" data-lang="py"><pre>
+class Post(models.Model):
+    class Status(models.TextChoices):
+        DRAFT = 'DF', 'Draft'
+        PUBLISHED = 'PB', 'Published'
+
+    title = models.CharField(max_length=250)
+    slug = models.SlugField(max_length=250)
+    author = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='blog_posts'
+    )
+    body = models.TextField()
+    publish = models.DateTimeField(default=timezone.now)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+    status = models.CharField(
+        max_length=2, choices=Status,
+        default=Status.DRAFT
+    )
+
+    class Meta:
+        ordering = ['-publish']
+        indexes = [models.Index(fields=['-publish'])]
+
+    def __str__(self):
+        return self.title
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · blog/Post.java（去掉 getter/setter）</div>
+<div class="code" data-lang="java"><pre>
+@Entity
+@Table(name = "blog_post", indexes = @Index(
+        name = "blog_post_publish_idx", columnList = "publish DESC"))
+public class Post {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false, length = 250)
+    private String title;
+
+    @Column(nullable = false, length = 250)
+    private String slug;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "author_id")
+    private User author;
+
+    @Column(nullable = false, columnDefinition = "text")
+    private String body;
+
+    @Column(nullable = false)
+    private OffsetDateTime publish = OffsetDateTime.now(ZoneOffset.UTC);
+
+    @CreationTimestamp
+    @Column(nullable = false, updatable = false)
+    private OffsetDateTime created;
+
+    @UpdateTimestamp
+    @Column(nullable = false)
+    private OffsetDateTime updated;
+
+    @Column(nullable = false, length = 2)
+    private PostStatus status = PostStatus.DRAFT;
+
+    protected Post() { }   // JPA 需要无参构造器
+
+    @Override
+    public String toString() { return title; }
+}
+</pre></div></div>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>Django 写法</th><th>JPA 写法</th><th>要点</th></tr>
+  <tr><td>隐式的 <code>id = BigAutoField</code></td><td><code>@Id @GeneratedValue(IDENTITY)</code></td><td>JPA 必须显式声明主键</td></tr>
+  <tr><td><code>CharField(max_length=250)</code></td><td><code>@Column(length = 250)</code></td><td>Django 字段默认 NOT NULL，JPA 默认可为空，所以处处写 <code>nullable = false</code></td></tr>
+  <tr><td><code>TextField()</code></td><td><code>String</code> + <code>columnDefinition = "text"</code></td><td>否则 Hibernate 会按 <code>varchar(255)</code> 校验</td></tr>
+  <tr><td><code>ForeignKey(..., on_delete=CASCADE)</code></td><td><code>@ManyToOne</code> + SQL 里的 <code>ON DELETE CASCADE</code></td><td>级联删除写在迁移脚本里，由数据库执行</td></tr>
+  <tr><td><code>default=timezone.now</code></td><td>字段初始值 <code>OffsetDateTime.now(UTC)</code></td><td>新建对象时取值，之后可改</td></tr>
+  <tr><td><code>auto_now_add</code> / <code>auto_now</code></td><td><code>@CreationTimestamp</code> / <code>@UpdateTimestamp</code></td><td>Hibernate 在 INSERT / UPDATE 时自动赋值</td></tr>
+  <tr><td><code>Meta.ordering</code></td><td>无对应物</td><td>排序写在每个查询里（显式反而更少意外）</td></tr>
+  <tr><td><code>Meta.indexes</code></td><td><code>@Table(indexes = …)</code></td><td>只是元数据；真正建索引的是 Flyway 脚本</td></tr>
+  <tr><td><code>__str__</code></td><td><code>toString()</code></td><td>模板里直接输出对象时会调用它</td></tr>
+</table>
+</div>
+
+<h3>枚举选项：TextChoices 与 enum + AttributeConverter</h3>
+
+<p>
+  Django 的 <code>TextChoices</code> 同时定义了“数据库里存什么”（<code>'DF'</code>）和“界面上显示什么”（<code>'Draft'</code>）。
+  Java 的 <code>enum</code> 可以带字段，做到同样的事；再写一个 <code>AttributeConverter</code> 告诉 JPA 用代码值存库：
+</p>
+
+<div class="code" data-lang="java" data-file="blog/PostStatus.java 与 PostStatusConverter.java">
+<pre>
+public enum PostStatus {
+    DRAFT("DF", "Draft"),
+    PUBLISHED("PB", "Published");
+
+    private final String code;
+    private final String label;
+    // 构造器、getter、fromCode(...) 略
+}
+
+@Converter(autoApply = true)          // 所有 PostStatus 类型的字段自动使用
+public class PostStatusConverter implements AttributeConverter&lt;PostStatus, String&gt; {
+    public String convertToDatabaseColumn(PostStatus status) {
+        return status == null ? null : status.getCode();          // PUBLISHED → "PB"
+    }
+    public PostStatus convertToEntityAttribute(String code) {
+        return code == null ? null : PostStatus.fromCode(code);   // "PB" → PUBLISHED
+    }
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 别用 @Enumerated(EnumType.ORDINAL)</div>
+  <p>
+    JPA 默认把枚举存成序号（0、1），以后在中间插入一个新状态，已有数据的含义就全乱了。
+    最省事的安全写法是 <code>@Enumerated(EnumType.STRING)</code>（存 <code>'DRAFT'</code>），
+    这里为了和 Django 的表结构保持一致才用了转换器。
+  </p>
+</div>
+
+<h3>外键为什么是 LAZY</h3>
+
+<p>
+  <code>@ManyToOne</code> 默认是 <strong>EAGER</strong>：查文章时总会 JOIN 出作者，即使你用不到。
+  最佳实践是一律改成 <code>FetchType.LAZY</code>，需要作者时再在查询里显式声明“顺带取出来”。
+  这和 Django 的默认行为一致 —— Django 访问 <code>post.author</code> 时才发 SQL，需要预取时写 <code>select_related</code>。
+</p>
+
+<h2 id="migrations">迁移：Flyway 与 makemigrations</h2>
+
+<p>这是两个框架差异最大的地方之一。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="迁移流程对比：Django 从模型自动生成迁移文件再执行；Spring 版手写 SQL 迁移脚本，由 Flyway 在启动时执行，Hibernate 只校验实体与表是否一致">
+  <text class="ttl" x="10" y="24">Django</text>
+  <rect class="bx-b" x="10" y="36" width="140" height="50" rx="10"/>
+  <text class="mono sm on-b" x="80" y="66" text-anchor="middle">models.py</text>
+  <path class="ln-b" d="M152 61 H262" marker-end="url(#ar-b)"/>
+  <text class="sm" x="206" y="53" text-anchor="middle">makemigrations</text>
+  <rect class="bx" x="266" y="36" width="196" height="50" rx="10"/>
+  <text class="mono sm" x="364" y="58" text-anchor="middle">0001_initial.py</text>
+  <text class="sm" x="364" y="75" text-anchor="middle">（自动生成）</text>
+  <path class="ln-b" d="M464 61 H530" marker-end="url(#ar-b)"/>
+  <text class="sm" x="497" y="53" text-anchor="middle">migrate</text>
+  <rect class="bx-g" x="534" y="36" width="216" height="50" rx="10"/>
+  <text class="sm" x="642" y="58" text-anchor="middle">数据库表</text>
+  <text class="mono sm" x="642" y="75" text-anchor="middle">+ django_migrations</text>
+
+  <text class="ttl" x="10" y="130">Spring Boot</text>
+  <rect class="bx-b" x="10" y="142" width="140" height="50" rx="10"/>
+  <text class="mono sm on-b" x="80" y="172" text-anchor="middle">Post.java</text>
+  <rect class="bx" x="266" y="142" width="196" height="50" rx="10"/>
+  <text class="mono sm" x="364" y="164" text-anchor="middle">V2__create_blog_post.sql</text>
+  <text class="sm" x="364" y="181" text-anchor="middle">（手写 SQL）</text>
+  <path class="ln-a" d="M464 167 H530" marker-end="url(#ar-a)"/>
+  <text class="sm" x="497" y="159" text-anchor="middle">Flyway</text>
+  <text class="sm" x="497" y="184" text-anchor="middle">启动时</text>
+  <rect class="bx-g" x="534" y="142" width="216" height="50" rx="10"/>
+  <text class="sm" x="642" y="164" text-anchor="middle">数据库表</text>
+  <text class="mono sm" x="642" y="181" text-anchor="middle">+ flyway_schema_history</text>
+  <path class="ln-d" d="M80 194 V230 H642 V196" marker-end="url(#ar)"/>
+  <text class="sm" x="360" y="224" text-anchor="middle">Hibernate ddl-auto=validate：启动时比对实体和表，不一致就报错</text>
+</svg>
+<figcaption>图 S1-2　Django 从模型“推导”迁移；Flyway 执行你写的 SQL，Hibernate 只负责核对</figcaption>
+</figure>
+
+<div class="code" data-lang="sql" data-file="resources/db/migration/V2__create_blog_post.sql">
+<pre>
+-- blog/migrations/0001_initial.py
+CREATE TABLE blog_post (
+    id         BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    title      VARCHAR(250) NOT NULL,
+    slug       VARCHAR(250) NOT NULL,
+    author_id  BIGINT       NOT NULL REFERENCES auth_user (id) ON DELETE CASCADE,
+    body       TEXT         NOT NULL,
+    publish    TIMESTAMP WITH TIME ZONE NOT NULL,
+    created    TIMESTAMP WITH TIME ZONE NOT NULL,
+    updated    TIMESTAMP WITH TIME ZONE NOT NULL,
+    status     VARCHAR(2)   NOT NULL DEFAULT 'DF'
+);
+
+-- Meta.indexes = [models.Index(fields=['-publish'])]
+CREATE INDEX blog_post_publish_idx ON blog_post (publish DESC);
+-- Django 会自动给外键和 SlugField 建索引，手写 SQL 时别忘了
+CREATE INDEX blog_post_author_id_idx ON blog_post (author_id);
+CREATE INDEX blog_post_slug_idx ON blog_post (slug);
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>Django 命令</th><th>Spring 里怎么做</th></tr>
+  <tr><td><code>makemigrations</code></td><td>新建 <code>V&lt;下一个版本号&gt;__描述.sql</code>，自己写 DDL</td></tr>
+  <tr><td><code>sqlmigrate blog 0001</code></td><td>不需要 —— 脚本本身就是 SQL</td></tr>
+  <tr><td><code>migrate</code></td><td>应用启动时 Flyway 自动执行未执行过的脚本（也可用 Flyway Maven 插件单独执行）</td></tr>
+  <tr><td><code>showmigrations</code></td><td>查 <code>flyway_schema_history</code> 表，或开启 Actuator 的 <code>/actuator/flyway</code></td></tr>
+  <tr><td>回滚到某个迁移</td><td>Flyway 社区版不支持 undo，写一个新的“反向”脚本</td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 为什么不用 ddl-auto=update 让 Hibernate 自动建表</div>
+  <p>
+    <code>update</code> 只会“加”，不会删列、改类型、迁移数据，也不留历史记录，在团队和生产环境里迟早出事。
+    正确分工是：<strong>表结构由 Flyway 脚本决定</strong>（可审查、可重放、进版本库），Hibernate 用 <code>validate</code> 在启动时核对实体和表是否一致。
+    手写 SQL 确实比 <code>makemigrations</code> 多花功夫，但你对每一列、每个索引都一清二楚。
+  </p>
+</div>
+
+<h2 id="orm">仓库：Spring Data 对照 QuerySet</h2>
+
+<p>
+  Django 用 <code>Post.objects</code>（Manager）作为查询入口。Spring Data 的做法是：你只声明一个接口，
+  <strong>Spring 在运行时自动生成实现</strong>。继承 <code>JpaRepository</code> 就自带了 <code>save</code>、<code>findById</code>、<code>findAll</code>、<code>delete</code>、<code>count</code> 等方法。
+</p>
+
+<div class="code" data-lang="java" data-file="blog/PostRepository.java">
+<pre>
+public interface PostRepository extends JpaRepository&lt;Post, Long&gt;, JpaSpecificationExecutor&lt;Post&gt; {
+
+    // 方法名就是查询：WHERE status = ? ORDER BY publish DESC
+    @EntityGraph(attributePaths = "author")      // 顺带 JOIN 出作者 ≈ select_related('author')
+    List&lt;Post&gt; findByStatusOrderByPublishDesc(PostStatus status);
+
+    @EntityGraph(attributePaths = "author")
+    Optional&lt;Post&gt; findByIdAndStatus(Long id, PostStatus status);
+
+    long countByStatus(PostStatus status);
+
+    // 自定义管理器 Post.published 的替代品：接口里的 default 方法
+    default List&lt;Post&gt; findPublished() {
+        return findByStatusOrderByPublishDesc(PostStatus.PUBLISHED);
+    }
+
+    default Optional&lt;Post&gt; findPublishedById(Long id) {
+        return findByIdAndStatus(id, PostStatus.PUBLISHED);
+    }
+
+    // 方法名表达不了的，就写 JPQL（面向实体的 SQL）
+    @Query("""
+            select p from FavouritePost f
+              join f.post p
+              join fetch p.author
+            where f.user.id = :userId
+            order by f.created desc
+            """)
+    List&lt;Post&gt; findFavouritesOf(@Param("userId") Long userId);
+}
+</pre>
+</div>
+
+<h3>QuerySet 常用操作对照</h3>
+
+<div class="tw">
+<table>
+  <tr><th>Django</th><th>Spring Data JPA</th></tr>
+  <tr><td><code>Post.objects.get(id=1)</code></td><td><code>posts.findById(1L)</code> → <code>Optional&lt;Post&gt;</code>（不存在不抛异常）</td></tr>
+  <tr><td><code>Post.objects.all()</code></td><td><code>posts.findAll()</code></td></tr>
+  <tr><td><code>filter(status='PB')</code></td><td><code>findByStatus(PostStatus.PUBLISHED)</code></td></tr>
+  <tr><td><code>filter(title__icontains='django')</code></td><td><code>findByTitleContainingIgnoreCase("django")</code></td></tr>
+  <tr><td><code>filter(publish__year=2025)</code></td><td><code>findByPublishBetween(start, end)</code>（用范围代替取年份，能走索引）</td></tr>
+  <tr><td><code>filter(id__in=[1, 2])</code></td><td><code>findByIdIn(List.of(1L, 2L))</code></td></tr>
+  <tr><td><code>exclude(status='DF')</code></td><td><code>findByStatusNot(PostStatus.DRAFT)</code></td></tr>
+  <tr><td><code>order_by('-publish')</code></td><td>方法名里写 <code>OrderByPublishDesc</code>，或传 <code>Sort.by(DESC, "publish")</code></td></tr>
+  <tr><td><code>count()</code> / <code>exists()</code></td><td><code>countBy…</code> / <code>existsBy…</code></td></tr>
+  <tr><td><code>Q(title=…) | Q(body=…)</code></td><td><code>Specification</code>（见后台一节）或 JPQL 里的 <code>or</code></td></tr>
+  <tr><td><code>post.save()</code> / <code>post.delete()</code></td><td><code>posts.save(post)</code> / <code>posts.delete(post)</code></td></tr>
+  <tr><td><code>get_or_create(...)</code></td><td>没有现成方法：先 <code>existsById</code>/<code>findBy…</code>，没有再 <code>save</code></td></tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 不同之处：仓库方法是“立即执行”的</div>
+  <p>
+    Django 的 QuerySet 是<strong>惰性</strong>的，可以一路 <code>.filter().exclude().order_by()</code> 链下去，最后才发 SQL。
+    Spring Data 的仓库方法一调用就执行查询、返回结果集合。需要“动态拼条件”时用 <code>Specification</code>（第 1 章后台里就有），
+    它才是 Q 对象和链式 filter 的对应物。
+  </p>
+</div>
+
+<h3>N+1 问题与 open-in-view</h3>
+
+<p>
+  列表页要显示每篇文章的作者。如果查文章时没把作者一起取出来，模板里每访问一次 <code>post.author</code> 就会多一条 SQL ——
+  10 篇文章 11 条查询，这就是 <strong>N+1</strong>。Django 版原代码其实也有这个问题（没写 <code>select_related</code>）。
+</p>
+
+<p>
+  Spring Boot 默认开启 <strong>Open Session In View</strong>：数据库会话一直开到模板渲染结束，懒加载“总能成功”，N+1 就被悄悄掩盖了。
+  本项目在配置里把它关掉（<code>spring.jpa.open-in-view: false</code>），于是模板里再访问未加载的关联会直接抛 <code>LazyInitializationException</code>，
+  逼着我们在查询时用 <code>@EntityGraph(attributePaths = "author")</code> 把需要的数据取全。
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+posts = Post.published.select_related('author')
+</pre></div></div>
+  <div class="sb"><div class="h">Spring</div>
+<div class="code" data-lang="java"><pre>
+@EntityGraph(attributePaths = "author")
+List&lt;Post&gt; findByStatusOrderByPublishDesc(PostStatus status);
+</pre></div></div>
+</div>
+
+<h2 id="views">控制器与 URL</h2>
+
+<p>Django 把“视图函数”和“URL 规则”分在两个文件里；Spring 把 URL 直接写在方法上。</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · blog/views.py + urls.py</div>
+<div class="code" data-lang="py"><pre>
+def post_list(request):
+    posts = Post.published.all()
+    return render(request,
+                  'blog/post/list.html',
+                  {'posts': posts})
+
+def post_detail(request, id):
+    post = get_object_or_404(
+        Post, id=id,
+        status=Post.Status.PUBLISHED)
+    ...
+
+# urls.py
+app_name = 'blog'
+urlpatterns = [
+    path('', views.post_list, name='post_list'),
+    path('&lt;int:id&gt;/', views.post_detail,
+         name='post_detail'),
+]
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · blog/BlogController.java</div>
+<div class="code" data-lang="java"><pre>
+@Controller
+@RequestMapping("/blog")
+public class BlogController {
+
+    private final PostRepository posts;
+    // 构造器注入：容器自动传入仓库实例
+    public BlogController(PostRepository posts, ...) {
+        this.posts = posts;
+    }
+
+    @GetMapping({"", "/"})
+    public String postList(Model model) {
+        model.addAttribute("posts", posts.findPublished());
+        return "blog/post/list";   // 视图名
+    }
+
+    @GetMapping("/{id}/")
+    public String postDetail(@PathVariable Long id,
+                             @AuthenticationPrincipal CurrentUser me,
+                             Model model) {
+        Post post = posts.findPublishedById(id)
+            .orElseThrow(() -&gt; new NotFoundException(
+                "No Post matches the given query."));
+        ...
+        return "blog/post/detail";
+    }
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li><code>@RequestMapping("/blog")</code> 加在类上 ≈ 主 <code>urls.py</code> 里的 <code>path('blog/', include(...))</code>。</li>
+  <li><code>{id}</code> + <code>@PathVariable Long id</code> ≈ <code>&lt;int:id&gt;</code>：路径片段会被转换成 <code>Long</code>，转换失败返回 400。</li>
+  <li><code>Model</code> ≈ 传给 <code>render</code> 的上下文字典；返回的字符串是模板路径（不带 <code>.html</code>）。</li>
+  <li><code>return "redirect:/blog/1/"</code> ≈ <code>HttpResponseRedirect</code> / <code>redirect()</code>。</li>
+</ul>
+
+<h3>get_object_or_404 的替代品</h3>
+
+<p>仓库返回 <code>Optional</code>，找不到时抛一个带 <code>@ResponseStatus(NOT_FOUND)</code> 的异常，Spring 就会返回 404，并渲染 <code>templates/error/404.html</code>（相当于 Django 的 <code>404.html</code>）：</p>
+
+<div class="code" data-lang="java" data-file="common/NotFoundException.java">
+<pre>
+@ResponseStatus(HttpStatus.NOT_FOUND)
+public class NotFoundException extends RuntimeException {
+    public NotFoundException(String message) { super(message); }
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 结尾斜杠：Spring 6 起不再自动匹配</div>
+  <p>
+    Django 的 URL 习惯以 <code>/</code> 结尾，访问 <code>/blog</code> 时 <code>APPEND_SLASH</code> 会重定向到 <code>/blog/</code>。
+    Spring Framework 6 起，<code>/blog/1</code> 和 <code>/blog/1/</code> 被视为<strong>不同的 URL</strong>。
+    本项目为了和 Django 版保持一致，映射里都显式写了结尾斜杠；列表页用 <code>{"", "/"}</code> 同时接受两种写法。
+  </p>
+</div>
+
+<h3>反向解析 URL</h3>
+
+<p>
+  Django 用 <code>{% url 'blog:post_detail' post.id %}</code> 按名字生成链接，改 URL 规则时模板不用动。
+  Thymeleaf 的 <code>@{...}</code> 负责拼接上下文路径和参数，但 URL 模式本身要写出来：
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django 模板</div>
+<div class="code" data-lang="html"><pre>
+&lt;a href="{% url 'blog:post_detail' post.id %}"&gt;
+&lt;a href="{{ post.get_absolute_url }}"&gt;
+</pre></div></div>
+  <div class="sb"><div class="h">Thymeleaf 模板</div>
+<div class="code" data-lang="th"><pre>
+&lt;a th:href="@{/blog/{id}/(id=${post.id})}"&gt;
+&lt;a th:href="@{${post.absoluteUrl}}"&gt;
+</pre></div></div>
+</div>
+
+<p>
+  为了减少重复，实体上也保留了一个 <code>getAbsoluteUrl()</code> 方法（和 Django 的 <code>get_absolute_url</code> 同名同义），
+  模板里写 <code>${post.absoluteUrl}</code> 就会调用它。Spring 也有按“映射名”反向生成 URL 的机制（<code>MvcUriComponentsBuilder</code>，模板里是 <code>#mvc.url('BC#postDetail')</code>），
+  但生成的是带主机名的绝对地址，实践中用得不多。
+</p>
+
+<h2 id="templates">Thymeleaf 模板</h2>
+
+<p>
+  Thymeleaf 的特点是“<strong>自然模板</strong>”：指令都写成 HTML 属性（<code>th:text</code>、<code>th:each</code>…），
+  所以模板文件本身就是合法的 HTML，直接用浏览器打开也能看到静态效果。代价是写法比 Django 的 <code>{{ }}</code>/<code>{% %}</code> 啰嗦。
+</p>
+
+<h3>模板继承：Layout Dialect</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · base.html / list.html</div>
+<div class="code" data-lang="html"><pre>
+{# base.html #}
+&lt;title&gt;{% block title %}{% endblock %}&lt;/title&gt;
+&lt;div id="content"&gt;
+  {% block content %}{% endblock %}
+&lt;/div&gt;
+
+{# list.html #}
+{% extends "blog/base.html" %}
+{% block title %}My Blog{% endblock %}
+{% block content %}
+  &lt;h1&gt;My Blog&lt;/h1&gt;
+  ...
+{% endblock %}
+</pre></div></div>
+  <div class="sb"><div class="h">Thymeleaf · base.html / list.html</div>
+<div class="code" data-lang="th"><pre>
+&lt;!-- base.html --&gt;
+&lt;title layout:title-pattern="$CONTENT_TITLE"&gt;My blog&lt;/title&gt;
+&lt;div id="content"&gt;
+  &lt;div layout:fragment="content"&gt;&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;!-- list.html --&gt;
+&lt;html layout:decorate="~{blog/base}"&gt;
+&lt;head&gt;&lt;title&gt;My Blog&lt;/title&gt;&lt;/head&gt;
+&lt;body&gt;
+&lt;div layout:fragment="content"&gt;
+  &lt;h1&gt;My Blog&lt;/h1&gt;
+  ...
+&lt;/div&gt;
+</pre></div></div>
+</div>
+
+<h3>循环、条件与输出</h3>
+
+<div class="code" data-lang="th" data-file="templates/blog/post/list.html（节选）">
+<pre>
+&lt;th:block th:each="post : ${posts}"&gt;                     &lt;!-- {% for post in posts %} --&gt;
+  &lt;h2&gt;
+    &lt;a th:href="@{${post.absoluteUrl}}" th:text="${post.title}"&gt;Post title&lt;/a&gt;
+  &lt;/h2&gt;
+  &lt;p class="date"&gt;
+    Published &lt;span th:text="${#temporals.format(post.publish, 'MMM d, yyyy, HH:mm')}"&gt;date&lt;/span&gt;
+    by &lt;span th:text="${post.author}"&gt;author&lt;/span&gt;          &lt;!-- 调用 User.toString() --&gt;
+  &lt;/p&gt;
+  &lt;!-- {{ post.body|truncatewords:30|linebreaks }} --&gt;
+  &lt;div th:utext="${#text.linebreaks(#text.truncatewords(post.body, 30))}"&gt;&lt;/div&gt;
+&lt;/th:block&gt;
+</pre>
+</div>
+
+<ul>
+  <li><code>th:text</code> 会做 HTML 转义（等同 Django 默认的自动转义）；<code>th:utext</code> 不转义（等同 <code>|safe</code>），只用于你确信安全的 HTML。</li>
+  <li><code>&lt;th:block&gt;</code> 是一个不会输出到页面的“虚拟标签”，专门用来挂 <code>th:each</code>、<code>th:if</code>。</li>
+  <li><code>#temporals</code> 是内置的日期工具对象，作用相当于 <code>|date:"..."</code> 过滤器。</li>
+</ul>
+
+<h3>“过滤器”去哪了：自定义表达式对象</h3>
+
+<p>
+  Thymeleaf 没有 <code>|linebreaks</code> 这种管道语法，但它有“表达式对象”（<code>#strings</code>、<code>#lists</code>、<code>#temporals</code>…）。
+  我们可以注册自己的表达式对象 <code>#text</code>，把 Django 的 <code>linebreaks</code>、<code>truncatewords</code> 实现成普通 Java 方法：
+</p>
+
+<div class="code" data-lang="java" data-file="common/TextFilters.java（节选）">
+<pre>
+@Component
+public class TextFilters {
+
+    /** {{ value|linebreaks }}：先转义 HTML，空行分段成 &lt;p&gt;，单个换行变 &lt;br&gt;。 */
+    public String linebreaks(String value) {
+        if (value == null || value.isBlank()) {
+            return "";
+        }
+        String normalized = value.replace("\r\n", "\n").replace('\r', '\n').strip();
+        return Arrays.stream(normalized.split("\n{2,}"))
+                .map(p -&gt; "&lt;p&gt;" + HtmlUtils.htmlEscape(p).replace("\n", "&lt;br&gt;") + "&lt;/p&gt;")
+                .collect(Collectors.joining("\n\n"));
+    }
+
+    /** {{ value|truncatewords:n }} */
+    public String truncatewords(String value, int count) { ... }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="common/TextDialect.java（节选）">
+<pre>
+@Component   // Spring Boot 会把所有 IDialect 类型的 Bean 自动注册到模板引擎
+public class TextDialect extends AbstractDialect implements IExpressionObjectDialect {
+    ...
+    public IExpressionObjectFactory getExpressionObjectFactory() {
+        return new IExpressionObjectFactory() {
+            public Set&lt;String&gt; getAllExpressionObjectNames() { return Set.of("text"); }
+            public Object buildObject(IExpressionContext ctx, String name) { return filters; }
+            public boolean isCacheable(String name) { return true; }
+        };
+    }
+}
+</pre>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 为什么不直接在模板里写 ${@textFilters.linebreaks(...)}</div>
+  <p>
+    Spring 的 SpEL 支持 <code>@beanName</code> 语法调用容器里的 Bean，老教程里很常见。
+    但 Thymeleaf 3.1 出于安全考虑，在 <code>th:utext</code> 等场景<strong>禁止</strong>了这类表达式（以及 <code>T(...)</code> 静态调用、<code>new</code>），
+    会报 “Instantiation of new objects and access to static classes or parameters is forbidden”。
+    注册为表达式对象是官方推荐的扩展方式，也更像 Django 的“自定义过滤器库”。
+  </p>
+</div>
+
+<h2 id="admin">管理后台：Django Admin 没有替代品</h2>
+
+<p>
+  Django 写十几行 <code>ModelAdmin</code>，就有了带搜索、过滤、分页、表单校验、增删改的后台。
+  Spring 生态里<strong>没有</strong>这样的内置组件 —— 这是从 Django 转过来的人最不适应的地方。
+  本章手写了一个“迷你 admin”，URL 刻意模仿 Django：<code>/admin/blog/post/</code>、<code>/admin/blog/post/add/</code>、<code>/admin/blog/post/1/change/</code>。
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>ModelAdmin 选项</th><th>手写后台里的实现</th></tr>
+  <tr><td><code>list_display</code></td><td>列表模板里的表格列</td></tr>
+  <tr><td><code>search_fields = ['title', 'body']</code></td><td><code>Specification</code> 里对两列做 <code>lower(...) like</code> 并用 <code>or</code> 连接</td></tr>
+  <tr><td><code>list_filter = ['status', ...]</code></td><td>右侧过滤栏，参数 <code>?status=DRAFT</code></td></tr>
+  <tr><td><code>show_facets</code></td><td>过滤项后面的数量：<code>countByStatus</code></td></tr>
+  <tr><td><code>ordering = ['status', 'publish']</code></td><td><code>Sort.by("status", "publish")</code></td></tr>
+  <tr><td><code>prepopulated_fields</code></td><td>表单页里十几行 JavaScript，根据标题生成 slug</td></tr>
+  <tr><td><code>raw_id_fields</code></td><td>用下拉框选择作者（用户多时应改成输入框）</td></tr>
+  <tr><td>表单与校验</td><td><code>PostForm</code> + Bean Validation，错误回显在字段下方</td></tr>
+  <tr><td>只有 <code>is_staff</code> 能进</td><td><code>SecurityConfig</code> 里 <code>/admin/**</code> 要求 <code>ROLE_STAFF</code></td></tr>
+</table>
+</div>
+
+<p>其中最值得学的是 <strong>Specification</strong> —— 它就是 Spring Data 版的“动态拼 Q 对象”：</p>
+
+<div class="code" data-lang="java" data-file="blog/admin/PostAdminController.java（节选）">
+<pre>
+@GetMapping("/blog/post/")
+public String list(@RequestParam(required = false) String q,
+                   @RequestParam(required = false) PostStatus status,
+                   @RequestParam(defaultValue = "1") int page, Model model) {
+    Sort ordering = Sort.by("status", "publish");
+    Page&lt;Post&gt; result = posts.findAll(filter(q, status),
+            PageRequest.of(Math.max(page, 1) - 1, PAGE_SIZE, ordering));
+    model.addAttribute("page", result);
+    model.addAttribute("draftCount", posts.countByStatus(PostStatus.DRAFT));
+    model.addAttribute("publishedCount", posts.countByStatus(PostStatus.PUBLISHED));
+    ...
+}
+
+/** search_fields + list_filter：条件为空就不加 */
+static Specification&lt;Post&gt; filter(String q, PostStatus status) {
+    return (root, query, cb) -&gt; {
+        List&lt;Predicate&gt; predicates = new ArrayList&lt;&gt;();
+        if (q != null &amp;&amp; !q.isBlank()) {
+            String like = "%" + q.strip().toLowerCase() + "%";
+            predicates.add(cb.or(
+                    cb.like(cb.lower(root.get("title")), like),
+                    cb.like(cb.lower(root.get("body")), like)));
+        }
+        if (status != null) {
+            predicates.add(cb.equal(root.get("status"), status));
+        }
+        return cb.and(predicates.toArray(Predicate[]::new));
+    };
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 表单对象 PostForm</div>
+  <p>
+    Django admin 根据模型自动生成表单。Spring 里我们写一个单独的 <code>PostForm</code> 类接收提交的数据，
+    用 <code>@NotBlank</code>、<code>@Size(max = 250)</code>、<code>@Pattern</code> 声明规则；控制器参数上加 <code>@Valid</code>，
+    校验结果放在紧随其后的 <code>BindingResult</code> 里。为什么不直接绑定到实体上？
+    因为那样用户可以通过多提交一个字段去修改本不该改的属性（“批量赋值”漏洞）。第 2 章会专门讲表单。
+  </p>
+</div>
+
+<h2 id="security">Spring Security：本章只用最小的一部分</h2>
+
+<p>
+  原书第 1 章靠 Django Admin 自带的登录页进入后台，收藏功能依赖 <code>request.user</code>。
+  Spring 版需要自己提供三样东西：<strong>用户表</strong>、<strong>从表里加载用户的服务</strong>、<strong>哪些 URL 需要登录的规则</strong>。
+</p>
+
+<div class="code" data-lang="java" data-file="config/SecurityConfig.java">
+<pre>
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    @ConditionalOnWebApplication   // 以命令行方式运行 createsuperuser 时不需要
+    SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(auth -&gt; auth
+                .requestMatchers("/admin/**").hasRole("STAFF")        // is_staff
+                .requestMatchers("/blog/favourite/**", "/blog/favourites/**").authenticated()  // @login_required
+                .anyRequest().permitAll())
+            .formLogin(Customizer.withDefaults())   // 先用自带的登录页，第 4 章再自己写
+            .logout(Customizer.withDefaults());
+        return http.build();                        // CSRF 保护默认开启
+    }
+
+    @Bean
+    PasswordEncoder passwordEncoder() {            // ≈ PASSWORD_HASHERS，默认 bcrypt
+        return PasswordEncoderFactories.createDelegatingPasswordEncoder();
+    }
+}
+</pre>
+</div>
+
+<ul>
+  <li><code>JpaUserDetailsService</code> 按用户名查 <code>auth_user</code> 表，返回一个 <code>CurrentUser</code>（实现了 <code>UserDetails</code>），它就是控制器里 <code>@AuthenticationPrincipal CurrentUser me</code> 拿到的对象 —— 对应 <code>request.user</code>。</li>
+  <li><code>is_staff</code> / <code>is_superuser</code> 被翻译成权限 <code>ROLE_STAFF</code> / <code>ROLE_ADMIN</code>。</li>
+  <li>用户表的表名和字段刻意沿用 Django 的 <code>auth_user</code>，方便对照。</li>
+</ul>
+
+<h3>createsuperuser：用 ApplicationRunner 实现“管理命令”</h3>
+
+<p>Spring Boot 没有 <code>manage.py</code>。常见做法是写一个 <code>ApplicationRunner</code>，应用启动后检查命令行参数，决定要不要执行某个任务：</p>
+
+<div class="code" data-lang="java" data-file="account/CreateSuperuserCommand.java（节选）">
+<pre>
+@Component
+public class CreateSuperuserCommand implements ApplicationRunner {
+
+    @Override
+    @Transactional
+    public void run(ApplicationArguments args) {
+        if (!args.containsOption("createsuperuser")) {
+            return;                                   // 普通启动时什么也不做
+        }
+        String username = single(args, "username");
+        ...
+        User user = new User(username, passwordEncoder.encode(password), email);
+        user.setStaff(true);
+        user.setSuperuser(true);
+        users.save(user);
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="bash">
+<pre>
+mvn package -DskipTests
+java -jar target/mysite-1.0.0.jar --spring.main.web-application-type=none \
+     --createsuperuser --username=admin --email=admin@example.com --password=change-me
+</pre>
+</div>
+
+<p><code>--spring.main.web-application-type=none</code> 让应用以“非 Web”模式启动：不启动 Tomcat，任务跑完进程就退出，和执行一条 <code>manage.py</code> 命令的体验一样。第 17 章会系统地讲这种写法。</p>
+
+<h2 id="favourite">复合主键：收藏功能</h2>
+
+<p>
+  仓库第 1 章有一个 Django 5.2 新特性的彩蛋：<code>FavouritePost</code> 用 <code>CompositePrimaryKey("user", "post")</code> 做联合主键。
+  这在 Django 里是新功能，在 JPA 里则是老功能了：
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django 5.2</div>
+<div class="code" data-lang="py"><pre>
+class FavouritePost(models.Model):
+    pk = models.CompositePrimaryKey("user", "post")
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE)
+    post = models.ForeignKey(
+        'blog.Post', on_delete=models.CASCADE)
+    created = models.DateTimeField(auto_now_add=True)
+</pre></div></div>
+  <div class="sb"><div class="h">JPA</div>
+<div class="code" data-lang="java"><pre>
+@Embeddable
+public record FavouritePostId(
+        @Column(name = "user_id") Long userId,
+        @Column(name = "post_id") Long postId)
+        implements Serializable { }
+
+@Entity
+@Table(name = "blog_favouritepost")
+public class FavouritePost {
+    @EmbeddedId
+    private FavouritePostId id;
+
+    @MapsId("userId")      // 主键的 userId 就是这个外键列
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id")
+    private User user;
+
+    @MapsId("postId")
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "post_id")
+    private Post post;
+
+    @CreationTimestamp
+    private OffsetDateTime created;
+}
+</pre></div></div>
+</div>
+
+<p>控制器里，收藏改成了 <strong>POST + 必须登录</strong>，并且只能收藏已发布的文章 —— 这正是 Django 版第 1 章代码点评里指出、并建议修复的三个问题：</p>
+
+<div class="code" data-lang="java" data-file="blog/BlogController.java（节选）">
+<pre>
+@PostMapping("/favourite/add/{id}/")
+public String addFavourite(@PathVariable Long id, @AuthenticationPrincipal CurrentUser me) {
+    Post post = posts.findPublishedById(id)
+            .orElseThrow(() -&gt; new NotFoundException("No Post matches the given query."));
+    FavouritePostId key = new FavouritePostId(me.id(), post.getId());
+    if (!favourites.existsById(key)) {           // get_or_create 的“get”
+        favourites.save(new FavouritePost(users.getReferenceById(me.id()), post));
+    }
+    return "redirect:" + post.getAbsoluteUrl();
+}
+</pre>
+</div>
+
+<div class="code" data-lang="th" data-file="templates/blog/post/detail.html（节选）">
+<pre>
+&lt;span th:if="${isFavourite}"&gt;❤️&lt;/span&gt;
+&lt;!-- th:action 生成的表单会自动插入隐藏的 _csrf 字段，≈ {% csrf_token %} --&gt;
+&lt;form th:unless="${isFavourite}" th:action="@{/blog/favourite/add/{id}/(id=${post.id})}" method="post"&gt;
+  &lt;button type="submit"&gt;Add to favourites&lt;/button&gt;
+&lt;/form&gt;
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; getReferenceById：只要外键，不查用户</div>
+  <p>
+    保存收藏只需要用户的 id，不需要把整行用户数据查出来。<code>getReferenceById</code> 返回一个只带 id 的“代理对象”，不发 SELECT，
+    相当于 Django 里直接给外键赋 id：<code>FavouritePost(user_id=request.user.id, post=post)</code>。
+  </p>
+</div>
+
+<h2 id="tests">测试：MockMvc</h2>
+
+<p>
+  Django 仓库里的 <code>tests.py</code> 是空的。Spring 版每章都带测试，它们也是理解代码最快的入口。
+  <code>@SpringBootTest</code> 启动完整的应用上下文，<code>MockMvc</code> 在不开端口的情况下模拟 HTTP 请求 —— 作用和 Django 的 <code>self.client</code> 一样：
+</p>
+
+<div class="code" data-lang="java" data-file="src/test/java/.../BlogControllerTests.java（节选）">
+<pre>
+@SpringBootTest
+@AutoConfigureMockMvc
+@ActiveProfiles("test")      // 使用 application-test.yaml：内存 H2
+@Transactional               // 每个测试结束后回滚，≈ Django 的 TestCase
+class BlogControllerTests {
+
+    @Test
+    void anonymousUserMustLogInBeforeAddingFavourite() throws Exception {
+        mvc.perform(post("/blog/favourite/add/{id}/", published.getId()).with(csrf()))
+                .andExpect(status().is3xxRedirection())
+                .andExpect(redirectedUrl("/login"));
+        assertThat(favourites.count()).isZero();
+    }
+
+    @Test
+    void loggedInUserCanFavouriteOnlyOnce() throws Exception {
+        var me = user(CurrentUser.from(author));          // ≈ self.client.force_login(user)
+        for (int i = 0; i &lt; 2; i++) {
+            mvc.perform(post("/blog/favourite/add/{id}/", published.getId()).with(me).with(csrf()))
+                    .andExpect(redirectedUrl(published.getAbsoluteUrl()));
+        }
+        assertThat(favourites.count()).isEqualTo(1);
+    }
+}
+</pre>
+</div>
+
+<p>本章共 8 个测试：列表只显示已发布文章、草稿详情 404、<code>linebreaks</code> 输出、收藏需要登录和 CSRF、不能重复收藏、后台只允许 staff、后台的新增/搜索/过滤、非法表单回显错误。运行 <code>mvn test</code> 即可。</p>
+
+<h2 id="review">差异点评：Spring 版做了哪些取舍</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 1 章 Spring 版点评 <small>springboot/Chapter01</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 表结构由 Flyway 管理，Hibernate 只校验</h4>
+    <p>迁移脚本进版本库，启动时自动执行，<code>ddl-auto: validate</code> 能在实体和表不一致时第一时间报错。这是 Spring 项目里最稳妥的组合。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 关闭 open-in-view，用 @EntityGraph 显式取数</h4>
+    <p>模板渲染阶段不再偷偷发 SQL。N+1 从“悄悄变慢”变成“直接报错”，问题暴露得更早。Django 版原代码的列表页其实就有 N+1（没写 <code>select_related</code>）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 修复了 Django 版点评里的收藏问题</h4>
+    <p>改为 <code>@PostMapping</code> + 登录要求 + CSRF，且只能收藏已发布文章，URL 的拼写错误 <code>favrourite</code> 也改正了。测试覆盖了“匿名用户被重定向”和“缺少 CSRF 返回 403”。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 代码量明显多于 Django</h4>
+    <p>
+      同样的功能，Django 版的模型、视图、URL 和 admin 一共约 150 行 Python；Spring 版约 1100 行 Java 加 280 行模板（含大量教学注释，其中约 400 行是手写后台，还有不少 getter/setter）。
+      这是静态类型 + 显式配置的代价。可以用 Lombok 或把简单实体改成 Kotlin 来减少样板代码，本书为了让初学者看清每一行在做什么，没有使用。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 时间与时区</h4>
+    <p>
+      Django 开启 <code>USE_TZ</code> 后存的是带时区的 UTC 时间。Java 这边用 <code>OffsetDateTime</code> + 列类型 <code>TIMESTAMP WITH TIME ZONE</code>，
+      并设置 <code>hibernate.jdbc.time_zone: UTC</code>。后台的 <code>datetime-local</code> 输入框没有时区信息，我们约定按 UTC 解释，并在标签上注明“(UTC)”。
+      真实项目应当按用户所在时区换算。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> Java 生态里有没有“自动后台”</h4>
+    <p>
+      有一些方向可以减少手写量：Spring Data REST 能把仓库直接暴露成 REST 接口，再配一个通用前端；
+      JHipster 之类的代码生成器能生成带增删改查页面的项目。但它们都不是 Django Admin 那种“注册一个类就完事”的体验。
+      对内部后台，很多团队的选择就是像本章这样，手写少量页面。
+    </p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>Spring MVC 的请求路线：过滤器链 → DispatcherServlet → 控制器 → 仓库 → 视图名 + Model → Thymeleaf。</li>
+  <li>“装应用”靠包扫描和 starter 依赖；配置写在 <code>application.yaml</code>。</li>
+  <li>实体用 JPA 注解描述；注意 <code>nullable = false</code>、<code>LAZY</code>、枚举的存储方式。</li>
+  <li>迁移用 Flyway 手写 SQL，Hibernate 只做 <code>validate</code>。</li>
+  <li>仓库接口：方法名派生查询、<code>default</code> 方法封装常用条件、<code>@Query</code> 写 JPQL、<code>Specification</code> 做动态条件、<code>@EntityGraph</code> 防 N+1。</li>
+  <li>控制器方法 = 视图函数 + URL 规则；找不到数据抛 404 异常。</li>
+  <li>Thymeleaf 用 Layout Dialect 实现继承；过滤器用自定义表达式对象代替。</li>
+  <li>没有 Django Admin，后台要自己写；Spring Security 负责登录与权限。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>把 <code>logging.level.org.hibernate.SQL</code> 改成 <code>debug</code>，分别访问列表页和收藏页，数一数各发了几条 SQL；再去掉 <code>@EntityGraph</code> 看看会发生什么。</li>
+    <li>给 <code>PostRepository</code> 加一个方法 <code>findByTitleContainingIgnoreCaseAndStatus</code>，并写一个测试验证它。</li>
+    <li>新增迁移 <code>V4__add_post_summary.sql</code>，给文章加一个可为空的 <code>summary</code> 列，同时修改实体。先只改其中一边启动，观察 <code>validate</code> 报的错误。</li>
+    <li>在后台列表里增加按作者过滤（对应 <code>list_filter</code> 里的 <code>author</code>），并显示每个作者的文章数。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

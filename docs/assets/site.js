@@ -32,19 +32,50 @@
     { n: 18, k: 'A', t: '代码点评总览',        d: 'Django 5.2 最佳实践与 Two Scoops 风格的整体改进清单', part: '附录' }
   ];
 
-  // body 的 data-chapter：章节写数字（"1"…"18"），专题写 "T1"…；首页写 "0"
+  // Spring Boot 重构版：17 章与 Django 原书一一对应（文件名 sbNN.html），导读页是 spring.html
+  var SPRING = [
+    { n: 0,  k: 'S', f: 'spring.html', t: '导读：从 Django 到 Spring Boot', d: '概念对照表、技术选型、如何运行每章代码', part: 'Spring Boot 重构版' },
+    { n: 1,  t: '创建博客应用',      d: '实体与仓库、Flyway 迁移、手写后台、控制器与 Thymeleaf', part: '项目一 · 博客' },
+    { n: 2,  t: '博客进阶：社交功能', d: '规范 URL、Page 分页、表单绑定与校验、邮件、评论' },
+    { n: 3,  t: '扩展博客',          d: '多对多标签、自定义方言、Markdown、Sitemap、RSS、trigram 搜索' },
+    { n: 4,  t: '构建社交网站',      d: 'Spring Security 登录登出、注册、密码重置、用户资料', part: '项目二 · 图片书签社交网站' },
+    { n: 5,  t: '社交登录',          d: '闪存消息、邮箱登录、OAuth2 Google 登录、HTTPS 开发' },
+    { n: 6,  t: '分享内容',          d: '多对多点赞、书签小工具、缩略图、fetch + CSRF、无限滚动' },
+    { n: 7,  t: '追踪用户行为',      d: '关注系统、活动流、领域事件、SQL 日志与 Redis 计数排行' },
+    { n: 8,  t: '构建在线商店',      d: '商品目录、会话购物车、@ControllerAdvice、RabbitMQ 异步任务', part: '项目三 · 在线商店' },
+    { n: 9,  t: '支付与订单',        d: 'stripe-java、Webhook、CSV 导出、HTML 转 PDF' },
+    { n: 10, t: '扩展商店',          d: '优惠券、Stripe 折扣、Redis 推荐引擎' },
+    { n: 11, t: '国际化',            d: 'MessageSource、LocaleResolver、URL 语言前缀、翻译表、本地化格式' },
+    { n: 12, t: '构建在线学习平台',   d: '初始数据、JPA 继承、排序字段', part: '项目四 · 在线学习平台' },
+    { n: 13, t: '内容管理系统',      d: '方法级权限、动态表单集合、多态内容、拖拽排序' },
+    { n: 14, t: '渲染与缓存内容',     d: '选课、学生注册、Spring Cache + Redis' },
+    { n: 15, t: '构建 API',          d: '@RestController、DTO、DRF 式分页、Basic 认证与权限、OpenAPI、API 客户端' },
+    { n: 16, t: '聊天服务器',        d: 'WebSocket、握手鉴权、Redis 发布/订阅、消息持久化' },
+    { n: 17, t: '上线部署',          d: 'Profile、PostgreSQL、Docker 多阶段构建、Nginx、Filter 与命令行任务' }
+  ];
+
+  // body 的 data-book="spring" 表示 Spring Boot 重构版页面，使用另一套目录
+  var BOOK = document.body.dataset.book === 'spring' ? 'spring' : 'django';
+  var LIST = BOOK === 'spring' ? SPRING : CHAPTERS;
+
+  // body 的 data-chapter：章节写数字（"1"…"18"），专题写 "T1"…；首页写 "0"（Spring 导读页写 "S"）
   var dc = document.body.dataset.chapter || '0';
   var curIdx = -1;
-  CHAPTERS.forEach(function (c, i) {
+  LIST.forEach(function (c, i) {
     if (String(c.n) === dc || c.k === dc) curIdx = i;
   });
 
   /* ---------- 侧边栏 ---------- */
   var side = document.getElementById('sidebar');
   if (side) {
-    var html = '<a class="brand" href="index.html"><span class="flame">dj</span>' +
-      '<span>Django 5 实战笔记<small>四个项目，从入门到上线</small></span></a>';
-    CHAPTERS.forEach(function (c, i) {
+    var html = BOOK === 'spring'
+      ? '<a class="brand" href="spring.html"><span class="flame sb">sb</span>' +
+        '<span>Spring Boot 重构版<small>同样四个项目，对照 Django 5.2</small></span></a>' +
+        '<a class="switch" href="index.html">&larr; Django 原版笔记</a>'
+      : '<a class="brand" href="index.html"><span class="flame">dj</span>' +
+        '<span>Django 5 实战笔记<small>四个项目，从入门到上线</small></span></a>' +
+        '<a class="switch" href="spring.html">Spring Boot 重构版 &rarr;</a>';
+    LIST.forEach(function (c, i) {
       if (c.part) html += '<div class="part">' + c.part + '</div>';
       html += '<a class="ch' + (i === curIdx ? ' active' : '') + '" href="' + fileOf(c) +
         '"><span class="n">' + (c.k || c.n) + '</span><span>' + c.t + '</span></a>';
@@ -161,7 +192,29 @@
   // Django 模板 / HTML
   var RE_TPL = /(\{#[\s\S]*?#\}|<!--[\s\S]*?-->)|(\{%[\s\S]*?%\})|(\{\{[\s\S]*?\}\})|(<\/?[a-zA-Z][\w-]*|\/?>)|("[^"\n]*")/g;
 
-  var RE_SH = /(#[^\n]*)|('(?:\\[\s\S]|[^\\'])*'|"(?:\\[\s\S]|[^\\"])*")|\b(python3?|py|pip|django-admin|manage\.py|docker|compose|celery|redis-server|redis-cli|git|cd|mkdir|curl|source|export|stripe|brew|sudo|apt|apt-get|uv|openssl|mkcert|gunicorn|uwsgi|daphne|FROM|RUN|COPY|ENV|WORKDIR|CMD|EXPOSE)\b/g;
+  // Java：注释、字符串与文本块、注解、关键字、类型、数字、方法调用
+  var JAVA_KW = ('public|private|protected|static|final|abstract|class|interface|enum|record|extends|implements|' +
+    'return|if|else|for|while|do|switch|case|default|break|continue|new|this|super|null|true|false|' +
+    'void|int|long|boolean|double|float|char|byte|short|var|try|catch|finally|throw|throws|import|package|' +
+    'instanceof|yield|sealed|permits').split('|');
+
+  var RE_JAVA = new RegExp(
+    '(\\/\\*[\\s\\S]*?\\*\\/|\\/\\/[^\\n]*)' +                                       // 1 注释
+    '|("""[\\s\\S]*?"""|"(?:\\\\.|[^"\\\\\\n])*"|\'(?:\\\\.|[^\'\\\\])\')' +         // 2 字符串、文本块、字符
+    '|(@[A-Za-z_][\\w.]*)' +                                                      // 3 注解
+    '|\\b(' + JAVA_KW.join('|') + ')\\b' +                                        // 4 关键字
+    '|\\b([A-Z][A-Za-z0-9_]*)\\b' +                                               // 5 类型
+    '|\\b(\\d+(?:\\.\\d+)?[LlFfDd]?)\\b' +                                        // 6 数字
+    '|\\b([a-zA-Z_][\\w]*)(?=\\()',                                               // 7 方法调用
+    'g');
+
+  // YAML / properties / .env：注释、键、字符串与 ${占位符}
+  var RE_YAML = /(#[^\n]*)|^(\s*-?\s*[\w.\-\[\]]+)(?=\s*[:=])|("(?:[^"\\\n]|\\.)*"|'[^'\n]*'|\$\{[^}\n]*\})/gm;
+
+  // Thymeleaf / XML：注释、标签、th:* 等属性名、属性值
+  var RE_TH = /(<!--[\s\S]*?-->)|(<\/?[a-zA-Z][\w:.-]*|\/?>)|\b((?:th|layout|sec|xmlns)(?::[\w-]+)?)(?==)|("[^"]*")/g;
+
+  var RE_SH = /(#[^\n]*)|('(?:\\[\s\S]|[^\\'])*'|"(?:\\[\s\S]|[^\\"])*")|\b(python3?|py|pip|django-admin|manage\.py|docker|compose|celery|redis-server|redis-cli|git|cd|mkdir|curl|source|export|stripe|brew|sudo|apt|apt-get|uv|openssl|mkcert|gunicorn|uwsgi|daphne|mvn|java|jar|keytool|FROM|RUN|COPY|ENV|WORKDIR|CMD|EXPOSE|ENTRYPOINT|ARG|USER)\b/g;
 
   var RE_SQL = /(--[^\n]*)|('(?:[^'])*')|\b(SELECT|FROM|WHERE|AND|OR|NOT|INSERT|INTO|VALUES|UPDATE|SET|DELETE|CREATE|TABLE|INDEX|ON|JOIN|INNER|LEFT|ORDER|BY|GROUP|HAVING|LIMIT|OFFSET|AS|DESC|ASC|COUNT|BEGIN|COMMIT|PRIMARY|KEY|REFERENCES|NULL|EXTENSION|IF|EXISTS|LIKE|DISTINCT|integer|varchar|text|datetime|bigint|boolean)\b/g;
 
@@ -185,6 +238,7 @@
 
   var LANG_LABEL = { py: 'python', python: 'python', html: 'django 模板', django: 'django 模板',
     bash: 'shell', sh: 'shell', shell: 'shell', sql: 'sql', js: 'javascript', javascript: 'javascript',
+    java: 'java', xml: 'xml', th: 'thymeleaf 模板', thymeleaf: 'thymeleaf 模板', properties: 'properties',
     text: 'text', yaml: 'yaml', ini: 'ini', dockerfile: 'dockerfile', nginx: 'nginx', env: '.env', json: 'json', css: 'css' };
 
   document.querySelectorAll('.code').forEach(function (box) {
@@ -212,6 +266,12 @@
       pre.innerHTML = paint(code, RE_TPL, ['tk-cm', 'tk-kw', 'tk-nm', 'tk-fn', 'tk-st']);
     } else if (lang === 'js' || lang === 'javascript' || lang === 'json') {
       pre.innerHTML = paint(code, RE_JS, ['tk-cm', 'tk-st', 'tk-kw', 'tk-tp', 'tk-nm', 'tk-fn']);
+    } else if (lang === 'java') {
+      pre.innerHTML = paint(code, RE_JAVA, ['tk-cm', 'tk-st', 'tk-fn', 'tk-kw', 'tk-tp', 'tk-nm', 'tk-fn']);
+    } else if (lang === 'yaml' || lang === 'properties' || lang === 'env') {
+      pre.innerHTML = paint(code, RE_YAML, ['tk-cm', 'tk-kw', 'tk-st']);
+    } else if (lang === 'th' || lang === 'thymeleaf' || lang === 'xml') {
+      pre.innerHTML = paint(code, RE_TH, ['tk-cm', 'tk-fn', 'tk-kw', 'tk-st']);
     } else if (lang === 'sql') {
       pre.innerHTML = paint(code, RE_SQL, ['tk-cm', 'tk-st', 'tk-kw']);
     } else {
@@ -222,13 +282,14 @@
   /* ---------- 上一章 / 下一章 ---------- */
   var pager = document.getElementById('pager');
   if (pager && curIdx >= 0) {
-    var prev = CHAPTERS[curIdx - 1];
-    var next = CHAPTERS[curIdx + 1];
+    var prev = LIST[curIdx - 1];
+    var next = LIST[curIdx + 1];
+    var home = BOOK === 'spring' ? 'spring.html' : 'index.html';
     var h = '';
     h += prev ? '<a class="prev" href="' + fileOf(prev) + '"><span>&larr; 上一篇</span>' + label(prev) + '</a>'
-              : '<a class="prev" href="index.html"><span>&larr; 返回</span>课程首页</a>';
+              : '<a class="prev" href="' + home + '"><span>&larr; 返回</span>课程首页</a>';
     h += next ? '<a class="next" href="' + fileOf(next) + '"><span>下一篇 &rarr;</span>' + label(next) + '</a>'
-              : '<a class="next" href="index.html"><span>完结 &rarr;</span>回到课程首页</a>';
+              : '<a class="next" href="' + home + '"><span>完结 &rarr;</span>回到课程首页</a>';
     pager.className = 'pager';
     pager.innerHTML = h;
   }
@@ -237,7 +298,9 @@
   var grid = document.getElementById('toc-grid');
   if (grid) {
     var g = '';
-    CHAPTERS.forEach(function (c) {
+    // Spring 导读页的目录只列 17 章，不重复列出导读页自己
+    var gridList = BOOK === 'spring' ? SPRING.slice(1) : CHAPTERS;
+    gridList.forEach(function (c) {
       g += '<a class="toc-card" href="' + fileOf(c) + '">' +
         '<div class="n">' + kicker(c) + '</div>' +
         '<div class="t">' + c.t + '</div>' +
@@ -247,8 +310,14 @@
     grid.innerHTML = g;
   }
 
-  function fileOf(c) { return c.f || ('ch' + pad(c.n) + '.html'); }
-  function kicker(c) { return c.k === 'A' ? '附录' : c.k ? '专题 ' + c.k.slice(1) : '第 ' + c.n + ' 章'; }
+  function fileOf(c) {
+    if (c.f) return c.f;
+    return (SPRING.indexOf(c) >= 0 ? 'sb' : 'ch') + pad(c.n) + '.html';
+  }
+  function kicker(c) {
+    if (c.k === 'S') return '导读';
+    return c.k === 'A' ? '附录' : c.k ? '专题 ' + c.k.slice(1) : '第 ' + c.n + ' 章';
+  }
   function label(c) { return kicker(c) + ' · ' + c.t; }
   function pad(n) { return n < 10 ? '0' + n : '' + n; }
 })();
