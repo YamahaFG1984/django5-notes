@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title th:text="${object.title}">Course</title></head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="${module} ? ${module.title} : ${object.title}">Module</h1>
+  <div class="contents">
+    <h3>Modules</h3>
+    <ul id="modules">
+      <li th:each="m : ${modules}" th:attr="data-id=${m.id}"
+          th:classappend="${module != null and m.id == module.id} ? 'selected'">
+        <a th:href="@{/students/course/{c}/{m}/(c=${object.id}, m=${m.id})}">
+          <span>Module <span class="order" th:text="${m.order + 1}">1</span></span>
+          <br>
+          <th:block th:text="${m.title}">Title</th:block>
+        </a>
+      </li>
+      <li th:if="${modules.isEmpty()}">No modules yet.</li>
+    </ul>
+    <h3><a th:href="@{/chat/room/{id}/(id=${object.id})}">Course chat room</a></h3>
+  </div>
+  <div class="module">
+    <!--/* {{ item.render }}：按条目类型选择 courses/content/<modelName>.html 里的片段 */-->
+    <th:block th:each="item : ${contents}">
+      <h2 th:text="${item.title}">Title</h2>
+      <th:block th:replace="~{courses/content/__${item.modelName}__ :: item(${item})}"></th:block>
+    </th:block>
+  </div>
+</div>
+</body>
+</html>

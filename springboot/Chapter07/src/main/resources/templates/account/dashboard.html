@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Dashboard</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Dashboard</h1>
+  <p th:with="total=${totalImagesCreated}">
+    Welcome to your dashboard. You have bookmarked
+    <span th:text="|${total} image${total == 1 ? '' : 's'}|">0 images</span>.
+  </p>
+  <!--/* 书签小工具：把这个按钮拖到浏览器书签栏；href 是一段 javascript: 代码（由 BookmarkletLauncher 生成） */-->
+  <p>Drag the following button to your bookmarks toolbar to bookmark images from other websites →
+     <a th:href="${bookmarklet}" class="button">Bookmark it</a></p>
+  <p>You can also <a th:href="@{/account/edit/}">edit your profile</a>
+     or <a th:href="@{/account/password-change/}">change your password</a>.</p>
+
+  <h2>What's happening</h2>
+  <div id="action-list">
+    <!--/* {% for action in actions %}{% include "actions/action/detail.html" %}{% endfor %} */-->
+    <th:block th:each="item : ${actions}">
+      <div th:replace="~{actions/action/detail :: action(${item})}"></div>
+    </th:block>
+  </div>
+</div>
+</body>
+</html>

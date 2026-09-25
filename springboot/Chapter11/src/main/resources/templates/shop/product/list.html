@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{shop/base}">
+<head><title th:text="${category} ? ${category.name} : #{products}">Products</title></head>
+<body>
+<div layout:fragment="content">
+  <div id="sidebar">
+    <h3 th:text="#{categories}">Categories</h3>
+    <ul>
+      <li th:classappend="${category == null} ? 'selected'"><a th:href="@{/}" th:text="#{all}">All</a></li>
+      <li th:each="c : ${categories}" th:classappend="${category != null and category.id == c.id} ? 'selected'">
+        <!--/* category.name / absoluteUrl 都是当前语言的译文 */-->
+        <a th:href="@{${c.absoluteUrl}}" th:text="${c.name}">category</a>
+      </li>
+    </ul>
+  </div>
+  <div id="main" class="product-list">
+    <h1 th:text="${category} ? ${category.name} : #{products}">Products</h1>
+    <div class="item" th:each="product : ${products}">
+      <a th:href="@{${product.absoluteUrl}}"><img th:src="@{${product.imageUrl}}"></a>
+      <a th:href="@{${product.absoluteUrl}}" th:text="${product.name}">name</a>
+      <br>
+      <span th:text="${#fmt.money(product.price)}">$0.00</span>
+    </div>
+  </div>
+</div>
+</body>
+</html>

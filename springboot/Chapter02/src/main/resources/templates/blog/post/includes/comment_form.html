@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<body>
+<th:block th:fragment="commentForm">
+  <h2>Add a new comment</h2>
+  <!--/* th:action 生成的表单会自动带上 CSRF 隐藏字段，≈ {% csrf_token %} */-->
+  <form th:action="@{/blog/{id}/comment/(id=${post.id})}" th:object="${form}" method="post">
+    <div class="left">
+      <div th:replace="~{fragments/forms :: field('name', 'Name', 'text')}"></div>
+    </div>
+    <div class="left">
+      <div th:replace="~{fragments/forms :: field('email', 'Email', 'email')}"></div>
+    </div>
+    <div th:replace="~{fragments/forms :: field('body', 'Body', 'textarea')}"></div>
+    <p><input type="submit" value="Add comment"></p>
+  </form>
+</th:block>
+</body>
+</html>

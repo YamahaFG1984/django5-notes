@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{shop/base}">
+<head><title th:text="#{order.checkout}">Checkout</title></head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="#{order.checkout}">Checkout</h1>
+  <div class="order-info">
+    <h3 th:text="#{order.yours}">Your order</h3>
+    <ul>
+      <li th:each="line : ${lines}">
+        <th:block th:text="|${line.quantity}x ${line.product.name}|">1x name</th:block>
+        <span th:text="${#fmt.money(line.totalPrice)}">$0</span>
+      </li>
+      <li th:if="${totals.coupon != null}">
+        <th:block th:text="#{order.coupon(${totals.coupon.code}, ${totals.coupon.discount})}">"CODE" (10% off)</th:block>
+        <span class="neg" th:text="${'- ' + #fmt.money(totals.discount)}">- $0</span>
+      </li>
+    </ul>
+    <p th:text="|#{cart.total}: ${#fmt.money(totals.total)}|">Total: $0</p>
+  </div>
+  <!--/* 表单标签也要翻译（≈ models.CharField(_('first name'), ...)） */-->
+  <form method="post" class="order-form" th:action="@{/orders/create/}" th:object="${form}">
+    <div th:replace="~{fragments/forms :: field('firstName', #{order.first-name}, 'text')}"></div>
+    <div th:replace="~{fragments/forms :: field('lastName', #{order.last-name}, 'text')}"></div>
+    <div th:replace="~{fragments/forms :: field('email', #{order.email}, 'email')}"></div>
+    <div th:replace="~{fragments/forms :: field('address', #{order.address}, 'text')}"></div>
+    <div th:replace="~{fragments/forms :: field('postalCode', #{order.postal-code}, 'text')}"></div>
+    <div th:replace="~{fragments/forms :: field('city', #{order.city}, 'text')}"></div>
+    <p><input type="submit" th:value="#{order.place}" value="Place order"></p>
+  </form>
+</div>
+</body>
+</html>

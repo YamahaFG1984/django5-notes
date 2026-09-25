@@ -1,0 +1,469 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 13 章 · 内容管理系统 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="13">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 13 章 · 项目四：在线学习平台</span>
+<h1>内容管理系统</h1>
+<p class="lede">
+  讲师需要一个后台：创建和编辑自己的课程、批量编辑模块、往模块里添加四种不同类型的内容、拖拽调整顺序。
+  书中大量使用类视图（CBV）和 mixin 组合：<code>OwnerMixin</code>、<code>PermissionRequiredMixin</code>、<code>inlineformset_factory</code>、<code>modelform_factory</code>……
+  Spring 没有类视图体系，同样的需求用“控制器 + 服务 + 方法级安全”实现。这一章的重点是<strong>三层访问控制</strong>、<strong>把一组子表单绑定成 List</strong>、
+  以及<strong>拖拽排序时保留 CSRF 保护</strong>。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用数据迁移创建 “Instructors” 组；用 <code>@PreAuthorize</code> 实现 <code>PermissionRequiredMixin</code></li>
+    <li>理解“只能操作自己的数据”应该放在查询里（<code>OwnerMixin</code> 的本质）</li>
+    <li>用 <code>rows[0].title</code> 形式的参数把一组子表单绑定成 <code>List</code>，代替 formset</li>
+    <li>一个表单类处理四种内容类型，按类型校验；安全地保存上传文件</li>
+    <li>拖拽排序：fetch 发送 JSON，带上 CSRF 请求头，而不是像书中那样关闭 CSRF</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch13.html">Django 版第 13 章</a>；本章代码在 <code>springboot/Chapter13/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="overview">全景：三层访问控制</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 280" role="img" aria-label="一个请求经过三层检查：第一层 Spring Security 的 URL 规则，未登录重定向到登录页；第二层 @PreAuthorize 检查权限代码，没有权限返回 403；第三层服务里按 ownerId 查询，别人的课程查不到返回 404；都通过后才执行业务逻辑并渲染模板">
+  <rect class="bx" x="10" y="100" width="120" height="56" rx="10"/>
+  <text class="ttl" x="70" y="124" text-anchor="middle">请求</text>
+  <text class="mono sm" x="70" y="143" text-anchor="middle">/course/7/edit/</text>
+
+  <rect class="bx-b" x="160" y="100" width="160" height="56" rx="10"/>
+  <text class="ttl on-b" x="240" y="124" text-anchor="middle">① URL 规则</text>
+  <text class="sm" x="240" y="143" text-anchor="middle">/course/** 需要登录</text>
+
+  <rect class="bx-p" x="350" y="100" width="170" height="56" rx="10"/>
+  <text class="ttl on-p" x="435" y="124" text-anchor="middle">② @PreAuthorize</text>
+  <text class="mono sm" x="435" y="143" text-anchor="middle">courses.change_course</text>
+
+  <rect class="bx-a" x="550" y="100" width="200" height="56" rx="10"/>
+  <text class="ttl on-a" x="650" y="124" text-anchor="middle">③ 按 owner 查询</text>
+  <text class="mono sm" x="650" y="143" text-anchor="middle">findByIdAndOwnerId(7, me)</text>
+
+  <path class="ln" d="M132 128 H156" marker-end="url(#ar)"/>
+  <path class="ln" d="M322 128 H346" marker-end="url(#ar)"/>
+  <path class="ln" d="M522 128 H546" marker-end="url(#ar)"/>
+
+  <rect class="bx-r" x="160" y="200" width="160" height="50" rx="10"/>
+  <text class="sm on-r" x="240" y="230" text-anchor="middle">302 → /accounts/login/</text>
+  <rect class="bx-r" x="350" y="200" width="170" height="50" rx="10"/>
+  <text class="sm on-r" x="435" y="230" text-anchor="middle">403 Forbidden</text>
+  <rect class="bx-r" x="550" y="200" width="200" height="50" rx="10"/>
+  <text class="sm on-r" x="650" y="230" text-anchor="middle">404（别人的课程“不存在”）</text>
+  <path class="ln-r" d="M240 158 V196" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M435 158 V196" marker-end="url(#ar-r)"/>
+  <path class="ln-r" d="M650 158 V196" marker-end="url(#ar-r)"/>
+  <text class="sm" x="250" y="182">未登录</text>
+  <text class="sm" x="445" y="182">没有权限</text>
+  <text class="sm" x="660" y="182">不是自己的</text>
+
+  <text class="ttl" x="240" y="40" text-anchor="middle">≈ LoginRequiredMixin</text>
+  <text class="ttl" x="435" y="40" text-anchor="middle">≈ PermissionRequiredMixin</text>
+  <text class="ttl" x="650" y="40" text-anchor="middle">≈ OwnerMixin</text>
+  <path class="ln-d" d="M240 50 V96"/>
+  <path class="ln-d" d="M435 50 V96"/>
+  <path class="ln-d" d="M650 50 V96"/>
+</svg>
+<figcaption>图 S13-1　书中三个 mixin 各自对应的一层检查</figcaption>
+</figure>
+
+<h2 id="permissions">讲师组与权限</h2>
+
+<p>
+  书中在 Admin 里手动创建 “Instructors” 组、勾选 courses 应用的权限，再把讲师加进组。
+  这种“环境里必须存在的数据”最好随代码一起走，所以写成 Flyway 数据迁移（≈ Django 的 <code>RunPython</code> 数据迁移）：
+</p>
+
+<div class="code" data-lang="sql" data-file="V3__instructors_group.sql">
+<pre>
+INSERT INTO auth_group (name) VALUES ('Instructors');
+
+INSERT INTO auth_group_permissions (group_id, codename)
+SELECT g.id, p.codename
+FROM auth_group g
+CROSS JOIN (VALUES
+    ('courses.add_course'), ('courses.change_course'), ('courses.delete_course'), ('courses.view_course'),
+    ('courses.add_module'), ...
+) AS p(codename)
+WHERE g.name = 'Instructors';
+</pre>
+</div>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · views.py</div>
+<div class="code" data-lang="python"><pre>
+class OwnerCourseMixin(OwnerMixin,
+                       LoginRequiredMixin,
+                       PermissionRequiredMixin):
+    model = Course
+    fields = ['subject', 'title', 'slug', 'overview']
+    success_url = reverse_lazy('manage_course_list')
+
+class CourseCreateView(OwnerCourseEditMixin, CreateView):
+    permission_required = 'courses.add_course'
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · SecurityConfig + 控制器</div>
+<div class="code" data-lang="java"><pre>
+@Configuration
+@EnableMethodSecurity          // 打开 @PreAuthorize
+public class SecurityConfig { ...
+    .requestMatchers("/course/**").authenticated()
+}
+
+@PostMapping("/create/")
+@PreAuthorize("hasAuthority('" + Permissions.ADD_COURSE + "')")
+public String create(@AuthenticationPrincipal CurrentUser user,
+                     @Valid @ModelAttribute("form") CourseForm form,
+                     BindingResult result, Model model) { ... }
+</pre></div></div>
+</div>
+
+<ul>
+  <li><code>@PreAuthorize</code> 通过 AOP 代理在方法执行前求值 SpEL 表达式；失败时抛 <code>AuthorizationDeniedException</code>，由 Security 过滤器翻译成响应：已登录用户得到 403，匿名用户被重定向去登录 —— 和 <code>PermissionRequiredMixin</code> 的 <code>raise_exception</code> 默认行为一致。</li>
+  <li>权限代码写成常量拼进注解（<code>Permissions.ADD_COURSE</code>），拼错时编译不通过，比散落的字符串安全。</li>
+  <li>也可以只在 URL 规则里写：<code>.requestMatchers(POST, "/course/create/").hasAuthority(...)</code>。放在方法上的好处是权限和代码在一起，改 URL 时不会漏。</li>
+</ul>
+
+<h2 id="owner">“只能改自己的课程”放在查询里</h2>
+
+<p>
+  <code>OwnerMixin</code> 重写 <code>get_queryset()</code>，给所有查询加上 <code>filter(owner=request.user)</code>；
+  于是别人的课程在 <code>UpdateView</code> 里“查不到”，自然返回 404。这个思路完全可以照搬：服务层的每个方法都带上 <code>ownerId</code>，
+  仓库方法名直接表达条件：
+</p>
+
+<div class="code" data-lang="java" data-file="CourseManageService.java（节选）">
+<pre>
+@Transactional(readOnly = true)
+public Course getCourse(Long id, Long ownerId) {
+    return courses.findByIdAndOwnerId(id, ownerId).orElseThrow(NotFoundException::new);
+}
+
+// 模块、内容也一样：条件沿着关联一路走到课程的 owner
+Optional&lt;Module&gt; findByIdAndCourseOwnerId(Long id, Long ownerId);
+Optional&lt;Content&gt; findByIdAndModuleCourseOwnerId(Long id, Long ownerId);
+
+// 批量更新同样带上 owner 条件：伪造别人的 id 也改不动
+@Modifying
+@Query("update Module m set m.order = :order where m.id = :id and m.course.owner.id = :ownerId")
+int updateOrder(@Param("id") Long id, @Param("order") int order, @Param("ownerId") Long ownerId);
+</pre>
+</div>
+
+<p>
+  和“先查出来再判断 <code>course.getOwner().equals(me)</code>”相比，把条件放进查询有两个好处：不会忘（没有 ownerId 参数就写不出调用），
+  也不会泄露存在性（别人的课程和不存在的课程都是 404）。
+</p>
+
+<h2 id="crud">课程的增删改查：类视图 vs 控制器方法</h2>
+
+<div class="tw">
+<table>
+  <tr><th>Django 类视图</th><th>Spring 控制器方法</th><th>要点</th></tr>
+  <tr><td><code>ManageCourseListView(ListView)</code></td><td><code>GET /course/mine/</code></td><td><code>@EntityGraph({"subject", "modules"})</code> 一次查出模块，模板里判断“有没有模块”不再发 SQL</td></tr>
+  <tr><td><code>CourseCreateView(CreateView)</code></td><td><code>GET/POST /course/create/</code></td><td><code>form_valid</code> 里设置 owner ≈ 服务里 <code>users.getReferenceById(ownerId)</code></td></tr>
+  <tr><td><code>CourseUpdateView(UpdateView)</code></td><td><code>GET/POST /course/{id}/edit/</code></td><td>先按 owner 查出课程；表单对象 <code>CourseForm.of(course)</code> 预填</td></tr>
+  <tr><td><code>CourseDeleteView(DeleteView)</code></td><td><code>GET</code> 确认页 + <code>POST</code> 删除</td><td>级联删除模块、内容、条目</td></tr>
+</table>
+</div>
+
+<p>
+  <code>ModelForm</code> 会根据 <code>slug = SlugField(unique=True)</code> 自动做唯一性校验；Bean Validation 不查数据库，
+  所以在控制器里补一句：<code>if (service.slugTaken(form.getSlug(), courseId)) result.rejectValue("slug", "unique", "Course with this Slug already exists.")</code>。
+  编辑时要排除自己（<code>existsBySlugAndIdNot</code>），否则保存不改 slug 的课程也会报错。
+</p>
+
+<h2 id="formset">批量编辑模块：formset 与 List 绑定</h2>
+
+<p>
+  一门课程的所有模块在一个页面上编辑：已有的每个模块一行，外加两个空行用来新增，每行一个“删除”复选框。
+  Django 用 <code>inlineformset_factory(Course, Module, fields=[...], extra=2, can_delete=True)</code> 一行生成；
+  Spring MVC 的数据绑定天然支持带下标的属性名 —— 请求参数 <code>rows[0].title</code> 会被绑定到 <code>formSet.getRows().get(0).setTitle(...)</code>，
+  列表不够长时自动扩展。于是 formset 就是一个普通的类：
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · forms.py + 模板</div>
+<div class="code" data-lang="python"><pre>
+ModuleFormSet = inlineformset_factory(
+    Course, Module,
+    fields=['title', 'description'],
+    extra=2, can_delete=True)
+
+# 模板
+&lt;form method="post"&gt;
+  {{ formset }}
+  {{ formset.management_form }}
+  {% csrf_token %}
+&lt;/form&gt;
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · ModuleFormSet.java + 模板</div>
+<div class="code" data-lang="java"><pre>
+public class ModuleFormSet {
+    public static final int EXTRA = 2;
+    private List&lt;@Valid Row&gt; rows = new ArrayList&lt;&gt;();
+
+    public static class Row {
+        private Long id;            // 已有模块的 id，新行为空
+        @Size(max = 200) private String title = "";
+        private String description = "";
+        private boolean delete;     // can_delete=True
+    }
+}
+</pre></div>
+<div class="code" data-lang="th"><pre>
+&lt;tbody th:each="row, stat : *{rows}"&gt;
+  &lt;input type="text"
+         th:field="*{rows[__${stat.index}__].title}"&gt;
+  &lt;input type="checkbox"
+         th:field="*{rows[__${stat.index}__].delete}"&gt;
+  &lt;input type="hidden"
+         th:field="*{rows[__${stat.index}__].id}"&gt;
+&lt;/tbody&gt;
+</pre></div></div>
+</div>
+
+<ul>
+  <li><code>__${stat.index}__</code> 是 Thymeleaf 的<strong>预处理</strong>：先算出下标，再把它拼进 <code>*{rows[0].title}</code> 表达式，<code>th:field</code> 才能生成正确的 <code>name</code>、<code>id</code> 并回填值和错误。</li>
+  <li>Django 需要 <code>management_form</code>（<code>TOTAL_FORMS</code>、<code>INITIAL_FORMS</code> 等隐藏字段）告诉服务器有几个子表单；Spring 按下标绑定，不需要这些。</li>
+  <li>“哪一行是已有模块”由隐藏字段 <code>id</code> 决定。保存时<strong>只在这门课自己的模块里</strong>找这个 id，找不到就 404 —— 用户可以随意修改隐藏字段，不能信任它。</li>
+</ul>
+
+<div class="code" data-lang="java" data-file="保存逻辑 ≈ formset.save()">
+<pre>
+Map&lt;Long, Module&gt; existing = course.getModules().stream()
+        .collect(toMap(Module::getId, identity()));
+for (ModuleFormSet.Row row : formSet.getRows()) {
+    if (row.isEmptyExtra()) continue;                       // 没填的空行忽略
+    if (row.getId() == null) {                              // 新行
+        if (!row.isDelete()) modules.save(new Module(course, row.getTitle(), row.getDescription()));
+        continue;
+    }
+    Module module = existing.get(row.getId());
+    if (module == null) throw new NotFoundException();      // 不是这门课的模块
+    if (row.isDelete()) course.getModules().remove(module); // orphanRemoval → DELETE
+    else { module.setTitle(row.getTitle()); module.setDescription(row.getDescription()); }
+}
+</pre>
+</div>
+
+<p>
+  校验规则与 Django formset 相同：没勾“删除”的非空行，标题必填（控制器里逐行 <code>rejectValue("rows[" + i + "].title", ...)</code>）；
+  完全空白的额外行被忽略。
+</p>
+
+<h2 id="content">多态内容的表单</h2>
+
+<p>
+  书中的 <code>ContentCreateUpdateView</code> 很巧妙：URL 里带着模型名（<code>/module/3/content/video/create/</code>），
+  视图用 <code>apps.get_model()</code> 找到模型类，再用 <code>modelform_factory(model, exclude=[...])</code> <strong>在运行时</strong>生成对应的表单。
+  Java 是静态类型语言，没有这么灵活的元编程；更直接的做法是一个包含所有可能字段的表单类，再按类型决定必填项和显示哪些字段：
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · 运行时生成表单</div>
+<div class="code" data-lang="python"><pre>
+def get_model(self, model_name):
+    if model_name in ['text', 'video', 'image', 'file']:
+        return apps.get_model(app_label='courses',
+                              model_name=model_name)
+    return None
+
+def get_form(self, model, *args, **kwargs):
+    Form = modelform_factory(model,
+        exclude=['owner', 'order', 'created', 'updated'])
+    return Form(*args, **kwargs)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · 一个表单类 + 按类型校验</div>
+<div class="code" data-lang="java"><pre>
+public class ItemForm {
+    @NotBlank @Size(max = 250) private String title;
+    private String content = "";     // text
+    private String url = "";         // video
+    private MultipartFile file;      // image / file
+}
+
+switch (modelName) {
+    case "text" -&gt; { if (form.getContent().isBlank())
+        result.rejectValue("content", "required", "This field is required."); }
+    case "video" -&gt; { if (!form.getUrl().matches("(?i)https?://…"))
+        result.rejectValue("url", "invalid", "Enter a valid URL."); }
+    default -&gt; { // image / file：新建时必须上传；图片要真的是图片
+        if (!form.hasFile() &amp;&amp; item == null)
+            result.rejectValue("file", "required", ...);
+        else if (modelName.equals("image") &amp;&amp; !MediaStorage.isImage(bytes))
+            result.rejectValue("file", "invalid_image", ...);
+    }
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li><strong>类型白名单</strong>：URL 里的 <code>modelName</code> 必须是四种之一，否则 404（书中 <code>get_model</code> 返回 <code>None</code> 后会在 <code>modelform_factory</code> 里报错，得到 500）。</li>
+  <li><strong>编辑时类型要一致</strong>：<code>/content/video/12/</code> 指向的其实是文字条目时返回 404，而不是用视频表单去编辑文字。</li>
+  <li><strong>视频地址只接受 http(s)</strong>：Django 的 <code>URLField</code> 同样如此。下一章会把它放进 <code>&lt;a href&gt;</code> 和 <code>&lt;iframe src&gt;</code>，<code>javascript:</code> 地址绝不能进库。</li>
+  <li><strong>上传文件</strong>：沿用第 4 章的 <code>MediaStorage</code>：只保留文件名里的安全字符、加随机后缀、拒绝 <code>../</code> 路径穿越；图片用 <code>ImageIO</code> 检查内容（≈ <code>ImageField</code> 用 Pillow 检查）。编辑时不上传新文件就保留原文件（≈ <code>ClearableFileInput</code>）。</li>
+  <li><strong>新建内容</strong>：<code>contents.save(new Content(module, item))</code>，<code>cascade = ALL</code> 让条目一起插入；<code>@OrderField</code> 自动给出序号。</li>
+</ul>
+
+<h2 id="sortable">拖拽排序与 CSRF</h2>
+
+<p>
+  内容列表页用 html5sortable 实现拖拽，放下时把新的顺序以 JSON 发给服务器。书中的两个排序视图用了
+  django-braces 的 <code>CsrfExemptMixin</code> —— 直接<strong>关闭了 CSRF 保护</strong>，理由是“fetch 请求带 CSRF 令牌麻烦”。
+  其实只需要把令牌放进请求头：
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · 关闭 CSRF</div>
+<div class="code" data-lang="python"><pre>
+class ModuleOrderView(CsrfExemptMixin,
+                      JsonRequestResponseMixin, View):
+    def post(self, request):
+        for id, order in self.request_json.items():
+            Module.objects.filter(
+                id=id, course__owner=request.user
+            ).update(order=order)
+        return self.render_json_response({'saved': 'OK'})
+</pre></div>
+<div class="code" data-lang="js"><pre>
+var options = { method: 'POST', mode: 'same-origin' }
+options['body'] = JSON.stringify(modulesOrder);
+fetch(moduleOrderUrl, options)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · 保留 CSRF，令牌放进请求头</div>
+<div class="code" data-lang="java"><pre>
+@PostMapping("/module/order/")
+@ResponseBody
+public Map&lt;String, String&gt; moduleOrder(
+        @RequestBody Map&lt;Long, Integer&gt; order,
+        @AuthenticationPrincipal CurrentUser user) {
+    service.reorderModules(order, user.id());
+    return Map.of("saved", "OK");
+}
+</pre></div>
+<div class="code" data-lang="js"><pre>
+// base.html 的 meta 标签里有令牌和请求头名
+fetch(url, {
+  method: 'POST',
+  mode: 'same-origin',
+  headers: {'Content-Type': 'application/json',
+            [csrfHeader]: csrfToken},
+  body: JSON.stringify(order)
+});
+</pre></div></div>
+</div>
+
+<ul>
+  <li><code>@RequestBody Map&lt;Long, Integer&gt;</code>：JSON 对象的键是字符串，Spring 会把它们转换成 <code>Long</code>；值不是整数时返回 400，不用手工解析。</li>
+  <li><code>@ResponseBody</code> 让返回值直接序列化成 JSON（≈ <code>JsonRequestResponseMixin</code> 的 <code>render_json_response</code>）。</li>
+  <li>CSRF 为什么在这里也重要：没有 CSRF 保护，任何网站都能让已登录的讲师“不知不觉”地打乱自己课程的顺序。危害不大，但开一个口子就会有人照着把危害大的接口也关掉。</li>
+  <li>模块序号更新后，前端用 <code>textContent</code> 更新页面上的数字（书中用 <code>innerHTML</code>，这里的值是数字，并不危险，但养成习惯更好）。</li>
+</ul>
+
+<h2 id="tests">测试</h2>
+
+<div class="code" data-lang="java" data-file="CourseManageTests.java（节选）">
+<pre>
+@Test
+void userWithoutPermissionGets403() throws Exception {
+    User student = users.save(new User("student", "{noop}pw", "s@example.com"));
+    mvc.perform(get("/course/mine/").with(user(CurrentUser.from(student))))
+            .andExpect(status().isForbidden());
+}
+
+@Test
+void reorderModulesViaJsonOnlyAffectsOwnCourses() throws Exception {
+    String json = "{\"%d\": 1, \"%d\": 0, \"%d\": 9}".formatted(a.getId(), b.getId(), foreign.getId());
+    // 没带 CSRF 令牌：拒绝
+    mvc.perform(post("/course/module/order/").with(asTeacher)
+                    .contentType(APPLICATION_JSON).content(json))
+            .andExpect(status().isForbidden());
+    mvc.perform(post("/course/module/order/").with(asTeacher).with(csrf().asHeader())
+                    .contentType(APPLICATION_JSON).content(json))
+            .andExpect(jsonPath("$.saved").value("OK"));
+    assertThat(modules.findByCourseIdOrderByOrderAsc(c.getId()))
+            .extracting(Module::getTitle).containsExactly("B", "A");
+    assertThat(modules.findById(foreign.getId()).orElseThrow().getOrder()).isZero();   // 别人的没变
+}
+</pre>
+</div>
+
+<p>
+  本章新增 16 个测试（共 21 个）：未登录重定向、无权限 403、只列出自己的课程、增改删、slug 唯一、别人的课程/模块一律 404、
+  formset 增改删与校验、文字内容新建与编辑、类型不匹配 404、未知类型 404、视频地址校验、图片内容校验与“编辑时保留原文件”、
+  文件上传与文件名清洗、删除内容时条目一起删除、模块与内容的 JSON 排序。另外在真实服务器上用 curl 走了一遍完整流程。
+</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 13 章 Spring 版点评 <small>springboot/Chapter13</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 拖拽排序保留了 CSRF 保护</h4>
+    <p>书中用 <code>CsrfExemptMixin</code> 关掉了两个接口的 CSRF 校验；这里只多写一个请求头，测试也覆盖了“没带令牌被拒绝”。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 所有入口都要求登录</h4>
+    <p>书中的 <code>CourseModuleUpdateView</code>、<code>ContentCreateUpdateView</code> 等没有继承 <code>LoginRequiredMixin</code>：匿名用户访问时，<code>get_object_or_404(..., owner=request.user)</code> 拿 <code>AnonymousUser</code> 去查询，得到的是 500 而不是登录页。这里 <code>/course/**</code> 在 URL 规则里统一要求登录。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 模块和内容的操作不检查权限代码（与书中一致）</h4>
+    <p>它们只检查“是不是自己的课程”。一个讲师被移出 Instructors 组后，仍然能编辑已有课程的模块和内容。需要的话，给这些方法也加上 <code>@PreAuthorize("hasAuthority('courses.change_course')")</code>。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 表单类里有“用不上的字段”</h4>
+    <p>一个 <code>ItemForm</code> 装下四种类型的字段，校验规则写在控制器的 <code>switch</code> 里。类型再多时，可以为每种类型写一个表单类，用 <code>Map&lt;String, Class&lt;?&gt;&gt;</code> 按名字选择 —— 这就接近 <code>modelform_factory</code> 的思路了。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 删除条目时文件还留在磁盘上</h4>
+    <p>Django 删除 <code>FileField</code> 所在的对象时也不会删除文件。要清理可以在删除成功（事务提交）后用 <code>@TransactionalEventListener</code> 删文件，或者定期跑一个清理命令。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>三层访问控制：URL 规则（登录）→ <code>@PreAuthorize</code>（权限代码）→ 带 ownerId 的查询（只能碰自己的数据）。</li>
+  <li>“环境里必须有的数据”（讲师组）写成数据迁移。</li>
+  <li>formset = 带下标绑定的 <code>List</code>；隐藏的 id 只能在合法范围内查找。</li>
+  <li>动态表单用“全字段表单 + 按类型校验”代替；URL 里的类型名要走白名单。</li>
+  <li>fetch 请求带 CSRF 请求头即可，不要为了省事关闭 CSRF。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>给 <code>ModuleContentController</code> 的方法加上权限检查，并写一个“被移出组的讲师不能再编辑模块”的测试。</li>
+    <li>在模块 formset 里加一个 “order” 输入框，让没有 JavaScript 的用户也能调整顺序。</li>
+    <li>删除图片/文件条目时，在事务提交后删除磁盘上的文件。</li>
+    <li>把 <code>ItemForm</code> 拆成四个表单类，比较两种写法的代码量和可读性。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

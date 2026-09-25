@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title th:text="|Module ${module.order + 1}: ${module.title}|">Module</title></head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="|Course &quot;${course.title}&quot;|">Course</h1>
+  <div class="contents">
+    <h3>Modules</h3>
+    <ul id="modules">
+      <li th:each="m : ${modules}" th:attr="data-id=${m.id}" th:classappend="${m.id == module.id} ? 'selected'">
+        <a th:href="@{/course/module/{id}/(id=${m.id})}">
+          <span>Module <span class="order" th:text="${m.order + 1}">1</span></span>
+          <br>
+          <th:block th:text="${m.title}">Title</th:block>
+        </a>
+      </li>
+      <li th:if="${modules.isEmpty()}">No modules yet.</li>
+    </ul>
+    <p><a th:href="@{/course/{id}/module/(id=${course.id})}">Edit modules</a></p>
+  </div>
+  <div class="module">
+    <h2 th:text="|Module ${module.order + 1}: ${module.title}|">Module</h2>
+    <h3>Module contents:</h3>
+    <div id="module-contents">
+      <!--/* item.modelName ≈ 书中自定义的 {{ item|model_name }} 过滤器 */-->
+      <div th:each="content : ${contents}" th:attr="data-id=${content.id}" th:with="item=${content.item}">
+        <p th:text="|${item.title} (${item.modelName})|">Item (text)</p>
+        <a th:href="@{/course/module/{m}/content/{type}/{id}/(m=${module.id}, type=${item.modelName}, id=${item.id})}">Edit</a>
+        <form th:action="@{/course/content/{id}/delete/(id=${content.id})}" method="post">
+          <input type="submit" value="Delete">
+        </form>
+      </div>
+      <p th:if="${contents.isEmpty()}">This module has no contents yet.</p>
+    </div>
+    <h3>Add new content:</h3>
+    <ul class="content-types">
+      <li><a th:href="@{/course/module/{id}/content/text/create/(id=${module.id})}">Text</a></li>
+      <li><a th:href="@{/course/module/{id}/content/image/create/(id=${module.id})}">Image</a></li>
+      <li><a th:href="@{/course/module/{id}/content/video/create/(id=${module.id})}">Video</a></li>
+      <li><a th:href="@{/course/module/{id}/content/file/create/(id=${module.id})}">File</a></li>
+    </ul>
+  </div>
+</div>
+
+<th:block layout:fragment="include_js">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/html5sortable/0.13.3/html5sortable.min.js"></script>
+</th:block>
+
+<script layout:fragment="domready" th:inline="javascript">
+  document.addEventListener('DOMContentLoaded', () => {
+    // 与书中不同：请求带上 CSRF 请求头和 JSON 类型，服务器端不用关闭 CSRF 保护
+    function postOrder(url, order) {
+      return fetch(url, {
+        method: 'POST',
+        mode: 'same-origin',
+        headers: {'Content-Type': 'application/json', [csrfHeader]: csrfToken},
+        body: JSON.stringify(order)
+      });
+    }
+
+    const moduleOrderUrl = /*[[@{/course/module/order/}]]*/ '/course/module/order/';
+    sortable('#modules', {
+      forcePlaceholderSize: true,
+      placeholderClass: 'placeholder'
+    })[0].addEventListener('sortupdate', () => {
+      const modulesOrder = {};
+      document.querySelectorAll('#modules li').forEach((module, index) => {
+        modulesOrder[module.dataset.id] = index;
+        module.querySelector('.order').textContent = index + 1;
+      });
+      postOrder(moduleOrderUrl, modulesOrder);
+    });
+
+    const contentOrderUrl = /*[[@{/course/content/order/}]]*/ '/course/content/order/';
+    sortable('#module-contents', {
+      forcePlaceholderSize: true,
+      placeholderClass: 'placeholder'
+    })[0].addEventListener('sortupdate', () => {
+      const contentOrder = {};
+      document.querySelectorAll('#module-contents > div').forEach((content, index) => {
+        contentOrder[content.dataset.id] = index;
+      });
+      postOrder(contentOrderUrl, contentOrder);
+    });
+  });
+</script>
+</body>
+</html>

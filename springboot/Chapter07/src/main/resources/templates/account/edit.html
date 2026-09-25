@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Edit your account</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Edit your account</h1>
+  <p>You can edit your account using the following form:</p>
+  <!--/* 上传文件必须用 multipart/form-data；th:object 可以放在任何元素上，所以一个 <form> 里能有两个表单对象 */-->
+  <form method="post" th:action="@{/account/edit/}" enctype="multipart/form-data">
+    <div th:object="${userForm}">
+      <div th:replace="~{fragments/forms :: field('firstName', 'First name', 'text')}"></div>
+      <div th:replace="~{fragments/forms :: field('lastName', 'Last name', 'text')}"></div>
+      <div th:replace="~{fragments/forms :: field('email', 'Email address', 'email')}"></div>
+    </div>
+    <div th:object="${profileForm}">
+      <div th:replace="~{fragments/forms :: field('dateOfBirth', 'Date of birth', 'date')}"></div>
+      <p th:if="${profile.photoUrl}">
+        Currently: <a th:href="@{${profile.photoUrl}}" th:text="${profile.photo}">photo</a>
+      </p>
+      <div th:replace="~{fragments/forms :: field('photo', 'Photo', 'file')}"></div>
+    </div>
+    <p><input type="submit" value="Save changes"></p>
+  </form>
+</div>
+</body>
+</html>

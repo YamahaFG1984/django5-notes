@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 15 章 · 构建 API — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="15">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 15 章 · 项目四：在线学习平台</span>
+<h1>构建 API</h1>
+<p class="lede">
+  平台要开放一个 RESTful API：列出学科和课程、选课、读取课程的全部内容。书中用的是 Django REST framework（DRF）——
+  序列化器、ViewSet、Router、分页类、认证类、权限类，一整套约定。Spring MVC 本身就是为这件事设计的：
+  <code>@RestController</code> 的返回值直接写成 JSON。没有 DRF 那样的“框架中的框架”，每一部分都更显式；
+  我们会让响应格式和 DRF 保持一致（分页的 <code>count/next/previous/results</code>、错误的 <code>{"detail": ...}</code>），这样书中的客户端脚本原样可用。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 record 作为 DTO，替代 DRF 的序列化器；嵌套序列化器 = 嵌套 record</li>
+    <li>实现 DRF 风格的分页，理解分页与集合抓取的冲突</li>
+    <li>为 <code>/api/**</code> 配置第二条 Security 过滤器链：HTTP Basic、无状态、JSON 错误</li>
+    <li>把 DRF 的对象级权限（<code>IsEnrolled</code>）写进服务层</li>
+    <li>用 springdoc-openapi 生成接口文档；用 JDK <code>HttpClient</code> 写 API 客户端</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch15.html">Django 版第 15 章</a>；本章代码在 <code>springboot/Chapter15/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="overview">全景：DRF 的组件在 Spring 里对应什么</h2>
+
+<div class="tw">
+<table>
+  <tr><th>DRF</th><th>Spring</th><th>本章实现</th></tr>
+  <tr><td><code>Serializer</code> / <code>ModelSerializer</code></td><td>DTO（record）+ Jackson</td><td><code>ApiDtos.SubjectDto</code>、<code>CourseDto</code>……</td></tr>
+  <tr><td><code>ReadOnlyModelViewSet</code> + <code>DefaultRouter</code></td><td><code>@RestController</code> 里显式映射的方法</td><td><code>CourseApiController</code></td></tr>
+  <tr><td><code>@action(detail=True)</code></td><td>再写一个方法：<code>@PostMapping("/courses/{id}/enroll/")</code></td><td>选课、课程内容</td></tr>
+  <tr><td><code>PageNumberPagination</code></td><td>Spring Data <code>Pageable</code>/<code>Page</code> + 自定义响应格式</td><td><code>StandardPagination</code>、<code>PageResponse</code></td></tr>
+  <tr><td><code>authentication_classes = [BasicAuthentication]</code></td><td>Security 过滤器链的 <code>httpBasic()</code></td><td>单独的 <code>/api/**</code> 过滤器链</td></tr>
+  <tr><td><code>permission_classes</code>（<code>IsAuthenticated</code>）</td><td>URL 规则或 <code>@PreAuthorize</code></td><td>URL 规则</td></tr>
+  <tr><td>对象级权限 <code>has_object_permission</code></td><td>服务层检查 / <code>@PostAuthorize</code></td><td><code>NotEnrolledException</code> → 403</td></tr>
+  <tr><td>可浏览 API（Browsable API）</td><td>OpenAPI 文档 + Swagger UI</td><td>springdoc-openapi</td></tr>
+  <tr><td><code>requests</code> 客户端</td><td>JDK <code>HttpClient</code> / Spring <code>RestClient</code></td><td><code>api-examples/EnrollAll.java</code></td></tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="请求进入 FilterChainProxy 后按地址分流：以 /api/ 开头的请求走第一条过滤器链，HTTP Basic 认证、无状态、不检查 CSRF、错误返回 JSON，然后到 CourseApiController 返回 JSON；其他请求走第二条过滤器链，会话加表单登录、检查 CSRF、未登录重定向到登录页，然后到网页控制器渲染 Thymeleaf 模板">
+  <rect class="bx" x="10" y="95" width="130" height="56" rx="10"/>
+  <text class="ttl" x="75" y="119" text-anchor="middle">请求</text>
+  <text class="sm" x="75" y="138" text-anchor="middle">FilterChainProxy</text>
+
+  <rect class="bx-a" x="200" y="20" width="270" height="90" rx="10"/>
+  <text class="ttl on-a" x="335" y="44" text-anchor="middle">@Order(1) securityMatcher("/api/**")</text>
+  <text class="sm" x="335" y="66" text-anchor="middle">HTTP Basic · 无状态（不用会话）</text>
+  <text class="sm" x="335" y="86" text-anchor="middle">不检查 CSRF · 401/403 返回 JSON</text>
+
+  <rect class="bx-b" x="200" y="140" width="270" height="90" rx="10"/>
+  <text class="ttl on-b" x="335" y="164" text-anchor="middle">@Order(2) 其余所有请求</text>
+  <text class="sm" x="335" y="186" text-anchor="middle">会话 + 表单登录 · 检查 CSRF</text>
+  <text class="sm" x="335" y="206" text-anchor="middle">未登录 → 重定向到 /accounts/login/</text>
+
+  <rect class="bx-a" x="530" y="37" width="220" height="56" rx="10"/>
+  <text class="ttl on-a" x="640" y="61" text-anchor="middle">@RestController</text>
+  <text class="sm" x="640" y="80" text-anchor="middle">返回 DTO → JSON</text>
+
+  <rect class="bx-b" x="530" y="157" width="220" height="56" rx="10"/>
+  <text class="ttl on-b" x="640" y="181" text-anchor="middle">@Controller</text>
+  <text class="sm" x="640" y="200" text-anchor="middle">返回视图名 → Thymeleaf</text>
+
+  <path class="ln-a" d="M142 115 H170 V65 H196" marker-end="url(#ar-a)"/>
+  <path class="ln-b" d="M142 131 H170 V185 H196" marker-end="url(#ar-b)"/>
+  <path class="ln-a" d="M472 65 H526" marker-end="url(#ar-a)"/>
+  <path class="ln-b" d="M472 185 H526" marker-end="url(#ar-b)"/>
+</svg>
+<figcaption>图 S15-1　同一个应用里两条过滤器链：API 和网页用不同的认证方式</figcaption>
+</figure>
+
+<h2 id="dto">序列化器 → record</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · serializers.py</div>
+<div class="code" data-lang="python"><pre>
+class ModuleSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Module
+        fields = ['order', 'title', 'description']
+
+class CourseSerializer(serializers.ModelSerializer):
+    modules = ModuleSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Course
+        fields = ['id', 'subject', 'title', 'slug',
+                  'overview', 'created', 'owner', 'modules']
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · ApiDtos.java</div>
+<div class="code" data-lang="java"><pre>
+public record ModuleDto(int order, String title, String description) {
+    static ModuleDto of(Module m) {
+        return new ModuleDto(m.getOrder(), m.getTitle(), m.getDescription());
+    }
+}
+
+/** subject、owner 输出主键（≈ PrimaryKeyRelatedField） */
+public record CourseDto(Long id, Long subject, String title, String slug,
+                        String overview, OffsetDateTime created,
+                        Long owner, List&lt;ModuleDto&gt; modules) {
+    public static CourseDto of(Course c) {
+        return new CourseDto(c.getId(), c.getSubject().getId(), ...,
+                c.getModules().stream().map(ModuleDto::of).toList());
+    }
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li><strong>为什么不直接返回实体</strong>：实体有懒加载关联（序列化时触发 <code>LazyInitializationException</code> 或 N+1）、有双向关联（无限递归）、有不该公开的字段（密码哈希）。DTO 明确写出“接口长什么样”，也让接口和表结构解耦。</li>
+  <li><strong>字段命名</strong>：Java 用驼峰（<code>totalCourses</code>），DRF 输出下划线（<code>total_courses</code>）。一行配置 <code>spring.jackson.property-naming-strategy: SNAKE_CASE</code> 让 JSON 与书中一致。</li>
+  <li><strong>日期</strong>：Jackson 3 默认把 <code>OffsetDateTime</code> 写成 ISO-8601 字符串，和 DRF 相同。</li>
+  <li><strong>计算字段</strong>：DRF 用 <code>SerializerMethodField</code>（<code>get_popular_courses</code>）；DTO 里就是一个普通字段，由服务层算好传进来。</li>
+</ul>
+
+<h3>条目：HTML 字符串还是结构化数据</h3>
+<p>
+  书中的 <code>ItemRelatedField</code> 调用 <code>item.render()</code>，把渲染好的 HTML 放进 JSON。这里改为返回结构化数据：
+  <code>{"type": "video", "title": "...", "url": "..."}</code>，图片和文件给出完整的 <code>/media/</code> 地址。
+  API 的客户端可能是手机 App，不一定能显示 HTML；由客户端决定怎么展示更合理。
+</p>
+
+<h2 id="controller">ViewSet → 控制器方法</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · views.py + urls.py</div>
+<div class="code" data-lang="python"><pre>
+class CourseViewSet(viewsets.ReadOnlyModelViewSet):
+    queryset = Course.objects.prefetch_related('modules')
+    serializer_class = CourseSerializer
+    pagination_class = StandardPagination
+
+    @action(detail=True, methods=['post'],
+            authentication_classes=[BasicAuthentication],
+            permission_classes=[IsAuthenticated])
+    def enroll(self, request, *args, **kwargs):
+        course = self.get_object()
+        course.students.add(request.user)
+        return Response({'enrolled': True})
+
+router = routers.DefaultRouter()
+router.register('courses', views.CourseViewSet)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · CourseApiController.java</div>
+<div class="code" data-lang="java"><pre>
+@RestController
+@RequestMapping("/api")
+public class CourseApiController {
+
+    @GetMapping("/courses/")
+    public PageResponse&lt;CourseDto&gt; courses(
+            @RequestParam(required = false) String page,
+            @RequestParam(name = "page_size", required = false) String pageSize) {
+        return PageResponse.of(service.courses(
+                StandardPagination.pageable(page, pageSize)));
+    }
+
+    @GetMapping("/courses/{id}/")
+    public CourseDto course(@PathVariable Long id) { ... }
+
+    @PostMapping("/courses/{id}/enroll/")
+    public Map&lt;String, Boolean&gt; enroll(@PathVariable Long id,
+            @AuthenticationPrincipal CurrentUser user) {
+        service.enroll(id, user.id());
+        return Map.of("enrolled", true);
+    }
+}
+</pre></div></div>
+</div>
+
+<p>
+  ViewSet + Router 用约定一次生成 list、retrieve 两个端点和 URL；Spring 每个端点一个方法。代码多几行，但一眼能看到全部 URL 和参数。
+  DefaultRouter 还提供一个 API 根视图（<code>GET /api/</code> 列出各资源地址），这里也加了一个。
+  只读 ViewSet 对 <code>POST /api/courses/</code> 返回 405；Spring 没有对应的映射时同样返回 405 Method Not Allowed。
+</p>
+
+<h2 id="pagination">分页：DRF 格式</h2>
+
+<div class="code" data-lang="java" data-file="PageResponse.java">
+<pre>
+public record PageResponse&lt;T&gt;(long count, String next, String previous, List&lt;T&gt; results) {
+
+    public static &lt;T&gt; PageResponse&lt;T&gt; of(Page&lt;T&gt; page) {
+        int current = page.getNumber() + 1;   // Spring Data 的页码从 0 开始，API 从 1 开始
+        return new PageResponse&lt;&gt;(page.getTotalElements(),
+                page.hasNext() ? pageUrl(current + 1) : null,
+                page.hasPrevious() ? pageUrl(current - 1) : null,
+                page.getContent());
+    }
+
+    /** 保留当前请求的其他参数（比如 page_size），只替换 page；上一页是第 1 页时去掉 page 参数 */
+    private static String pageUrl(int page) {
+        var builder = ServletUriComponentsBuilder.fromCurrentRequest();
+        return (page == 1 ? builder.replaceQueryParam("page") : builder.replaceQueryParam("page", page))
+                .build().toUriString();
+    }
+}
+</pre>
+</div>
+
+<ul>
+  <li><code>page_size</code> 默认 10、最大 50（≈ <code>page_size_query_param</code>、<code>max_page_size</code>）；页码不是数字或超出范围时返回 404 <code>{"detail": "Invalid page."}</code>，和 DRF 一样。</li>
+  <li>直接返回 Spring Data 的 <code>Page</code> 也可以，但它的 JSON 结构（<code>content</code>、<code>totalElements</code>、<code>pageable</code>……）既冗长又和实现细节绑定，Spring Data 自己也不建议直接序列化它。</li>
+  <li><code>next</code> / <code>previous</code> 是绝对地址，取自当前请求的 Host —— 部署在反向代理后面时要正确转发 Host 和协议（第 17 章）。</li>
+</ul>
+
+<div class="box warn">
+  <div class="t">&#9888; 分页查询不要抓取集合</div>
+  <p>
+    直觉写法是 <code>@EntityGraph("modules") Page&lt;Course&gt; findAll(Pageable)</code>。但对集合做 join fetch 后，SQL 的一行不再对应一门课程，
+    数据库层面的 <code>LIMIT</code> 就不对了 —— Hibernate 只好把<strong>所有</strong>数据查回内存再分页，并打印警告 HHH90003004。
+    正确做法是分页查询只抓取单值关联（subject、owner），模块在访问时由 <code>default_batch_fetch_size=50</code> 一次批量加载
+    （一条 <code>where course_id in (...)</code>），效果等同于 <code>prefetch_related('modules')</code>。
+  </p>
+</div>
+
+<h3>热门课程：消除 N+1</h3>
+<p>
+  <code>SubjectSerializer.get_popular_courses</code> 对<strong>每个</strong>学科查一次“按学生人数排序的前 3 门课”，一页 10 个学科就是 10 条查询。
+  这里对一页里的学科只查一次（<code>where s.id in :subjectIds group by ... order by count(st) desc</code>），再在 Java 里按学科分组、各取前 3。
+</p>
+
+<h2 id="security">认证：第二条过滤器链</h2>
+
+<p>
+  网页部分用会话 + 表单登录；API 用 HTTP Basic，而且应该是<strong>无状态</strong>的。Spring Security 允许多条过滤器链，
+  用 <code>securityMatcher</code> 划分地盘、<code>@Order</code> 决定先后：
+</p>
+
+<div class="code" data-lang="java" data-file="SecurityConfig.java（节选）">
+<pre>
+@Bean
+@Order(1)
+SecurityFilterChain apiFilterChain(HttpSecurity http) throws Exception {
+    http
+        .securityMatcher("/api/**")
+        .authorizeHttpRequests(auth -&gt; auth
+                .requestMatchers(HttpMethod.POST, "/api/courses/*/enroll/").authenticated()
+                .requestMatchers(HttpMethod.GET, "/api/courses/*/contents/").authenticated()
+                .anyRequest().permitAll())                   // ≈ DjangoModelPermissionsOrAnonReadOnly
+        .httpBasic(basic -&gt; basic.authenticationEntryPoint(unauthorized))
+        .exceptionHandling(ex -&gt; ex.authenticationEntryPoint(unauthorized))
+        .sessionManagement(s -&gt; s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+        .csrf(csrf -&gt; csrf.disable());
+    return http.build();
+}
+
+@Bean
+@Order(2)
+SecurityFilterChain securityFilterChain(HttpSecurity http, ...) { ... }   // 网页
+</pre>
+</div>
+
+<ul>
+  <li><strong>无状态</strong>：不创建、也不读取会话。浏览器里登录后的会话 cookie 不能用来调用 API。</li>
+  <li><strong>为什么可以关闭 CSRF</strong>：CSRF 攻击利用的是“浏览器自动带上 cookie”。这条链只认 <code>Authorization</code> 头，浏览器不会自动为跨站请求加上它，所以没有 CSRF 风险。反过来，如果 API 也接受会话认证（DRF 默认的 <code>SessionAuthentication</code>），就必须保留 CSRF —— DRF 在这种情况下同样会检查 CSRF。</li>
+  <li><strong>401 的格式</strong>：自定义 <code>AuthenticationEntryPoint</code> 返回 <code>WWW-Authenticate: Basic realm="api"</code> 和 <code>{"detail": "Authentication credentials were not provided."}</code>；密码错误时是 <code>"Invalid username/password."</code>，与 DRF 相同。</li>
+  <li>HTTP Basic 每个请求都带着明文（Base64）密码，生产环境必须走 HTTPS；更正式的 API 通常用令牌（Spring Security 的 OAuth2 Resource Server 支持 JWT）。</li>
+</ul>
+
+<h2 id="permission">对象级权限：只有选了课才能看内容</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · permissions.py</div>
+<div class="code" data-lang="python"><pre>
+class IsEnrolled(BasePermission):
+    def has_object_permission(self, request, view, obj):
+        return obj.students.filter(
+            id=request.user.id).exists()
+
+@action(detail=True, methods=['get'],
+        serializer_class=CourseWithContentsSerializer,
+        permission_classes=[IsAuthenticated, IsEnrolled])
+def contents(self, request, *args, **kwargs):
+    return self.retrieve(request, *args, **kwargs)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · CourseApiService</div>
+<div class="code" data-lang="java"><pre>
+public CourseWithContentsDto contents(Long courseId, Long studentId,
+                                      String mediaUrl) {
+    Course course = courses.findById(courseId)
+            .orElseThrow(NotFoundException::new);        // 404
+    if (!courses.existsByIdAndStudentsId(courseId, studentId)) {
+        throw new NotEnrolledException();                 // 403
+    }
+    return CourseWithContentsDto.of(course, mediaUrl);
+}
+
+// ApiExceptionHandler：@RestControllerAdvice
+@ExceptionHandler(NotEnrolledException.class)
+@ResponseStatus(HttpStatus.FORBIDDEN)
+public Map&lt;String, String&gt; forbidden(NotEnrolledException e) {
+    return Map.of("detail", e.getMessage());
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li>先 404 后 403 的顺序和 DRF 相同：<code>get_object()</code> 找不到对象时 404，找到了再检查对象权限。</li>
+  <li><code>@RestControllerAdvice(basePackageClasses = CourseApiController.class)</code> 只作用于 API 包，网页部分出错仍然显示 HTML 错误页。</li>
+  <li>课程 → 模块 → 内容 → 条目，三层集合都在事务里转换成 DTO，各层由批量抓取加载；条目是懒加载的代理，转换前 <code>Hibernate.unproxy()</code>（第 12 章讲过）。</li>
+</ul>
+
+<h2 id="openapi">接口文档：springdoc-openapi</h2>
+
+<p>
+  DRF 的“可浏览 API”为每个端点渲染一个 HTML 页面，可以直接在浏览器里点。Spring 生态的做法是生成 <strong>OpenAPI</strong> 文档：
+  加入 <code>springdoc-openapi-starter-webmvc-ui</code> 依赖后，<code>/v3/api-docs</code> 是机器可读的 JSON 描述，<code>/swagger-ui.html</code> 是交互式页面，
+  可以填参数、带上 Basic 认证直接发请求。OpenAPI 文档还能生成各种语言的客户端代码，这是可浏览 API 做不到的。
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+@Bean
+OpenAPI educaOpenApi() {
+    return new OpenAPI()
+            .info(new Info().title("Educa API").version("1.0"))
+            .components(new Components().addSecuritySchemes("basicAuth",
+                    new SecurityScheme().type(SecurityScheme.Type.HTTP).scheme("basic")));
+}
+
+@Operation(summary = "选课", security = @SecurityRequirement(name = "basicAuth"))
+@PostMapping("/courses/{id}/enroll/")
+public Map&lt;String, Boolean&gt; enroll(...) { ... }
+</pre>
+</div>
+
+<h2 id="client">API 客户端</h2>
+
+<p>
+  书中的 <code>enroll_all.py</code> 用 requests 翻页读取所有课程，再逐个选课。Java 版是一个单文件程序（Java 11 起可以 <code>java EnrollAll.java</code> 直接运行），
+  用 JDK 自带的 <code>HttpClient</code>，JSON 用 Jackson 解析：
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django 书 · enroll_all.py</div>
+<div class="code" data-lang="python"><pre>
+while url is not None:
+    r = requests.get(url)
+    response = r.json()
+    url = response['next']
+    courses = response['results']
+    available_courses += [course['title']
+                          for course in courses]
+
+for course in courses:      # ← 只剩最后一页了
+    r = requests.post(
+        f'{base_url}courses/{course["id"]}/enroll/',
+        auth=(username, password))
+</pre></div></div>
+  <div class="sb"><div class="h">Spring 版 · api-examples/EnrollAll.java</div>
+<div class="code" data-lang="java"><pre>
+List&lt;Course&gt; available = new ArrayList&lt;&gt;();
+String url = baseUrl + "courses/";
+while (url != null) {
+    JsonNode page = json.readTree(http.send(GET(url), ofString()).body());
+    for (JsonNode c : page.get("results")) {
+        available.add(new Course(c.get("id").asLong(), c.get("title").asString()));
+    }
+    url = page.get("next").isNull() ? null : page.get("next").asString();
+}
+String credentials = Base64.getEncoder()
+        .encodeToString((username + ":" + password).getBytes(UTF_8));
+for (Course course : available) {   // 全部页的课程
+    HttpRequest request = HttpRequest.newBuilder(URI.create(
+                    baseUrl + "courses/" + course.id() + "/enroll/"))
+            .header("Authorization", "Basic " + credentials)
+            .POST(BodyPublishers.noBody()).build();
+    ...
+}
+</pre></div></div>
+</div>
+
+<p>
+  注意书中脚本的小 bug：第二个循环遍历的是 <code>courses</code> 变量 —— 翻页结束时它只剩<strong>最后一页</strong>的课程，课程超过 10 门时前面几页不会被选上。
+  Java 版遍历收集到的全部课程。脚本开头有 JBang 的依赖声明，装了 JBang 可以直接 <code>jbang api-examples/EnrollAll.java 用户名 密码</code>；
+  也可以用 <code>java --class-path &lt;jackson 的 jar&gt; api-examples/EnrollAll.java 用户名 密码</code> 运行。
+  在 Spring 应用内部调用别的 API 时，更推荐 Spring 的 <code>RestClient</code>（第 6 章用过）。
+</p>
+
+<h2 id="tests">测试</h2>
+
+<div class="code" data-lang="java" data-file="CourseApiTests.java（节选）">
+<pre>
+@Test
+void enrollRequiresBasicAuthAndNoCsrf() throws Exception {
+    mvc.perform(post("/api/courses/{id}/enroll/", jazz.getId()))
+            .andExpect(status().isUnauthorized())
+            .andExpect(header().string("WWW-Authenticate", "Basic realm=\"api\""))
+            .andExpect(jsonPath("$.detail").value("Authentication credentials were not provided."));
+    mvc.perform(post("/api/courses/{id}/enroll/", jazz.getId()).with(httpBasic("student", "secret")))
+            .andExpect(status().isOk())
+            .andExpect(jsonPath("$.enrolled").value(true))
+            .andExpect(request().sessionAttributeDoesNotExist("SPRING_SECURITY_CONTEXT"));   // 无状态
+}
+
+@Test
+void coursesPaginationFollowsDrfFormat() throws Exception {
+    mvc.perform(get("/api/courses/?page_size=2"))
+            .andExpect(jsonPath("$.count").value(5))
+            .andExpect(jsonPath("$.next").value("http://localhost/api/courses/?page_size=2&amp;page=2"));
+}
+</pre>
+</div>
+
+<p>
+  本章新增 8 个 API 测试（共 41 个）：API 根、学科分页与总数与热门课程、课程分页格式与非法页码、课程详情与 404、
+  Basic 认证与无状态、选课前后访问内容（401/403/200）、只读端点拒绝写入、OpenAPI 文档。
+  另外启动真实服务器，用 <code>EnrollAll.java</code> 翻页并完成了所有选课。
+</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 15 章 Spring 版点评 <small>springboot/Chapter15</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 与 DRF 兼容的响应格式</h4>
+    <p>分页结构、错误结构、字段命名都和书中一致，书中的客户端改一下端口就能用。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 没有 N+1</h4>
+    <p>分页查询不抓取集合，模块批量加载；热门课程一页只查一次。DRF 版的 <code>get_popular_courses</code> 每个学科一条查询。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 代码比 DRF 多</h4>
+    <p>DRF 的 ViewSet + Router + ModelSerializer 用很少的代码生成完整的 CRUD 接口。Spring 这边每个端点、每个 DTO 都要手写。换来的是完全可见的接口定义；如果接口很多，可以考虑 Spring Data REST（按仓库自动生成接口）或从 OpenAPI 文档生成代码。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 没有限流</h4>
+    <p>DRF 有 <code>throttle_classes</code>（书中没用）；Spring 没有内置限流，公开 API 通常在网关/Nginx 层做（<code>limit_req</code>），或者用 Bucket4j 之类的库。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 为什么参数用 String 接收页码</h4>
+    <p>如果写成 <code>@RequestParam Integer page</code>，<code>?page=abc</code> 会在绑定阶段失败，返回 Spring 默认的 400 错误体。用 String 接收、自己解析，才能按 DRF 的约定返回 404 <code>{"detail": "Invalid page."}</code>。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>序列化器 → record DTO；<code>SNAKE_CASE</code> 命名策略让 JSON 与 DRF 一致。</li>
+  <li>ViewSet → 显式映射的控制器方法；<code>@RestControllerAdvice</code> 统一 JSON 错误。</li>
+  <li>DRF 式分页：<code>Pageable</code> + 自定义 <code>PageResponse</code>；分页查询不要 join fetch 集合。</li>
+  <li>API 单独一条过滤器链：<code>securityMatcher("/api/**")</code>、HTTP Basic、无状态、关闭 CSRF。</li>
+  <li>对象级权限写在服务层，先 404 后 403。</li>
+  <li>springdoc 生成 OpenAPI 文档和 Swagger UI；客户端用 JDK <code>HttpClient</code>。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>加一个 <code>GET /api/students/me/courses/</code>，返回当前用户已选的课程（分页）。</li>
+    <li>改用令牌认证：引入 <code>spring-boot-starter-oauth2-resource-server</code>，用 JWT 保护选课接口。</li>
+    <li>让条目同时返回结构化数据和渲染好的 HTML（提示：<code>SpringTemplateEngine.process(模板, 片段选择器, 上下文)</code>）。</li>
+    <li>用 OpenAPI Generator 从 <code>/v3/api-docs</code> 生成一个 Java 客户端，重写 <code>EnrollAll</code>。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,79 @@
+# 生产环境（≈ 书中的 docker-compose.yml）：
+#   docker compose -f compose.prod.yaml up -d --build
+# 与书中的区别：
+#   - 不需要 daphne 容器：Tomcat 在同一个端口上同时处理 HTTP 和 WebSocket；
+#   - 不需要 uWSGI 和 wait-for-it.sh：depends_on + healthcheck 等数据库就绪后再启动应用；
+#   - 数据放在命名卷里，密码放在 .env 里（参考 .env.example），不写进 compose 文件。
+# （compose.yaml 是本地开发用的，只有 Redis。）
+services:
+
+  db:
+    image: postgres:16
+    restart: always
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-educa}
+      POSTGRES_USER: ${POSTGRES_USER:-educa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?在 .env 里设置 POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      retries: 10
+
+  cache:
+    image: redis:7.2
+    restart: always
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  web:
+    build: .
+    restart: always
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      POSTGRES_DB: ${POSTGRES_DB:-educa}
+      POSTGRES_USER: ${POSTGRES_USER:-educa}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      SITE_DOMAIN: ${SITE_DOMAIN:-educaproject.com}
+      EMAIL_HOST: ${EMAIL_HOST:-}
+      EMAIL_HOST_USER: ${EMAIL_HOST_USER:-}
+      EMAIL_HOST_PASSWORD: ${EMAIL_HOST_PASSWORD:-}
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75
+    volumes:
+      - media:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+      interval: 10s
+      start_period: 60s
+      retries: 6
+
+  nginx:
+    image: nginx:1.27
+    restart: always
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:-educaproject.com}
+    volumes:
+      - ./deploy/nginx:/etc/nginx/templates:ro   # *.template 会用环境变量渲染成 /etc/nginx/conf.d/*.conf
+      - ./deploy/certs:/etc/nginx/certs:ro
+      - media:/app/media:ro                       # 上传的文件由 Nginx 直接提供
+    depends_on:
+      web:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  redisdata:
+  media:

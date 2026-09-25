@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      xmlns:sec="http://www.thymeleaf.org/extras/spring-security"
+      layout:decorate="~{blog/base}">
+<head>
+  <title th:text="${post.title}">Post</title>
+</head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="${post.title}">Post title</h1>
+  <p class="date">
+    Published <span th:text="${#temporals.format(post.publish, 'MMM d, yyyy, HH:mm')}">date</span>
+    by <span th:text="${post.author}">author</span>
+  </p>
+  <div>
+    <span th:if="${isFavourite}">❤️</span>
+    <!--/* 改数据要用 POST 表单；th:action 会自动插入隐藏的 CSRF 字段（≈ {% csrf_token %}） */-->
+    <form th:unless="${isFavourite}" th:action="@{/blog/favourite/add/{id}/(id=${post.id})}" method="post">
+      <button type="submit">Add to favourites</button>
+    </form>
+  </div>
+  <div th:utext="${#text.linebreaks(post.body)}"></div>
+</div>
+</body>
+</html>

@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{shop/base}">
+<head><title th:text="${product.name}">Product</title></head>
+<body>
+<div layout:fragment="content">
+  <div class="product-detail">
+    <img th:src="@{${product.imageUrl}}">
+    <h1 th:text="${product.name}">name</h1>
+    <h2><a th:href="@{${product.category.absoluteUrl}}" th:text="${product.category}">category</a></h2>
+    <p class="price" th:text="${'$' + product.price}">$0.00</p>
+    <!--/* {{ cart_product_form }}：数量下拉框（1–20）+ 隐藏的 override 字段 */-->
+    <form th:action="@{/cart/add/{id}/(id=${product.id})}" method="post" th:object="${cartProductForm}">
+      <select th:field="*{quantity}">
+        <option th:each="i : ${#numbers.sequence(1, 20)}" th:value="${i}" th:text="${i}">1</option>
+      </select>
+      <input type="hidden" name="override" value="false">
+      <input type="submit" value="Add to cart">
+    </form>
+    <div th:utext="${#text.linebreaks(product.description)}"></div>
+  </div>
+</div>
+</body>
+</html>

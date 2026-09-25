@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Sign up</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Sign up</h1>
+  <div class="module">
+    <p>Enter your details to create an account:</p>
+    <form method="post" th:object="${form}">
+      <th:block th:replace="~{fragments/forms :: field('username', 'Username', 'text')}"></th:block>
+      <th:block th:replace="~{fragments/forms :: field('password1', 'Password', 'password')}"></th:block>
+      <th:block th:replace="~{fragments/forms :: field('password2', 'Password confirmation', 'password')}"></th:block>
+      <p><input type="submit" value="Create my account"></p>
+    </form>
+  </div>
+</div>
+</body>
+</html>

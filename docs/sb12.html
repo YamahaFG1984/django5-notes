@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 12 章 · 构建在线学习平台 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="12">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 12 章 · 项目四：在线学习平台</span>
+<h1>构建在线学习平台</h1>
+<p class="lede">
+  最后一个项目 Educa 是一个在线学习平台：讲师创建课程，课程分成模块，模块里放各种类型的内容（文字、图片、视频、文件）。
+  这一章只搭数据模型，但它集中了 ORM 里最有意思的几个话题：初始数据（fixtures）、模型继承、
+  指向“任意一种模型”的外键，以及自定义字段。Django 用 <code>GenericForeignKey</code> 和自定义 <code>OrderField</code> 解决；
+  JPA 的答案是<strong>继承映射</strong>和<strong>实体监听器</strong> —— 思路不同，但结果更“关系型”。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>建立 Subject → Course → Module → Content 的模型，理解 <code>@OrderBy</code> 与 <code>Meta.ordering</code> 的区别</li>
+    <li>写一个 <code>--loaddata</code> 命令读取 Django 格式的 fixture，并处理“显式主键后序列不前进”的问题</li>
+    <li>对比 Django 的三种模型继承与 JPA 的三种继承策略，用 JOINED 继承代替 <code>GenericForeignKey</code></li>
+    <li>用自定义注解 + JPA 实体监听器实现 <code>OrderField</code>，并让监听器成为 Spring Bean</li>
+    <li>用户组与权限代码：为下一章的权限控制做准备</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch12.html">Django 版第 12 章</a>；本章代码在 <code>springboot/Chapter12/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="overview">全景：数据模型</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="Educa 数据模型：Subject 一对多 Course，Course 一对多 Module，Module 一对多 Content，Content 一对一指向 Item；Item 是抽象父类，有 TextItem、VideoItem、ImageItem、FileItem 四个子类；Course 的 owner 和 Item 的 owner 都指向 User">
+  <rect class="bx" x="10" y="20" width="140" height="56" rx="10"/>
+  <text class="ttl" x="80" y="44" text-anchor="middle">Subject</text>
+  <text class="sm" x="80" y="63" text-anchor="middle">学科</text>
+
+  <rect class="bx-b" x="200" y="20" width="140" height="56" rx="10"/>
+  <text class="ttl on-b" x="270" y="44" text-anchor="middle">Course</text>
+  <text class="sm" x="270" y="63" text-anchor="middle">课程（owner = 讲师）</text>
+
+  <rect class="bx-b" x="390" y="20" width="140" height="56" rx="10"/>
+  <text class="ttl on-b" x="460" y="44" text-anchor="middle">Module</text>
+  <text class="sm" x="460" y="63" text-anchor="middle">模块（order）</text>
+
+  <rect class="bx-b" x="580" y="20" width="170" height="56" rx="10"/>
+  <text class="ttl on-b" x="665" y="44" text-anchor="middle">Content</text>
+  <text class="sm" x="665" y="63" text-anchor="middle">内容（order, item_id）</text>
+
+  <path class="ln" d="M152 48 H196" marker-end="url(#ar)"/>
+  <path class="ln" d="M342 48 H386" marker-end="url(#ar)"/>
+  <path class="ln" d="M532 48 H576" marker-end="url(#ar)"/>
+  <text class="sm" x="174" y="40" text-anchor="middle">1:N</text>
+  <text class="sm" x="364" y="40" text-anchor="middle">1:N</text>
+  <text class="sm" x="554" y="40" text-anchor="middle">1:N</text>
+
+  <rect class="bx-a" x="560" y="130" width="190" height="60" rx="10"/>
+  <text class="ttl on-a" x="655" y="154" text-anchor="middle">Item（抽象）</text>
+  <text class="mono sm" x="655" y="173" text-anchor="middle">owner, title, created…</text>
+  <path class="ln-a" d="M665 78 V126" marker-end="url(#ar-a)"/>
+  <text class="sm" x="690" y="106">1:1 外键</text>
+
+  <rect class="bx-g" x="170" y="250" width="120" height="50" rx="10"/>
+  <text class="ttl on-g" x="230" y="280" text-anchor="middle">TextItem</text>
+  <rect class="bx-g" x="310" y="250" width="120" height="50" rx="10"/>
+  <text class="ttl on-g" x="370" y="280" text-anchor="middle">VideoItem</text>
+  <rect class="bx-g" x="450" y="250" width="120" height="50" rx="10"/>
+  <text class="ttl on-g" x="510" y="280" text-anchor="middle">ImageItem</text>
+  <rect class="bx-g" x="590" y="250" width="120" height="50" rx="10"/>
+  <text class="ttl on-g" x="650" y="280" text-anchor="middle">FileItem</text>
+  <path class="ln-g" d="M230 248 V220 H650"/>
+  <path class="ln-g" d="M650 248 V194" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M370 248 V220"/>
+  <path class="ln-g" d="M510 248 V220"/>
+  <text class="sm on-g" x="440" y="212" text-anchor="middle">继承（JOINED）</text>
+
+  <rect class="bx-d" x="10" y="130" width="140" height="56" rx="10"/>
+  <text class="ttl" x="80" y="154" text-anchor="middle">User</text>
+  <text class="sm" x="80" y="173" text-anchor="middle">auth_user</text>
+  <path class="ln-d" d="M152 150 H270 V80" marker-end="url(#ar)"/>
+  <text class="sm" x="215" y="143" text-anchor="middle">owner</text>
+</svg>
+<figcaption>图 S12-1　Content 用真正的外键指向继承体系的根 Item，Hibernate 按鉴别列实例化具体子类</figcaption>
+</figure>
+
+<h2 id="project">项目与账户</h2>
+
+<p>
+  Educa 和前几章一样用 H2 文件库（原书这几章用 SQLite，第 17 章两边都换成 PostgreSQL），Flyway 手写迁移，
+  <code>ddl-auto=validate</code> 让 Hibernate 在启动时检查实体和表结构是否一致。本章新出现的是<strong>用户组与权限</strong>：
+  Django 为每个模型自动生成 <code>add_/change_/delete_/view_</code> 四个权限，组把权限打包，再把用户加进组。
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · contrib.auth（自动生成）</div>
+<div class="code" data-lang="python"><pre>
+# 迁移时自动为 Course 创建四个权限：
+#   courses.add_course / change_course /
+#   delete_course / view_course
+user.has_perm('courses.add_course')
+# 超级用户永远返回 True
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · 权限代码作为 authority</div>
+<div class="code" data-lang="java"><pre>
+// CurrentUser.from(user)：权限来自用户所在的组
+Set&lt;String&gt; names = new LinkedHashSet&lt;&gt;();
+names.add("ROLE_USER");
+if (user.isSuperuser()) {
+    names.add("ROLE_ADMIN");
+    names.addAll(Permissions.ALL);   // ≈ 超级用户拥有全部权限
+}
+user.getGroups().forEach(g -&gt; names.addAll(g.getPermissions()));
+</pre></div></div>
+</div>
+
+<ul>
+  <li>Spring Security 只有一个概念：<code>GrantedAuthority</code>（一个字符串）。“角色”只是带 <code>ROLE_</code> 前缀的 authority；权限代码 <code>courses.add_course</code> 直接作为 authority 放进去，下一章用 <code>hasAuthority('courses.add_course')</code> 检查。</li>
+  <li>表结构简化为 <code>auth_group</code>、<code>auth_group_permissions(group_id, codename)</code>、<code>auth_user_groups</code>，组的权限用 <code>@ElementCollection Set&lt;String&gt;</code> 映射。Django 还有一张 <code>auth_permission</code> 表和 <code>content_type</code> 关联，这里用不上。</li>
+  <li>登录时用 <code>@EntityGraph(attributePaths = {"groups", "groups.permissions"})</code> 一次查出用户、组和权限。</li>
+</ul>
+
+<h2 id="models">课程、模块与排序</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · models.py</div>
+<div class="code" data-lang="python"><pre>
+class Course(models.Model):
+    owner = models.ForeignKey(User,
+        related_name='courses_created', on_delete=models.CASCADE)
+    subject = models.ForeignKey(Subject,
+        related_name='courses', on_delete=models.CASCADE)
+    title = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=200, unique=True)
+    overview = models.TextField()
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-created']
+
+class Module(models.Model):
+    course = models.ForeignKey(Course,
+        related_name='modules', on_delete=models.CASCADE)
+    ...
+    order = OrderField(blank=True, for_fields=['course'])
+
+    class Meta:
+        ordering = ['order']
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · Course.java / Module.java</div>
+<div class="code" data-lang="java"><pre>
+@Entity @Table(name = "courses_course")
+public class Course {
+    @ManyToOne(fetch = LAZY, optional = false)
+    @JoinColumn(name = "owner_id")
+    private User owner;
+    ...
+    /** related_name='modules'；Module 的 ordering = ['order'] */
+    @OneToMany(mappedBy = "course", cascade = ALL, orphanRemoval = true)
+    @OrderBy("order")
+    private List&lt;Module&gt; modules = new ArrayList&lt;&gt;();
+}
+
+@Entity @Table(name = "courses_module")
+@EntityListeners(OrderFieldListener.class)
+public class Module {
+    @OrderField(scope = "course")
+    @Column(name = "\"order\"", nullable = false)
+    private Integer order;
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li><strong>默认排序</strong>：Django 的 <code>Meta.ordering</code> 作用于该模型的<em>所有</em>查询。JPA 没有全局默认排序：<code>@OrderBy</code> 只作用于集合属性（<code>course.getModules()</code>），仓库查询要在方法名里写 <code>OrderByOrderAsc</code> 或在 JPQL 里写 <code>order by</code>。好处是排序总是显式可见的。</li>
+  <li><strong>反向关系</strong>：<code>related_name='modules'</code> 在 JPA 里是 <code>mappedBy</code> 的一对多集合，需要时才声明。<code>courses_created</code> 这类用得少的反向关系就不声明，用仓库方法 <code>findByOwnerId</code> 查询即可。</li>
+  <li><strong>关键字列名</strong>：<code>order</code> 是 SQL 保留字。Django 自动给列名加引号；JPA 要自己写 <code>@Column(name = "\"order\"")</code>，迁移脚本里同样要写 <code>"order"</code>。</li>
+  <li><strong>级联删除</strong>：<code>on_delete=CASCADE</code> 在 Django 里由 ORM 模拟；这里在迁移脚本的外键上写 <code>ON DELETE CASCADE</code>，由数据库保证；实体上的 <code>cascade = ALL, orphanRemoval = true</code> 让通过 JPA 删除课程时也把模块一起删掉。</li>
+</ul>
+
+<h2 id="fixtures">初始数据：fixtures 与 loaddata</h2>
+
+<p>
+  书中先在 Admin 里录入几个学科，用 <code>dumpdata</code> 导出成 <code>courses/fixtures/subjects.json</code>，新环境里 <code>loaddata subjects</code> 一键导入。
+  Spring 没有 fixture 机制。常见做法有两种：写成 Flyway 的数据迁移（<code>INSERT</code> 语句），或者写一个导入命令。
+  学科属于“示例数据”而不是“表结构的一部分”，所以这里选后者 —— 并且直接读取 Django 导出的同一个 JSON 文件。
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · 命令行</div>
+<div class="code" data-lang="bash"><pre>
+python manage.py dumpdata courses --indent=2 \
+    --output=courses/fixtures/subjects.json
+python manage.py loaddata subjects.json
+# Installed 4 object(s) from 1 fixture(s)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · 同一个 JSON，自己写的命令</div>
+<div class="code" data-lang="bash"><pre>
+# fixtures/subjects.json 放在 src/main/resources 下
+java -jar target/educa-1.0.0.jar --loaddata=subjects
+# Installed 4 object(s) from 1 fixture(s)
+</pre></div></div>
+</div>
+
+<div class="code" data-lang="java" data-file="LoadDataCommand.java（节选）">
+<pre>
+/** 整个文件在一个事务里导入：要么全部成功，要么什么都不改（loaddata 也是这样） */
+public int load(String name) {
+    List&lt;FixtureObject&gt; objects = List.of(objectMapper.readValue(in, FixtureObject[].class));
+    return transactions.execute(status -&gt; {
+        for (FixtureObject object : objects) {
+            subjects.upsert(object.pk(), object.fields().title(), object.fields().slug());
+        }
+        resetIdentity("courses_subject");
+        return objects.size();
+    });
+}
+
+// SubjectRepository：按主键“有则更新、无则插入”（loaddata 的语义），SQL 标准的 MERGE
+@Modifying(clearAutomatically = true)
+@NativeQuery("""
+        MERGE INTO courses_subject t
+        USING (VALUES (CAST(:id AS BIGINT), CAST(:title AS VARCHAR(200)), CAST(:slug AS VARCHAR(200)))) AS v(id, title, slug)
+        ON t.id = v.id
+        WHEN MATCHED THEN UPDATE SET title = v.title, slug = v.slug
+        WHEN NOT MATCHED THEN INSERT (id, title, slug) VALUES (v.id, v.title, v.slug)
+        """)
+void upsert(@Param("id") Long id, @Param("title") String title, @Param("slug") String slug);
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 显式插入主键之后，要把序列往前推</div>
+  <p>
+    fixture 里带着主键（<code>"pk": 1</code>）。用显式主键插入后，数据库的自增序列并不会跟着前进 ——
+    下一次普通插入拿到的新主键还是 1，立刻主键冲突。Django 的 <code>loaddata</code> 会在最后自动执行 <code>sqlsequencereset</code>，
+    我们只能自己做，而且 H2 和 PostgreSQL 的语法不同：H2 用 <code>ALTER TABLE … ALTER COLUMN id RESTART WITH n</code>，
+    PostgreSQL 用 <code>setval(pg_get_serial_sequence(...), max)</code>。这正是 ORM 平时替我们屏蔽掉的差异；第 17 章会在真正的 PostgreSQL 上测试这段代码。
+  </p>
+</div>
+
+<p>
+  命令的写法和第 1 章的 <code>--createsuperuser</code> 一样：一个 <code>ApplicationRunner</code>，只在命令行带了 <code>--loaddata</code> 时执行，执行完主动退出。
+  因为是 Web 应用，Tomcat 已经启动了，所以要调用 <code>SpringApplication.exit()</code> 关掉容器，否则进程不会结束。
+</p>
+
+<h2 id="inheritance">多态内容：GenericForeignKey 与 JPA 继承</h2>
+
+<p>
+  模块里的“内容”可以是文字、视频、图片或文件，它们有公共字段（owner、title、created、updated），也有各自的字段。
+  问题是：<code>Content</code> 怎么指向“四种模型中的任意一种”？
+</p>
+
+<div class="tw">
+<table>
+  <tr><th>Django 的模型继承</th><th>JPA 的对应做法</th><th>表结构</th></tr>
+  <tr><td>抽象基类 <code>abstract = True</code>（书中 <code>ItemBase</code> 用的）</td><td><code>@MappedSuperclass</code></td><td>没有公共表，每个子类一张完整的表</td></tr>
+  <tr><td>多表继承（父类是普通模型）</td><td><code>@Inheritance(strategy = JOINED)</code>（本项目用的）</td><td>公共字段一张表，子类各一张表，主键相同</td></tr>
+  <tr><td>代理模型 <code>proxy = True</code></td><td>没有直接对应（可以用同一张表的不同实体类或普通 Java 子类）</td><td>共用父类的表</td></tr>
+  <tr><td>—</td><td><code>@Inheritance(strategy = SINGLE_TABLE)</code></td><td>所有子类挤进一张表，用类型列区分，子类字段必须可空</td></tr>
+</table>
+</div>
+
+<p>
+  书中选了抽象基类，于是四种条目是四张毫无关系的表，<code>Content</code> 只能用 <code>GenericForeignKey</code>：
+  存一个 <code>content_type</code>（哪张表）加一个 <code>object_id</code>（哪一行）。它很灵活，但数据库层面<strong>没有外键约束</strong>，
+  也不能 join 查询。JPA 的 JOINED 继承给了四个子类一张公共父表 <code>courses_item</code>，<code>Content.item_id</code> 就可以是真正的外键：
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · 抽象基类 + 泛型外键</div>
+<div class="code" data-lang="python"><pre>
+class ItemBase(models.Model):
+    owner = models.ForeignKey(User,
+        related_name='%(class)s_related', ...)
+    title = models.CharField(max_length=250)
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+    class Meta:
+        abstract = True
+
+class Text(ItemBase):
+    content = models.TextField()
+
+class Content(models.Model):
+    module = models.ForeignKey(Module, ...)
+    content_type = models.ForeignKey(ContentType,
+        limit_choices_to={'model__in': (
+            'text', 'video', 'image', 'file')}, ...)
+    object_id = models.PositiveIntegerField()
+    item = GenericForeignKey('content_type', 'object_id')
+    order = OrderField(blank=True, for_fields=['module'])
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · JOINED 继承 + 普通外键</div>
+<div class="code" data-lang="java"><pre>
+@Entity @Table(name = "courses_item")
+@Inheritance(strategy = InheritanceType.JOINED)
+@DiscriminatorColumn(name = "item_type", length = 20)
+public abstract class Item {
+    @ManyToOne(fetch = LAZY, optional = false)
+    private User owner;
+    private String title;
+    @CreationTimestamp private OffsetDateTime created;
+    @UpdateTimestamp   private OffsetDateTime updated;
+
+    /** ≈ item._meta.model_name */
+    public abstract String getModelName();
+}
+
+@Entity @Table(name = "courses_text")
+@DiscriminatorValue("text")
+@PrimaryKeyJoinColumn(name = "item_id")
+public class TextItem extends Item {
+    private String content;
+}
+
+@Entity @Table(name = "courses_content")
+public class Content {
+    @ManyToOne(fetch = LAZY, optional = false)
+    private Module module;
+    @OneToOne(fetch = LAZY, optional = false,
+              cascade = ALL, orphanRemoval = true)
+    @JoinColumn(name = "item_id", unique = true)
+    private Item item;   // 真正的外键
+}
+</pre></div></div>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="两种表结构对比。左边 Django：courses_content 表有 content_type_id 和 object_id 两列，分别指向 django_content_type 和四张互不相关的条目表中的一行，没有外键约束。右边 Spring：courses_content 的 item_id 是外键，指向公共表 courses_item，courses_text 等子表的主键 item_id 同时是指向 courses_item 的外键">
+  <text class="ttl" x="180" y="22" text-anchor="middle">Django：泛型外键</text>
+  <rect class="bx-d" x="20" y="40" width="170" height="70" rx="8"/>
+  <text class="ttl" x="105" y="62" text-anchor="middle">courses_content</text>
+  <text class="mono sm" x="105" y="82" text-anchor="middle">content_type_id</text>
+  <text class="mono sm" x="105" y="99" text-anchor="middle">object_id</text>
+  <rect class="bx" x="220" y="40" width="140" height="44" rx="8"/>
+  <text class="mono sm" x="290" y="67" text-anchor="middle">django_content_type</text>
+  <rect class="bx" x="220" y="110" width="140" height="30" rx="6"/>
+  <text class="mono sm" x="290" y="130" text-anchor="middle">courses_text</text>
+  <rect class="bx" x="220" y="146" width="140" height="30" rx="6"/>
+  <text class="mono sm" x="290" y="166" text-anchor="middle">courses_video</text>
+  <rect class="bx" x="220" y="182" width="140" height="30" rx="6"/>
+  <text class="mono sm" x="290" y="202" text-anchor="middle">courses_image / file</text>
+  <path class="ln" d="M192 62 H216" marker-end="url(#ar)"/>
+  <path class="ln-d" d="M150 112 V160 H216" stroke-dasharray="5 4"/>
+  <text class="sm" x="190" y="235" text-anchor="middle">虚线：只是一个整数，数据库不知道它指向哪里</text>
+
+  <text class="ttl on-g" x="580" y="22" text-anchor="middle">Spring：JOINED 继承</text>
+  <rect class="bx-g" x="420" y="40" width="150" height="56" rx="8"/>
+  <text class="ttl on-g" x="495" y="62" text-anchor="middle">courses_content</text>
+  <text class="mono sm" x="495" y="82" text-anchor="middle">item_id → FK</text>
+  <rect class="bx-a" x="600" y="40" width="150" height="56" rx="8"/>
+  <text class="ttl on-a" x="675" y="62" text-anchor="middle">courses_item</text>
+  <text class="mono sm" x="675" y="82" text-anchor="middle">id, item_type, title…</text>
+  <rect class="bx-g" x="560" y="130" width="160" height="30" rx="6"/>
+  <text class="mono sm" x="640" y="150" text-anchor="middle">courses_text(item_id)</text>
+  <rect class="bx-g" x="560" y="170" width="160" height="30" rx="6"/>
+  <text class="mono sm" x="640" y="190" text-anchor="middle">courses_video(item_id)</text>
+  <path class="ln-g" d="M572 68 H596" marker-end="url(#ar-g)"/>
+  <path class="ln-a" d="M722 145 H740 V100" marker-end="url(#ar-a)"/>
+  <path class="ln-a" d="M722 185 H740 V145"/>
+  <text class="sm" x="580" y="235" text-anchor="middle">实线：都是真正的外键，数据库保证引用完整</text>
+</svg>
+<figcaption>图 S12-2　同一个需求的两种表结构</figcaption>
+</figure>
+
+<ul>
+  <li><strong>查询</strong>：加载 <code>Content</code> 时 Hibernate 用 <code>left join</code> 把父表和所有子表连起来，按鉴别列 <code>item_type</code> 实例化 <code>TextItem</code>、<code>VideoItem</code>…… 模板里调用 <code>item.getModelName()</code> 即可，不需要书中自定义的 <code>model_name</code> 过滤器。</li>
+  <li><strong>多态查询</strong>：<code>select i from Item i where i.owner = :owner</code> 一次查出某个讲师的所有条目，不管什么类型 —— 泛型外键做不到这一点。</li>
+  <li><strong>删除</strong>：<code>cascade = ALL, orphanRemoval = true</code> 让删除 <code>Content</code> 时自动删除它的条目；书中要先 <code>content.item.delete()</code> 再 <code>content.delete()</code>（第 13 章的 <code>ContentDeleteView</code>）。</li>
+  <li><strong>代价</strong>：每加一种内容类型，要新建一张子表并修改迁移；JOINED 查询要多 join 几张表。对这个项目的规模来说完全不是问题。</li>
+</ul>
+
+<div class="box warn">
+  <div class="t">&#9888; 懒加载的父类引用是“代理”</div>
+  <p>
+    <code>Content.item</code> 是 <code>LAZY</code> 的。如果没有用 <code>@EntityGraph</code> 或 join fetch 把它一起查出来，
+    <code>content.getItem()</code> 返回的是 Hibernate 生成的 <code>Item</code> 代理子类，<strong>不是</strong> <code>TextItem</code>，
+    <code>instanceof TextItem</code> 和 <code>switch</code> 模式匹配都会失败。需要按具体类型处理时，先 <code>Hibernate.unproxy(item)</code>。
+    第 14、15 章都会遇到这个问题。
+  </p>
+</div>
+
+<h2 id="orderfield">自定义排序字段：注解 + 实体监听器</h2>
+
+<p>
+  书中写了一个 <code>OrderField</code>：保存新对象时，如果没指定顺序，就取“同一门课程（或同一个模块）里最大的序号 + 1”。
+  Django 的做法是继承 <code>PositiveIntegerField</code> 并重写 <code>pre_save()</code>。
+  JPA 没有“自定义字段类型带保存逻辑”这种东西，对应的机制是<strong>实体生命周期回调</strong>：<code>@PrePersist</code>、<code>@PreUpdate</code>……
+  再配一个注解标出“哪个字段、按什么范围编号”：
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · fields.py</div>
+<div class="code" data-lang="python"><pre>
+class OrderField(models.PositiveIntegerField):
+    def __init__(self, for_fields=None, *args, **kwargs):
+        self.for_fields = for_fields
+        super().__init__(*args, **kwargs)
+
+    def pre_save(self, model_instance, add):
+        if getattr(model_instance, self.attname) is None:
+            try:
+                qs = self.model.objects.all()
+                if self.for_fields:
+                    query = {field: getattr(model_instance, field)
+                             for field in self.for_fields}
+                    qs = qs.filter(**query)
+                last_item = qs.latest(self.attname)
+                value = getattr(last_item, self.attname) + 1
+            except ObjectDoesNotExist:
+                value = 0
+            setattr(model_instance, self.attname, value)
+            return value
+        return super().pre_save(model_instance, add)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · OrderField + OrderFieldListener</div>
+<div class="code" data-lang="java"><pre>
+@Target(FIELD) @Retention(RUNTIME)
+public @interface OrderField {
+    String scope();   // ≈ for_fields
+}
+
+@Component
+public class OrderFieldListener {
+    private final ObjectProvider&lt;EntityManagerFactory&gt; emf;
+
+    @PrePersist
+    public void assignOrder(Object entity) {
+        ReflectionUtils.doWithFields(entity.getClass(), field -&gt; {
+            ... // 已有值就跳过
+            EntityManager em = EntityManagerFactoryUtils
+                    .getTransactionalEntityManager(emf.getObject());
+            Integer max = em.createQuery(
+                    "select max(e.%s) from %s e where e.%s = :scope"
+                        .formatted(...), Integer.class)
+                .setParameter("scope", scope)
+                .setFlushMode(FlushModeType.COMMIT)
+                .getSingleResult();
+            field.set(entity, max == null ? 0 : max + 1);
+        }, f -&gt; f.isAnnotationPresent(OrderField.class));
+    }
+}
+</pre></div></div>
+</div>
+
+<p>要让它工作，有三个细节，每一个都是真实踩过的坑：</p>
+
+<ol>
+  <li>
+    <strong>监听器默认不是 Spring Bean。</strong>JPA 规范规定监听器由持久化提供者（Hibernate）用无参构造器创建，里面 <code>@Autowired</code> 的字段全是 <code>null</code>。
+    要让 Hibernate 从 Spring 容器里取监听器，得告诉它用 <code>SpringBeanContainer</code>：
+<div class="code" data-lang="java"><pre>
+@Bean
+HibernatePropertiesCustomizer springBeanContainer(ConfigurableListableBeanFactory beanFactory) {
+    return props -&gt; props.put(AvailableSettings.BEAN_CONTAINER, new SpringBeanContainer(beanFactory));
+}
+</pre></div>
+  </li>
+  <li>
+    <strong>不能直接注入 EntityManager。</strong>监听器是在构建 <code>EntityManagerFactory</code> 的过程中创建的，这时工厂本身还不存在 —— 构造器注入会形成循环依赖。
+    解决办法是注入 <code>ObjectProvider&lt;EntityManagerFactory&gt;</code>，用到时再取，并通过 <code>EntityManagerFactoryUtils</code> 拿到当前事务绑定的 <code>EntityManager</code>。
+  </li>
+  <li>
+    <strong>查询时不能触发自动 flush。</strong><code>@PrePersist</code> 发生在 persist 的过程中，这时再执行查询，Hibernate 默认会先 flush 持久化上下文 ——
+    正在保存的这个对象还没准备好，可能导致异常或重复插入。<code>setFlushMode(FlushModeType.COMMIT)</code> 让这次查询跳过自动 flush。
+  </li>
+</ol>
+
+<p>
+  这样一来，<code>Module</code> 和 <code>Content</code> 上各加一个 <code>@OrderField(scope = "course")</code> / <code>@OrderField(scope = "module")</code> 和
+  <code>@EntityListeners(OrderFieldListener.class)</code> 就有了和书中一样的行为。
+</p>
+
+<h2 id="auth">登录与登出</h2>
+
+<p>
+  书中直接使用 <code>django.contrib.auth</code> 的 <code>LoginView</code> 和 <code>LogoutView</code>。Spring 这边在 <code>SecurityConfig</code> 里配置表单登录，
+  两个只渲染模板的页面用 <code>ViewControllerRegistry</code> 注册（≈ 只有 <code>template_name</code> 的 <code>TemplateView</code>）：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+http.formLogin(form -&gt; form.loginPage("/accounts/login/").defaultSuccessUrl("/").permitAll())
+    .logout(logout -&gt; logout.logoutUrl("/accounts/logout/").logoutSuccessUrl("/accounts/logged-out/"));
+
+registry.addViewController("/accounts/login/").setViewName("registration/login");
+registry.addViewController("/accounts/logged-out/").setViewName("registration/logged_out");
+</pre>
+</div>
+
+<p>
+  登出必须用 POST（Django 5 起 <code>LogoutView</code> 也不再接受 GET），所以 <code>base.html</code> 里的 “Sign out” 是一个带 CSRF 令牌的小表单。
+  书中这一章还用 Django Admin 录入课程和模块（<code>ModuleInline</code>）；Spring 版没有 Admin，下一章直接做讲师自己的课程管理界面。
+</p>
+
+<h2 id="tests">测试</h2>
+
+<div class="code" data-lang="java" data-file="CourseModelTests.java（节选）">
+<pre>
+@Test
+void orderFieldNumbersModulesWithinEachCourse() {
+    Module m1 = modules.save(new Module(c1, "Module 1", ""));
+    Module m2 = modules.save(new Module(c1, "Module 2", ""));
+    Module other = modules.save(new Module(c2, "Module 1", ""));
+    assertThat(m1.getOrder()).isZero();
+    assertThat(m2.getOrder()).isEqualTo(1);
+    assertThat(other.getOrder()).isZero();   // 每门课程单独编号（for_fields=['course']）
+}
+
+@Test
+void contentsArePolymorphicAndOrderedPerModule() {
+    contents.save(new Content(module, new TextItem(instructor, "Intro", "Hello")));
+    contents.save(new Content(module, new VideoItem(instructor, "Lecture", "https://…")));
+    em.flush();
+    em.clear();
+    List&lt;Content&gt; loaded = contents.findByModuleIdOrderByOrderAsc(module.getId());
+    assertThat(loaded).extracting(c -&gt; c.getItem().getModelName()).containsExactly("text", "video");
+}
+</pre>
+</div>
+
+<p>
+  本章 5 个测试：排序字段（按范围编号、显式值不覆盖）、多态加载与多态查询、删除内容时级联删除条目、
+  <code>loaddata</code> 可重复执行且之后的普通插入不会主键冲突、登录页面。
+</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 12 章 Spring 版点评 <small>springboot/Chapter12</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 用真正的外键代替泛型外键</h4>
+    <p>数据库能保证 <code>Content</code> 指向的条目一定存在；可以 join、可以多态查询；删除时由级联处理，不会留下孤儿行。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> fixture 格式保持兼容</h4>
+    <p>直接读取 Django 的 <code>subjects.json</code>，导入在一个事务里完成，可以重复执行，并处理了序列重置。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> “最大值 + 1”有并发问题（书中也一样）</h4>
+    <p>两个请求同时给同一门课添加模块，可能读到同一个最大值，得到两个相同的序号。数据库里没有 <code>unique(course_id, "order")</code> 约束，所以不会报错，只是顺序不确定。要彻底避免，可以在添加时锁住课程行（<code>@Lock(PESSIMISTIC_WRITE)</code>），或者接受这种情况 —— 下一章的拖拽排序会把序号重新写一遍。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 没有 Admin</h4>
+    <p>Django Admin 让你零代码录入课程、模块（内联编辑）；Spring 版这一章只能通过测试或命令行造数据，下一章的讲师后台才补上界面。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 什么时候仍然需要“泛型外键”</h4>
+    <p>如果被引用的类型事先不知道、或者来自不同的模块（比如“评论可以挂在任何东西上”），继承就不合适了。JPA 里可以用 Hibernate 的 <code>@Any</code> 映射，或者像第 7 章的活动流那样手工存 <code>target_type</code> + <code>target_id</code>，自己负责加载。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>权限代码直接作为 <code>GrantedAuthority</code>，来自用户所在的组；超级用户拥有全部权限。</li>
+  <li>JPA 没有全局默认排序：集合用 <code>@OrderBy</code>，查询自己写排序。</li>
+  <li>fixture 用自定义 <code>--loaddata</code> 命令导入：<code>MERGE</code> 按主键 upsert，最后重置自增序列。</li>
+  <li><code>@Inheritance(JOINED)</code> 给多种内容类型一张公共父表，<code>Content</code> 用真正的外键指向它；懒加载的引用是代理，按类型处理前要 unproxy。</li>
+  <li>自定义保存逻辑用实体监听器；监听器要成为 Spring Bean 需要 <code>SpringBeanContainer</code>，依赖 <code>EntityManagerFactory</code> 时用 <code>ObjectProvider</code> 延迟获取。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>把 <code>Item</code> 的继承策略改成 <code>SINGLE_TABLE</code>，需要怎样修改迁移脚本？比较两种策略下加载 <code>Content</code> 生成的 SQL。</li>
+    <li>给 <code>--loaddata</code> 加上一个 <code>--dumpdata=subjects</code> 的反向命令，输出与 Django 兼容的 JSON。</li>
+    <li>给 <code>courses_module</code> 加上 <code>unique(course_id, "order")</code> 约束，然后想一想：拖拽排序时交换两个模块的序号会发生什么？该怎么处理？</li>
+    <li>新增一种内容类型 “代码片段”（<code>CodeItem</code>：语言 + 代码），需要改动哪些地方？</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

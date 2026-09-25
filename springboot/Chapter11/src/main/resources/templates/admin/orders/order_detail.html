@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{admin/layout}">
+<head><title th:text="|Order ${order.id}|">Order</title></head>
+<body>
+<div layout:fragment="content">
+  <p class="breadcrumbs">
+    <a th:href="@{/admin/}">Home</a> › <a th:href="@{/admin/orders/order/}">Orders</a> › Order <span th:text="${order.id}">1</span> › Detail
+  </p>
+  <h1 th:text="|Order ${order.id}|">Order</h1>
+  <p><a href="#" onclick="window.print(); return false;">Print order</a></p>
+  <table>
+    <tr><th>Created</th><td th:text="${#temporals.format(order.created, 'yyyy-MM-dd HH:mm')}">created</td></tr>
+    <tr><th>Customer</th><td th:text="|${order.firstName} ${order.lastName}|">name</td></tr>
+    <tr><th>E-mail</th><td><a th:href="|mailto:${order.email}|" th:text="${order.email}">email</a></td></tr>
+    <tr><th>Address</th><td th:text="|${order.address}, ${order.postalCode} ${order.city}|">address</td></tr>
+    <tr><th>Total amount</th><td th:text="${'$' + order.totalCost}">$0</td></tr>
+    <tr><th>Status</th><td th:text="${order.paid} ? 'Paid' : 'Pending payment'">status</td></tr>
+    <tr><th>Stripe payment</th>
+        <td><a th:if="${order.stripeId != ''}" th:href="${order.stripeUrl(stripeTestMode)}" target="_blank" th:text="${order.stripeId}">pi_</a></td></tr>
+  </table>
+  <h2>Items bought</h2>
+  <table style="width:100%">
+    <thead><tr><th>Product</th><th>Price</th><th>Quantity</th><th>Total</th></tr></thead>
+    <tbody>
+      <tr th:each="item : ${order.items}">
+        <td th:text="${item.product.name}">name</td>
+        <td class="num" th:text="${'$' + item.price}">$0</td>
+        <td class="num" th:text="${item.quantity}">1</td>
+        <td class="num" th:text="${'$' + item.cost}">$0</td>
+      </tr>
+      <tr th:if="${order.coupon != null}"><td colspan="3">Subtotal</td><td class="num" th:text="${'$' + order.totalCostBeforeDiscount}">$0</td></tr>
+      <tr th:if="${order.coupon != null}">
+        <td colspan="3" th:text="|&quot;${order.coupon.code}&quot; coupon (${order.discount}% off)|">coupon</td>
+        <td class="num" th:text="${'- $' + order.discountAmount}">- $0</td>
+      </tr>
+      <tr><td colspan="3"><strong>Total</strong></td><td class="num" th:text="${'$' + order.totalCost}">$0</td></tr>
+    </tbody>
+  </table>
+</div>
+</body>
+</html>

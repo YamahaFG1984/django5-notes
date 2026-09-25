@@ -1,0 +1,900 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 2 章 · 博客进阶：社交功能 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="2">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 2 章 · 项目一：博客</span>
+<h1>博客进阶：社交功能</h1>
+<p class="lede">
+  这一章给博客加上“对 SEO 友好的规范 URL”、分页、邮件分享和评论。
+  在 Spring 里，它们分别落到 JPQL 范围查询、Spring Data 的 <code>Page</code>、表单对象 + Bean Validation、<code>MailSender</code> 和一对多关系上。
+  表单是本章重点：Django 的 <code>Form</code> 一个类包办了字段、校验、渲染，Spring 把这三件事拆给了三个角色。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>实现 <code>/blog/2025/1/31/slug/</code> 这样的规范 URL，并用范围条件代替 <code>publish__year</code></li>
+    <li>自己实现 <code>unique_for_date</code> 校验，理解它为什么不是数据库约束</li>
+    <li>用 <code>PageRequest</code> / <code>Page&lt;T&gt;</code> 分页，处理页码越界；写一个 <code>{% querystring %}</code> 的替代品</li>
+    <li>用表单对象 + <code>@Valid</code> + <code>BindingResult</code> 处理表单，用 Thymeleaf 片段复用字段渲染</li>
+    <li>用 <code>MailSender</code> 发邮件，开发时像 Django 的 console 后端一样只打印到日志</li>
+    <li>用 <code>@ConfigurationProperties</code> 和 <code>.env</code> 管理配置</li>
+    <li>建模一对多的评论，做评论审核后台；在测试里用 Mock 替换邮件发送</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch02.html">Django 版第 2 章</a>；本章代码在 <code>springboot/Chapter02/</code>。</p>
+
+<div class="box note">
+  <div class="t">&#9432; 与第 1 章相比少了什么</div>
+  <p>原书仓库第 2 章的快照里没有第 1 章的“收藏”彩蛋，Spring 版保持一致，也删掉了 <code>FavouritePost</code> 及其迁移。第 2 章的迁移是 V1 用户表、V2 文章表、V3 评论表。</p>
+</div>
+
+<div id="chapter-toc"></div>
+
+<h2 id="canonical">规范 URL：年/月/日/slug</h2>
+
+<p>一篇文章可能出现在列表、标签页、搜索结果、RSS 里，但它应该只有一个“正式地址”。和 Django 一样，我们让实体自己负责生成这个地址：</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · models.py</div>
+<div class="code" data-lang="py"><pre>
+def get_absolute_url(self):
+    return reverse(
+        'blog:post_detail',
+        args=[
+            self.publish.year,
+            self.publish.month,
+            self.publish.day,
+            self.slug,
+        ],
+    )
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · Post.java</div>
+<div class="code" data-lang="java"><pre>
+/** /blog/2025/1/31/who-was-django-reinhardt/，日期按 UTC 计算 */
+public String getAbsoluteUrl() {
+    OffsetDateTime utc = publish.withOffsetSameInstant(ZoneOffset.UTC);
+    return "/blog/%d/%d/%d/%s/".formatted(
+            utc.getYear(), utc.getMonthValue(),
+            utc.getDayOfMonth(), slug);
+}
+</pre></div></div>
+</div>
+
+<h3>按日期查找：范围条件，而不是取年月日</h3>
+
+<p>
+  Django 写 <code>publish__year=year, publish__month=month, publish__day=day</code>，生成的 SQL 是对列做 <code>EXTRACT</code>（或者 Django 较新版本会优化成范围）。
+  在 JPA 里我们直接写成“当天 0 点 ≤ publish &lt; 次日 0 点”，这种写法一定能用上 <code>publish</code> 列的索引：
+</p>
+
+<div class="code" data-lang="java" data-file="blog/PostRepository.java（节选）">
+<pre>
+@EntityGraph(attributePaths = "author")
+@Query("""
+        select p from Post p
+        where p.status = :status and p.slug = :slug
+          and p.publish &gt;= :start and p.publish &lt; :end
+        """)
+Optional&lt;Post&gt; findBySlugPublishedBetween(@Param("status") PostStatus status, @Param("slug") String slug,
+                                          @Param("start") OffsetDateTime start, @Param("end") OffsetDateTime end);
+
+default Optional&lt;Post&gt; findPublishedBySlugAndDate(String slug, LocalDate date) {
+    return findBySlugPublishedBetween(PostStatus.PUBLISHED, slug, startOf(date), startOf(date.plusDays(1)));
+}
+
+private static OffsetDateTime startOf(LocalDate date) {      // 接口里也能写 private 方法（Java 9+）
+    return date.atStartOfDay().atOffset(ZoneOffset.UTC);
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="blog/BlogController.java（节选）">
+<pre>
+@GetMapping("/{year}/{month}/{day}/{slug}/")
+public String postDetail(@PathVariable int year, @PathVariable int month, @PathVariable int day,
+                         @PathVariable String slug, Model model) {
+    Post post = posts.findPublishedBySlugAndDate(slug, dateOrNotFound(year, month, day))
+            .orElseThrow(() -&gt; new NotFoundException("No Post matches the given query."));
+    model.addAttribute("post", post);
+    model.addAttribute("comments", comments.findByPostAndActiveTrueOrderByCreatedAsc(post));
+    model.addAttribute("form", new CommentForm());
+    return "blog/post/detail";
+}
+
+private static LocalDate dateOrNotFound(int year, int month, int day) {
+    try {
+        return LocalDate.of(year, month, day);
+    } catch (DateTimeException e) {          // /blog/2025/13/40/... 这种非法日期 → 404
+        throw new NotFoundException("Invalid date");
+    }
+}
+</pre>
+</div>
+
+<h3>unique_for_date：自己写校验</h3>
+
+<p>
+  Django 的 <code>SlugField(unique_for_date='publish')</code> 要求“同一天内 slug 不重复”。很多人以为它是数据库约束，
+  其实它<strong>只在 ModelForm / admin 校验时生效</strong>，数据库层面没有任何限制（所以 <code>0002_alter_post_slug</code> 迁移也不改表结构）。
+  Spring 里没有这个开箱即用的选项，我们在后台控制器里补上同样的检查，并把错误挂到 <code>slug</code> 字段上：
+</p>
+
+<div class="code" data-lang="java" data-file="blog/admin/PostAdminController.java（节选）">
+<pre>
+private void validateUniqueForDate(PostForm form, Long excludeId, BindingResult errors) {
+    if (form.getSlug() == null || form.getPublish() == null || errors.hasFieldErrors("slug")) {
+        return;
+    }
+    if (posts.slugTakenOn(form.getSlug(), form.getPublish().toLocalDate(), excludeId)) {
+        errors.rejectValue("slug", "unique_for_date", "Slug must be unique for Publish date.");
+    }
+}
+</pre>
+</div>
+
+<p><code>excludeId</code> 用于编辑已有文章时“不和自己冲突”。对应的查询：</p>
+
+<div class="code" data-lang="java">
+<pre>
+@Query("""
+        select count(p) &gt; 0 from Post p
+        where p.slug = :slug and p.publish &gt;= :start and p.publish &lt; :end
+          and (:excludeId is null or p.id &lt;&gt; :excludeId)
+        """)
+boolean slugTakenBetween(...);
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 应用层校验挡不住并发</div>
+  <p>
+    两个管理员同时保存同一天同 slug 的文章，两边的检查都可能通过。Django 的 <code>unique_for_date</code> 有同样的问题。
+    需要绝对保证时，可以加一列 <code>publish_date</code> 并建唯一索引 <code>(slug, publish_date)</code>，让数据库兜底。
+  </p>
+</div>
+
+<h2 id="pagination">分页：Pageable 与 Page</h2>
+
+<p>Django 的 <code>Paginator</code> 在 Spring Data 里对应两个类型：<code>Pageable</code>（“我要第几页、每页几条”）和 <code>Page&lt;T&gt;</code>（“这一页的数据 + 总页数等信息”）。</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · 函数视图</div>
+<div class="code" data-lang="py"><pre>
+def post_list(request):
+    post_list = Post.published.all()
+    paginator = Paginator(post_list, 3)
+    page_number = request.GET.get('page', 1)
+    try:
+        posts = paginator.page(page_number)
+    except PageNotAnInteger:
+        posts = paginator.page(1)
+    except EmptyPage:
+        posts = paginator.page(paginator.num_pages)
+    return render(request, 'blog/post/list.html',
+                  {'posts': posts})
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · BlogController</div>
+<div class="code" data-lang="java"><pre>
+@GetMapping({"", "/"})
+public String postList(
+        @RequestParam(name = "page", required = false)
+        String pageParam, Model model) {
+    int pageNumber = parsePage(pageParam);   // 非整数 → 1
+    Page&lt;Post&gt; page = posts.findPublished(
+            PageRequest.of(pageNumber - 1, PAGE_SIZE));
+    if (page.getContent().isEmpty()
+            &amp;&amp; page.getTotalPages() &gt; 0) {    // 越界 → 最后一页
+        page = posts.findPublished(
+            PageRequest.of(page.getTotalPages() - 1, PAGE_SIZE));
+    }
+    model.addAttribute("posts", page);
+    return "blog/post/list";
+}
+</pre></div></div>
+</div>
+
+<p>仓库方法只要多一个 <code>Pageable</code> 参数、返回 <code>Page</code>，Spring Data 就会自动加 <code>LIMIT/OFFSET</code>，并额外发一条 <code>count</code> 查询算总数：</p>
+
+<div class="code" data-lang="java">
+<pre>
+@EntityGraph(attributePaths = "author")
+Page&lt;Post&gt; findByStatusOrderByPublishDesc(PostStatus status, Pageable pageable);
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>Django Page</th><th>Spring Page</th><th>注意</th></tr>
+  <tr><td><code>page.number</code></td><td><code>page.number</code></td><td>Django 从 <strong>1</strong> 开始，Spring 从 <strong>0</strong> 开始</td></tr>
+  <tr><td><code>paginator.num_pages</code></td><td><code>page.totalPages</code></td><td></td></tr>
+  <tr><td><code>paginator.count</code></td><td><code>page.totalElements</code></td><td></td></tr>
+  <tr><td><code>has_previous</code> / <code>has_next</code></td><td><code>hasPrevious()</code> / <code>hasNext()</code></td><td></td></tr>
+  <tr><td><code>previous_page_number</code></td><td>无，自己算</td><td>URL 用 1 开始时是 <code>number</code>，下一页是 <code>number + 2</code></td></tr>
+  <tr><td><code>object_list</code> / 直接遍历</td><td><code>content</code> / 直接遍历</td><td><code>Page</code> 实现了 <code>Iterable</code></td></tr>
+</table>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 为什么不直接在方法参数里写 Pageable</div>
+  <p>
+    Spring MVC 可以直接注入 <code>Pageable pageable</code>，自动解析 <code>?page=&amp;size=&amp;sort=</code>，看起来更简洁。
+    但那样客户端可以传 <code>size=100000</code>，或者 <code>sort=</code> 任意字段名（排到不存在的字段会报错）。
+    对公开页面，更稳妥的做法是只读 <code>page</code>，每页大小和排序由服务端固定 —— 这也和 Django <code>ListView(paginate_by=3)</code> 的行为一致。
+    第 15 章写 API 时会讲怎么限制 <code>Pageable</code> 的最大 size。
+  </p>
+</div>
+
+<h3>ListView 呢？</h3>
+
+<p>
+  Django 书里又用 <code>ListView</code> 把同样的逻辑写了一遍：<code>queryset</code>、<code>paginate_by</code>、<code>template_name</code> 几个属性就完成了。
+  Spring MVC <strong>没有类视图 / 通用视图</strong>的概念，每个控制器方法都是“函数视图”。
+  想复用逻辑，靠的是普通 Java 手段：抽一个 service 方法、一个工具方法，或者父类。第 13 章讲 Django 的 CBV + Mixin 时我们会再比较一次。
+</p>
+
+<h3>分页模板片段与 {% querystring %}</h3>
+
+<p>Django 用 <code>{% include "pagination.html" with page=page_obj %}</code> 引入分页条；Thymeleaf 用<strong>带参数的片段</strong>：</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · pagination.html</div>
+<div class="code" data-lang="html"><pre>
+&lt;div class="pagination"&gt;
+  &lt;span class="step-links"&gt;
+    {% if page.has_previous %}
+      &lt;a href="{% querystring page=page.previous_page_number %}"&gt;
+        Previous&lt;/a&gt;
+    {% endif %}
+    &lt;span class="current"&gt;
+      Page {{ page.number }} of {{ page.paginator.num_pages }}.
+    &lt;/span&gt;
+    {% if page.has_next %}
+      &lt;a href="{% querystring page=page.next_page_number %}"&gt;
+        Next&lt;/a&gt;
+    {% endif %}
+  &lt;/span&gt;
+&lt;/div&gt;
+</pre></div></div>
+  <div class="sb"><div class="h">Thymeleaf · pagination.html</div>
+<div class="code" data-lang="th"><pre>
+&lt;div class="pagination" th:fragment="pagination(page)"&gt;
+  &lt;span class="step-links"&gt;
+    &lt;a th:if="${page.hasPrevious()}"
+       th:href="${#querystring.with('page', page.number)}"&gt;
+       Previous&lt;/a&gt;
+    &lt;span class="current"
+      th:text="|Page ${page.number + 1} of ${page.totalPages}.|"&gt;
+    &lt;/span&gt;
+    &lt;a th:if="${page.hasNext()}"
+       th:href="${#querystring.with('page', page.number + 2)}"&gt;
+       Next&lt;/a&gt;
+  &lt;/span&gt;
+&lt;/div&gt;
+
+&lt;!-- 使用：--&gt;
+&lt;div th:replace="~{pagination :: pagination(${posts})}"&gt;&lt;/div&gt;
+</pre></div></div>
+</div>
+
+<p>
+  Django 5.1 的 <code>{% querystring page=2 %}</code> 会保留当前 URL 的其他查询参数（比如搜索词），只替换 <code>page</code>。
+  Thymeleaf 没有现成的等价物，我们在第 1 章的自定义方言里再加一个表达式对象 <code>#querystring</code>：
+</p>
+
+<div class="code" data-lang="java" data-file="common/Querystring.java 与 TemplateHelpersDialect.java（节选）">
+<pre>
+public class Querystring {
+    private final Map&lt;String, String[]&gt; params;     // 当前请求的全部查询参数
+
+    public String with(String name, Object value) {
+        UriComponentsBuilder builder = UriComponentsBuilder.newInstance();
+        params.forEach((key, values) -&gt; {
+            if (!key.equals(name)) {
+                builder.queryParam(key, (Object[]) values);
+            }
+        });
+        builder.queryParam(name, value);
+        return builder.build().encode().toUriString();   // "?q=django&amp;page=2"
+    }
+}
+
+// 方言里：每次渲染时从 Thymeleaf 的 Web 上下文拿到当前请求参数
+public Object buildObject(IExpressionContext context, String name) {
+    if ("querystring".equals(name)) {
+        Map&lt;String, String[]&gt; params = context instanceof IWebContext web
+                ? web.getExchange().getRequest().getParameterMap()
+                : Map.of();
+        return new Querystring(params);
+    }
+    return filters;       // #text
+}
+</pre>
+</div>
+
+<h2 id="forms">表单：三个角色分工</h2>
+
+<p>Django 的 <code>forms.Form</code> 一个类负责三件事：定义字段、校验数据、渲染 HTML。Spring 把它们拆开了：</p>
+
+<div class="tw">
+<table>
+  <tr><th>职责</th><th>Django</th><th>Spring</th></tr>
+  <tr><td>定义字段和规则</td><td><code>forms.CharField(max_length=25)</code></td><td>普通 Java 类的字段 + <code>@NotBlank</code>、<code>@Size</code>、<code>@Email</code> 注解</td></tr>
+  <tr><td>绑定并校验</td><td><code>form = EmailPostForm(request.POST)</code> + <code>form.is_valid()</code></td><td>控制器参数 <code>@Valid @ModelAttribute("form") EmailPostForm form, BindingResult errors</code></td></tr>
+  <tr><td>取干净的数据</td><td><code>form.cleaned_data['to']</code></td><td><code>form.getTo()</code>（绑定时已完成类型转换）</td></tr>
+  <tr><td>渲染</td><td><code>{{ form.as_p }}</code>、<code>{{ form.name.as_field_group }}</code></td><td>模板里 <code>th:object</code> + <code>th:field</code>，自己写或抽成片段</td></tr>
+  <tr><td>显示错误</td><td><code>{{ form.name.errors }}</code></td><td><code>#fields.hasErrors('name')</code>、<code>#fields.errors('name')</code></td></tr>
+</table>
+</div>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="表单处理流程：GET 请求显示空表单；POST 请求把参数绑定到表单对象并校验，有错误则带着错误重新渲染表单，没有错误则执行业务逻辑">
+  <rect class="bx" x="10" y="20" width="150" height="50" rx="10"/>
+  <text class="mono sm" x="85" y="50" text-anchor="middle">GET /1/share/</text>
+  <path class="ln" d="M162 45 H236" marker-end="url(#ar)"/>
+  <rect class="bx-g" x="240" y="20" width="220" height="50" rx="10"/>
+  <text class="sm" x="350" y="42" text-anchor="middle">new EmailPostForm()</text>
+  <text class="sm" x="350" y="60" text-anchor="middle">渲染空表单</text>
+
+  <rect class="bx" x="10" y="130" width="150" height="50" rx="10"/>
+  <text class="mono sm" x="85" y="160" text-anchor="middle">POST /1/share/</text>
+  <path class="ln" d="M162 155 H236" marker-end="url(#ar)"/>
+  <rect class="bx-a" x="240" y="120" width="220" height="70" rx="10"/>
+  <text class="ttl on-a" x="350" y="145" text-anchor="middle">绑定 + @Valid 校验</text>
+  <text class="sm" x="350" y="166" text-anchor="middle">结果写进 BindingResult</text>
+  <path class="ln-r" d="M462 140 L536 80" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="488" y="104" text-anchor="end">有错误</text>
+  <rect class="bx-r" x="540" y="30" width="210" height="60" rx="10"/>
+  <text class="sm" x="645" y="55" text-anchor="middle">回到同一个模板</text>
+  <text class="sm" x="645" y="74" text-anchor="middle">th:field 回填 + 显示错误</text>
+  <path class="ln-g" d="M462 170 L536 200" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="480" y="210">通过</text>
+  <rect class="bx-g" x="540" y="170" width="210" height="60" rx="10"/>
+  <text class="sm" x="645" y="195" text-anchor="middle">发邮件 / 保存评论</text>
+  <text class="sm" x="645" y="214" text-anchor="middle">再渲染结果页或重定向</text>
+</svg>
+<figcaption>图 S2-1　和 Django 的 <code>if request.method == 'POST'</code> 套路一样，只是 GET 和 POST 分成了两个方法</figcaption>
+</figure>
+
+<h3>定义表单对象</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · forms.py</div>
+<div class="code" data-lang="py"><pre>
+class EmailPostForm(forms.Form):
+    name = forms.CharField(max_length=25)
+    email = forms.EmailField()
+    to = forms.EmailField()
+    comments = forms.CharField(
+        required=False,
+        widget=forms.Textarea
+    )
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · EmailPostForm.java</div>
+<div class="code" data-lang="java"><pre>
+public class EmailPostForm {
+    @NotBlank @Size(max = 25)
+    private String name;
+
+    @NotBlank @Email
+    private String email;
+
+    @NotBlank @Email
+    private String to;
+
+    @Size(max = 2000)          // 可选字段：不加 @NotBlank
+    private String comments = "";
+
+    // getter / setter —— 数据绑定靠它们
+}
+</pre></div></div>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; @Email 允许空字符串</div>
+  <p>
+    Bean Validation 的约定是“除了 <code>@NotNull</code>/<code>@NotBlank</code>，其他约束都认为 null 或空值是合法的”。
+    所以必填的邮箱要写 <code>@NotBlank @Email</code> 两个注解。Django 的 <code>EmailField()</code> 默认 <code>required=True</code>，一个就够了。
+  </p>
+</div>
+
+<h3>控制器：GET 与 POST 分开</h3>
+
+<div class="code" data-lang="java" data-file="blog/BlogController.java（节选）">
+<pre>
+@GetMapping("/{postId}/share/")
+public String shareForm(@PathVariable Long postId, Model model) {
+    model.addAttribute("post", publishedPost(postId));
+    model.addAttribute("form", new EmailPostForm());
+    model.addAttribute("sent", false);
+    return "blog/post/share";
+}
+
+@PostMapping("/{postId}/share/")
+public String share(@PathVariable Long postId,
+                    @Valid @ModelAttribute("form") EmailPostForm form,
+                    BindingResult errors,                 // 必须紧跟在被校验的参数后面！
+                    Model model) {
+    Post post = publishedPost(postId);
+    boolean sent = false;
+    if (!errors.hasErrors()) {                            // form.is_valid()
+        // request.build_absolute_uri(post.get_absolute_url())
+        String postUrl = ServletUriComponentsBuilder.fromCurrentContextPath()
+                .path(post.getAbsoluteUrl()).toUriString();
+        SimpleMailMessage message = new SimpleMailMessage();
+        message.setFrom(properties.defaultFromEmail());
+        message.setTo(form.getTo());
+        message.setSubject("%s (%s) recommends you read %s".formatted(
+                form.getName(), form.getEmail(), post.getTitle()));
+        message.setText("Read %s at %s%n%n%s's comments: %s".formatted(
+                post.getTitle(), postUrl, form.getName(), form.getComments()));
+        mailSender.send(message);
+        sent = true;
+    }
+    model.addAttribute("post", post);
+    model.addAttribute("sent", sent);
+    return "blog/post/share";
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 忘了 BindingResult 会怎样</div>
+  <p>
+    如果参数列表里没有紧跟一个 <code>BindingResult</code>，校验失败时 Spring 会直接抛 <code>MethodArgumentNotValidException</code>，用户看到 400 错误页，而不是带错误提示的表单。
+    这是初学者最常踩的坑之一。
+  </p>
+</div>
+
+<h3>模板：th:object、th:field 与字段片段</h3>
+
+<p>
+  <code>th:object="${form}"</code> 指定表单绑定的对象，之后 <code>th:field="*{name}"</code> 会一次生成 <code>id</code>、<code>name</code>、<code>value</code> 三个属性，
+  校验失败重新渲染时还会自动回填用户输入的值。Django 5.0 的 <code>as_field_group</code> 把“标签 + 错误 + 控件”打包渲染，我们用一个带参数的片段做同样的事：
+</p>
+
+<div class="code" data-lang="th" data-file="templates/fragments/forms.html">
+<pre>
+&lt;th:block th:fragment="field(name, label, type)"&gt;
+  &lt;div class="field"&gt;
+    &lt;label th:for="${name}" th:text="|${label}:|"&gt;Label:&lt;/label&gt;
+    &lt;ul class="errorlist" th:if="${#fields.hasErrors(name)}"&gt;
+      &lt;li th:each="err : ${#fields.errors(name)}" th:text="${err}"&gt;error&lt;/li&gt;
+    &lt;/ul&gt;
+    &lt;!-- __${name}__ 是“预处理”：先把变量值代入，再解析 *{...} 表达式 --&gt;
+    &lt;textarea th:if="${type == 'textarea'}" th:field="*{__${name}__}" rows="6"&gt;&lt;/textarea&gt;
+    &lt;input th:unless="${type == 'textarea'}" th:type="${type}" th:field="*{__${name}__}"&gt;
+  &lt;/div&gt;
+&lt;/th:block&gt;
+</pre>
+</div>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · share.html</div>
+<div class="code" data-lang="html"><pre>
+&lt;form method="post" novalidate&gt;
+  {{ form.as_p }}
+  {% csrf_token %}
+  &lt;input type="submit" value="Send e-mail"&gt;
+&lt;/form&gt;
+</pre></div></div>
+  <div class="sb"><div class="h">Thymeleaf · share.html</div>
+<div class="code" data-lang="th"><pre>
+&lt;form method="post" th:action="@{/blog/{id}/share/(id=${post.id})}"
+      th:object="${form}" novalidate&gt;
+  &lt;div th:replace="~{fragments/forms :: field('name', 'Name', 'text')}"&gt;&lt;/div&gt;
+  &lt;div th:replace="~{fragments/forms :: field('email', 'Email', 'email')}"&gt;&lt;/div&gt;
+  &lt;div th:replace="~{fragments/forms :: field('to', 'To', 'email')}"&gt;&lt;/div&gt;
+  &lt;div th:replace="~{fragments/forms :: field('comments', 'Comments', 'textarea')}"&gt;&lt;/div&gt;
+  &lt;input type="submit" value="Send e-mail"&gt;
+&lt;/form&gt;
+</pre></div></div>
+</div>
+
+<p>注意右边没有 <code>{% csrf_token %}</code>：只要表单用 <code>th:action</code> 生成地址，Thymeleaf 就会配合 Spring Security 自动插入隐藏的 <code>_csrf</code> 字段。</p>
+
+<h2 id="email">发送邮件</h2>
+
+<p>Spring 的邮件抽象有两层：简单的 <code>MailSender</code>（只能发纯文本 <code>SimpleMailMessage</code>）和功能完整的 <code>JavaMailSender</code>（支持 HTML、附件）。本章只需要前者。</p>
+
+<h3>开发环境：console 后端</h3>
+
+<p>
+  Django 可以把 <code>EMAIL_BACKEND</code> 设成 console 后端，邮件只打印到终端。Spring Boot 没有内置这个，
+  但因为控制器依赖的是 <code>MailSender</code> 接口，我们自己写一个“打印到日志”的实现即可：
+</p>
+
+<div class="code" data-lang="java" data-file="config/ConsoleMailSender.java">
+<pre>
+@Component
+@Profile("!smtp")          // 没有激活 smtp profile 时才创建
+public class ConsoleMailSender implements MailSender {
+
+    private static final Logger log = LoggerFactory.getLogger(ConsoleMailSender.class);
+
+    @Override
+    public void send(SimpleMailMessage... messages) {
+        for (SimpleMailMessage message : messages) {
+            log.info("""
+
+                    ---------- 邮件（console 后端，未真正发送）----------
+                    From: {}
+                    To: {}
+                    Subject: {}
+
+                    {}
+                    -----------------------------------------------------""",
+                    message.getFrom(), String.join(", ", message.getTo()),
+                    message.getSubject(), message.getText());
+        }
+    }
+}
+</pre>
+</div>
+
+<h3>真正发信：smtp profile</h3>
+
+<p>
+  <strong>Profile</strong> 是 Spring 管理“多套配置”的机制。<code>application.yaml</code> 里用 <code>---</code> 分出第二个文档，只在 <code>smtp</code> profile 激活时生效；
+  这时 <code>ConsoleMailSender</code> 不会创建，Spring Boot 看到 <code>spring.mail.host</code> 就会自动配置一个真正的 <code>JavaMailSender</code>：
+</p>
+
+<div class="code" data-lang="yaml" data-file="application.yaml（节选）">
+<pre>
+spring:
+  config:
+    import: optional:file:.env[.properties]   # 读取项目根目录的 .env（≈ python-decouple）
+
+mysite:
+  default-from-email: ${DEFAULT_FROM_EMAIL:My Blog &lt;noreply@example.com&gt;}
+
+---
+spring:
+  config:
+    activate:
+      on-profile: smtp          # java -jar app.jar --spring.profiles.active=smtp
+  mail:
+    host: ${EMAIL_HOST:smtp.gmail.com}
+    port: ${EMAIL_PORT:587}
+    username: ${EMAIL_HOST_USER}
+    password: ${EMAIL_HOST_PASSWORD}
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true   # ≈ EMAIL_USE_TLS = True
+</pre>
+</div>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · settings.py + .env</div>
+<div class="code" data-lang="py"><pre>
+from decouple import config
+
+EMAIL_HOST = 'smtp.gmail.com'
+EMAIL_HOST_USER = config('EMAIL_HOST_USER')
+EMAIL_HOST_PASSWORD = config('EMAIL_HOST_PASSWORD')
+EMAIL_PORT = 587
+EMAIL_USE_TLS = True
+DEFAULT_FROM_EMAIL = config('DEFAULT_FROM_EMAIL')
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · 占位符 ${...}</div>
+<div class="code" data-lang="yaml"><pre>
+# ${NAME:默认值} 依次从这些地方找 NAME：
+#   命令行参数 --NAME=...
+#   环境变量 NAME
+#   .env 文件（通过 spring.config.import 导入）
+#   其他配置文件
+username: ${EMAIL_HOST_USER}
+password: ${EMAIL_HOST_PASSWORD}
+</pre></div></div>
+</div>
+
+<h3>@ConfigurationProperties：有类型的自定义设置</h3>
+
+<p>Django 里在 <code>settings.py</code> 随手加一个变量，用的时候 <code>settings.DEFAULT_FROM_EMAIL</code>。Spring 推荐把自定义配置绑定到一个类上：</p>
+
+<div class="code" data-lang="java" data-file="config/MysiteProperties.java">
+<pre>
+@ConfigurationProperties(prefix = "mysite")
+public record MysiteProperties(String defaultFromEmail) {   // 绑定 mysite.default-from-email
+}
+</pre>
+</div>
+
+<p>入口类上加 <code>@ConfigurationPropertiesScan</code> 后，它就是一个普通 Bean，可以注入到控制器里使用。好处是有类型、IDE 能补全、拼错键名时能被发现，还可以加 <code>@Validated</code> 在启动时校验必填项。</p>
+
+<h2 id="comments">评论系统</h2>
+
+<h3>一对多：@ManyToOne 与 mappedBy</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+class Comment(models.Model):
+    post = models.ForeignKey(
+        Post,
+        on_delete=models.CASCADE,
+        related_name='comments'
+    )
+    name = models.CharField(max_length=80)
+    email = models.EmailField()
+    body = models.TextField()
+    created = models.DateTimeField(auto_now_add=True)
+    updated = models.DateTimeField(auto_now=True)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['created']
+        indexes = [models.Index(fields=['created'])]
+</pre></div></div>
+  <div class="sb"><div class="h">Spring</div>
+<div class="code" data-lang="java"><pre>
+@Entity
+@Table(name = "blog_comment", indexes = @Index(
+        name = "blog_comment_created_idx", columnList = "created"))
+public class Comment {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "post_id")
+    private Post post;
+
+    @Column(nullable = false, length = 80)  private String name;
+    @Column(nullable = false, length = 254) private String email;
+    @Column(nullable = false, columnDefinition = "text")
+    private String body;
+    @CreationTimestamp private OffsetDateTime created;
+    @UpdateTimestamp   private OffsetDateTime updated;
+    @Column(nullable = false) private boolean active = true;
+}
+
+// Post.java：反向关系 ≈ related_name='comments'
+@OneToMany(mappedBy = "post")
+private List&lt;Comment&gt; comments = new ArrayList&lt;&gt;();
+</pre></div></div>
+</div>
+
+<p>
+  <code>mappedBy = "post"</code> 表示“外键在 <code>Comment.post</code> 那边，这里只是反向视图”。
+  Django 自动给你 <code>post.comments</code>；JPA 里反向关系是<strong>可选的</strong>，只在需要从文章导航到评论时才声明。
+  本章实际查询评论时用的是仓库方法（第 3 章的“评论最多”统计会用到这个反向关系）：
+</p>
+
+<div class="code" data-lang="java">
+<pre>
+// post.comments.filter(active=True)，按 Meta.ordering = ['created']
+List&lt;Comment&gt; findByPostAndActiveTrueOrderByCreatedAsc(Post post);
+</pre>
+</div>
+
+<h3>ModelForm 的替代：表单对象 + 转换方法</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+class CommentForm(forms.ModelForm):
+    class Meta:
+        model = Comment
+        fields = ['name', 'email', 'body']
+
+@require_POST
+def post_comment(request, post_id):
+    post = get_object_or_404(...)
+    comment = None
+    form = CommentForm(data=request.POST)
+    if form.is_valid():
+        comment = form.save(commit=False)
+        comment.post = post
+        comment.save()
+    return render(request, 'blog/post/comment.html',
+                  {'post': post, 'form': form,
+                   'comment': comment})
+</pre></div></div>
+  <div class="sb"><div class="h">Spring</div>
+<div class="code" data-lang="java"><pre>
+public class CommentForm {
+    @NotBlank @Size(max = 80)           private String name;
+    @NotBlank @Email @Size(max = 254)   private String email;
+    @NotBlank                           private String body;
+
+    public Comment toComment(Post post) {   // ≈ save(commit=False)
+        return new Comment(post, name, email, body);
+    }
+}
+
+// 只映射 POST：GET 访问会得到 405 ≈ @require_POST
+@PostMapping("/{postId}/comment/")
+public String postComment(@PathVariable Long postId,
+        @Valid @ModelAttribute("form") CommentForm form,
+        BindingResult errors, Model model) {
+    Post post = publishedPost(postId);
+    Comment comment = null;
+    if (!errors.hasErrors()) {
+        comment = comments.save(form.toComment(post));
+    }
+    model.addAttribute("post", post);
+    model.addAttribute("comment", comment);
+    return "blog/post/comment";
+}
+</pre></div></div>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 为什么不把请求直接绑定到 Comment 实体上</div>
+  <p>
+    Spring 允许 <code>@ModelAttribute Comment comment</code> 直接绑定实体，省掉 <code>CommentForm</code>。但这样攻击者多提交一个 <code>active=false</code> 或 <code>id=5</code>，
+    就可能改到不该改的字段（“批量赋值”漏洞）。Django 的 <code>ModelForm</code> 用 <code>fields = [...]</code> 白名单解决这个问题，
+    Spring 里的对应做法就是：<strong>请求只绑定到专门的表单对象</strong>，再由代码决定哪些值写进实体。
+  </p>
+</div>
+
+<h3>模板里的 forloop 与 pluralize</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · detail.html</div>
+<div class="code" data-lang="html"><pre>
+{% with comments.count as total_comments %}
+  &lt;h2&gt;{{ total_comments }} comment{{ total_comments|pluralize }}&lt;/h2&gt;
+{% endwith %}
+{% for comment in comments %}
+  &lt;p class="info"&gt;
+    Comment {{ forloop.counter }} by {{ comment.name }}
+  &lt;/p&gt;
+{% empty %}
+  &lt;p&gt;There are no comments yet.&lt;/p&gt;
+{% endfor %}
+{% include "blog/post/includes/comment_form.html" %}
+</pre></div></div>
+  <div class="sb"><div class="h">Thymeleaf · detail.html</div>
+<div class="code" data-lang="th"><pre>
+&lt;h2 th:with="total=${#lists.size(comments)}"
+    th:text="|${total} comment${total == 1 ? '' : 's'}|"&gt;&lt;/h2&gt;
+
+&lt;div class="comment" th:each="comment, stat : ${comments}"&gt;
+  &lt;p class="info"&gt;
+    Comment &lt;span th:text="${stat.count}"&gt;1&lt;/span&gt;
+    by &lt;span th:text="${comment.name}"&gt;name&lt;/span&gt;
+  &lt;/p&gt;
+&lt;/div&gt;
+&lt;p th:if="${#lists.isEmpty(comments)}"&gt;There are no comments yet.&lt;/p&gt;
+
+&lt;div th:replace="~{blog/post/includes/comment_form :: commentForm}"&gt;&lt;/div&gt;
+</pre></div></div>
+</div>
+
+<ul>
+  <li><code>th:each="comment, stat : ${comments}"</code> 的第二个变量是<strong>状态对象</strong>：<code>stat.count</code>（从 1 开始）≈ <code>forloop.counter</code>，<code>stat.index</code>（从 0 开始）≈ <code>forloop.counter0</code>，还有 <code>stat.first</code>、<code>stat.last</code>。</li>
+  <li><code>th:with</code> ≈ <code>{% with %}</code>，在当前元素内定义局部变量。</li>
+  <li><code>|...|</code> 是“字面量替换”语法，可以在字符串里直接嵌 <code>${...}</code>。</li>
+</ul>
+
+<h3>评论审核后台</h3>
+
+<p>
+  对应 Django 的 <code>CommentAdmin</code>，后台多了一个 <code>/admin/blog/comment/</code> 列表页：按姓名/邮箱/内容搜索，按 <code>active</code> 过滤并显示数量，
+  每行一个“屏蔽/启用”按钮。切换状态的代码展示了 JPA 的<strong>脏检查</strong>：
+</p>
+
+<div class="code" data-lang="java" data-file="blog/admin/CommentAdminController.java（节选）">
+<pre>
+@PostMapping("/{id}/toggle/")
+@Transactional
+public String toggle(@PathVariable Long id, RedirectAttributes flash) {
+    Comment comment = comments.findById(id)
+            .orElseThrow(() -&gt; new NotFoundException("Comment " + id + " does not exist"));
+    comment.setActive(!comment.isActive());   // 没有调用 save！
+    flash.addFlashAttribute("message", ...);
+    return "redirect:/admin/blog/comment/";
+}
+</pre>
+</div>
+
+<p>
+  在事务内查出来的实体处于“受管理”状态，事务提交时 Hibernate 会比较它和查出时的快照，发现 <code>active</code> 变了就自动发 <code>UPDATE</code>。
+  Django 没有这个机制，必须显式 <code>comment.save()</code>（或 <code>save(update_fields=['active'])</code>）。
+</p>
+
+<h2 id="tests">测试：Mock 掉邮件发送</h2>
+
+<p>
+  Django 测试时会自动把邮件后端换成内存后端，发出的邮件都在 <code>mail.outbox</code> 里。
+  Spring 里用 <code>@MockitoBean</code> 把容器里的 <code>MailSender</code> 替换成 Mockito 的假对象，再捕获调用参数：
+</p>
+
+<div class="code" data-lang="java" data-file="BlogControllerTests.java（节选）">
+<pre>
+@MockitoBean
+MailSender mailSender;
+
+@Test
+void shareSendsEmailWithAbsoluteUrl() throws Exception {
+    mvc.perform(post("/blog/{id}/share/", published.getId()).with(csrf())
+                    .param("name", "Alice")
+                    .param("email", "alice@example.com")
+                    .param("to", "bob@example.com")
+                    .param("comments", "Worth reading"))
+            .andExpect(status().isOk())
+            .andExpect(content().string(containsString("E-mail successfully sent")));
+
+    ArgumentCaptor&lt;SimpleMailMessage&gt; sent = ArgumentCaptor.forClass(SimpleMailMessage.class);
+    verify(mailSender).send(sent.capture());                     // ≈ len(mail.outbox) == 1
+    assertThat(sent.getValue().getTo()).containsExactly("bob@example.com");
+    assertThat(sent.getValue().getText()).contains("http://localhost/blog/2025/1/31/hello-spring/");
+}
+</pre>
+</div>
+
+<p>本章共 10 个测试，另外覆盖了：规范 URL 与非法日期、每页 3 条和页码越界、非法分享表单不发信、评论保存与显示、评论接口拒绝 GET、<code>unique_for_date</code> 的三种情况。</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 2 章 Spring 版点评 <small>springboot/Chapter02</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 表单对象与实体分离</h4>
+    <p>请求数据只进入 <code>EmailPostForm</code>、<code>CommentForm</code>、<code>PostForm</code>，实体字段由代码显式赋值，天然避免批量赋值漏洞。代价是比 <code>ModelForm</code> 多写一遍字段。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 面向接口编程让“换邮件后端”变得简单</h4>
+    <p>控制器只依赖 <code>MailSender</code> 接口；开发用 <code>ConsoleMailSender</code>，生产用 SMTP，测试用 Mock，业务代码一行不改。这就是依赖注入的价值。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 分享和评论提交后没有重定向（与原书一致）</h4>
+    <p>
+      POST 成功后直接渲染页面，用户刷新会弹出“重新提交表单”，可能重复发邮件或重复评论。
+      更好的做法是 <strong>PRG 模式</strong>（Post/Redirect/Get）：成功后 <code>return "redirect:..."</code>，
+      用 <code>RedirectAttributes.addFlashAttribute</code> 把提示带到下一页 —— 第 5 章讲消息框架时会用到。
+    </p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 同步发送邮件会拖慢请求</h4>
+    <p>SMTP 往往要一两秒甚至超时。生产环境应该异步发送：最简单的是给发送方法加 <code>@Async</code>，更可靠的是放进消息队列（第 8 章用 RabbitMQ 做异步任务）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 校验消息是英文的默认文本</h4>
+    <p>页面上看到的“must not be blank”来自 Hibernate Validator 的默认消息。可以在注解上写 <code>message = "..."</code>，或在 <code>ValidationMessages.properties</code> 里统一翻译 —— 第 11 章讲国际化时再处理。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>规范 URL 由实体的 <code>getAbsoluteUrl()</code> 生成；按日期查找用范围条件，能走索引。</li>
+  <li><code>unique_for_date</code> 是应用层校验，Spring 里用 <code>BindingResult.rejectValue</code> 自己实现。</li>
+  <li>分页：仓库方法加 <code>Pageable</code> 参数、返回 <code>Page</code>；Spring 的页码从 0 开始。</li>
+  <li>表单：表单对象 + Bean Validation 注解 + <code>@Valid</code> + 紧随的 <code>BindingResult</code>；模板用 <code>th:object</code>/<code>th:field</code>。</li>
+  <li>邮件：依赖 <code>MailSender</code> 接口，按 profile 切换 console / SMTP 实现；配置用占位符和 <code>@ConfigurationProperties</code>。</li>
+  <li>一对多用 <code>@ManyToOne</code> + 可选的 <code>@OneToMany(mappedBy)</code>；受管理实体的修改会被自动保存。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>把分享功能改成 PRG：成功后重定向回文章页，并用闪存属性显示“邮件已发送”。更新相应的测试。</li>
+    <li>给 <code>ConsoleMailSender</code> 的发送加上 <code>@Async</code>（需要在配置类上加 <code>@EnableAsync</code>），在日志里观察线程名的变化。</li>
+    <li>新增迁移，给 <code>blog_post</code> 加一个唯一索引，从数据库层面保证同一天 slug 不重复（提示：PostgreSQL 可以对表达式建索引，H2 可以加一列）。</li>
+    <li>给评论后台加上“批量屏蔽”：列表每行一个复选框，提交后一次更新多条（对应 Django admin 的 actions）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

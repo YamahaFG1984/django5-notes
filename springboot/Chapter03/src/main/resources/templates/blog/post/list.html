@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{blog/base}">
+<head>
+  <title>My Blog</title>
+</head>
+<body>
+<div layout:fragment="content">
+  <h1>My Blog</h1>
+  <h2 th:if="${tag}">Posts tagged with "<span th:text="${tag.name}">tag</span>"</h2>
+  <th:block th:each="post : ${posts}">
+    <h2>
+      <a th:href="@{${post.absoluteUrl}}" th:text="${post.title}">Post title</a>
+    </h2>
+    <p class="tags">
+      Tags:
+      <!--/* {% if not forloop.last %}, {% endif %} → stat.last */-->
+      <th:block th:each="t, stat : ${post.tags}"><a th:href="@{/blog/tag/{slug}/(slug=${t.slug})}" th:text="${t.name}">tag</a><th:block th:unless="${stat.last}">, </th:block></th:block>
+    </p>
+    <p class="date">
+      Published <span th:text="${#temporals.format(post.publish, 'MMM d, yyyy, HH:mm')}">date</span>
+      by <span th:text="${post.author}">author</span>
+    </p>
+    <!--/* {{ post.body|markdown|truncatewords_html:30 }} */-->
+    <div th:utext="${#text.truncatewordsHtml(#blog.markdown(post.body), 30)}"></div>
+  </th:block>
+  <div th:replace="~{pagination :: pagination(${posts})}"></div>
+</div>
+</body>
+</html>

@@ -1,0 +1,7 @@
+target/
+data/
+media/
+deploy/certs/
+.env
+.idea/
+*.iml

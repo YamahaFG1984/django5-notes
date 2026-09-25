@@ -1,0 +1,556 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 9 章 · 支付与订单 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="9">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 9 章 · 项目三：在线商店</span>
+<h1>支付与订单</h1>
+<p class="lede">
+  商店要能收钱了。本章接入 Stripe Checkout：顾客在 Stripe 托管的页面上付款，Stripe 通过 Webhook 通知我们付款成功，
+  我们把订单标记为已付款，并异步生成 PDF 发票、作为附件发给顾客。后台部分补上 Django admin 的三个进阶功能：
+  自定义列表列、管理动作（导出 CSV）和自定义视图（订单详情、PDF）。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 stripe-java 创建 Checkout Session，用 303 重定向把顾客送到支付页</li>
+    <li>把外部服务包在接口后面，让控制器可测试</li>
+    <li>实现 Webhook：读取原始请求体、校验签名、豁免 CSRF、处理重复投递</li>
+    <li>在测试里自己给 Webhook 请求签名，不依赖 Stripe 服务器</li>
+    <li>用 openhtmltopdf 把 Thymeleaf 模板渲染成 PDF，用 <code>MimeMessageHelper</code> 发送附件</li>
+    <li>在手写后台里实现管理动作、CSV 导出和自定义视图</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch09.html">Django 版第 9 章</a>；本章代码在 <code>springboot/Chapter09/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="flow">支付流程全景</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="Stripe Checkout 支付流程：下单后跳转到订单摘要页，点击支付后服务器创建 Checkout Session 并 303 重定向到 Stripe；付款成功后 Stripe 把顾客带回成功页，同时向 Webhook 发送事件；Webhook 把订单标记为已付款，事务提交后发送发票任务">
+  <rect class="bx" x="20" y="16" width="120" height="40" rx="8"/>
+  <text class="ttl" x="80" y="41" text-anchor="middle">顾客浏览器</text>
+  <rect class="bx-g" x="320" y="16" width="120" height="40" rx="8"/>
+  <text class="ttl on-g" x="380" y="41" text-anchor="middle">本站</text>
+  <rect class="bx-b" x="620" y="16" width="120" height="40" rx="8"/>
+  <text class="ttl on-b" x="680" y="41" text-anchor="middle">Stripe</text>
+  <path class="ln-d" d="M80 58 V320"/>
+  <path class="ln-d" d="M380 58 V320"/>
+  <path class="ln-d" d="M680 58 V320"/>
+
+  <path class="ln" d="M80 82 H376" marker-end="url(#ar)"/>
+  <text class="mono sm" x="230" y="76" text-anchor="middle">① POST /orders/create/</text>
+  <path class="ln-g" d="M380 106 H84" marker-end="url(#ar-g)"/>
+  <text class="sm" x="230" y="100" text-anchor="middle">② 302 → /payment/process/（会话里存 order_id）</text>
+  <path class="ln" d="M80 130 H376" marker-end="url(#ar)"/>
+  <text class="mono sm" x="230" y="124" text-anchor="middle">③ POST /payment/process/</text>
+  <path class="ln-b" d="M380 154 H676" marker-end="url(#ar-b)"/>
+  <text class="sm" x="530" y="148" text-anchor="middle">④ 创建 Checkout Session（API 调用）</text>
+  <path class="ln-g" d="M380 178 H84" marker-end="url(#ar-g)"/>
+  <text class="sm" x="230" y="172" text-anchor="middle">⑤ 303 → Stripe 托管的支付页</text>
+  <path class="ln-b" d="M80 202 H676" marker-end="url(#ar-b)"/>
+  <text class="sm" x="380" y="196" text-anchor="middle">⑥ 顾客在 Stripe 页面上输入卡号并付款</text>
+  <path class="ln-b" d="M680 226 H84" marker-end="url(#ar-b)"/>
+  <text class="sm" x="530" y="220" text-anchor="middle">⑦ 302 → /payment/completed/</text>
+  <path class="ln-a" d="M680 256 H384" marker-end="url(#ar-a)"/>
+  <text class="sm on-a" x="530" y="250" text-anchor="middle">⑧ POST /payment/webhook/（带签名）</text>
+  <rect class="bx-a" x="290" y="266" width="180" height="46" rx="8"/>
+  <text class="sm on-a" x="380" y="285" text-anchor="middle">⑨ 标记已付款</text>
+  <text class="sm" x="380" y="302" text-anchor="middle">提交后发“生成发票”任务</text>
+</svg>
+<figcaption>图 S9-1　⑦ 只是把顾客送回来，不能据此认为付款成功；真正可信的是 ⑧ 带签名的 Webhook</figcaption>
+</figure>
+
+<div class="box warn">
+  <div class="t">&#9888; 不要在“成功页”里标记已付款</div>
+  <p>成功页的地址谁都能直接访问，顾客还可能在付款后关掉浏览器、永远不回来。只有 Stripe 服务器发来的、签名正确的 Webhook 才能作为付款成功的依据 —— 两个框架都一样。</p>
+</div>
+
+<h2 id="checkout">创建 Checkout Session</h2>
+
+<h3>配置与客户端</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+# settings.py
+STRIPE_PUBLISHABLE_KEY = config('STRIPE_PUBLISHABLE_KEY')
+STRIPE_SECRET_KEY = config('STRIPE_SECRET_KEY')
+STRIPE_API_VERSION = '2024-04-10'
+STRIPE_WEBHOOK_SECRET = config('STRIPE_WEBHOOK_SECRET')
+
+# payment/views.py —— 模块级全局变量
+stripe.api_key = settings.STRIPE_SECRET_KEY
+stripe.api_version = settings.STRIPE_API_VERSION
+</pre></div></div>
+  <div class="sb"><div class="h">Spring</div>
+<div class="code" data-lang="java"><pre>
+@ConfigurationProperties(prefix = "stripe")
+public record StripeProperties(String publishableKey,
+        String secretKey, String webhookSecret) {
+    public boolean isTestMode() {
+        return secretKey != null
+                &amp;&amp; secretKey.contains("_test_");
+    }
+}
+
+@Configuration
+public class StripeConfig {
+    @Bean
+    StripeClient stripeClient(StripeProperties p) {
+        return new StripeClient(p.secretKey());
+    }
+}
+</pre></div></div>
+</div>
+
+<p>
+  stripe-java 推荐创建 <code>StripeClient</code> 实例而不是设置全局 <code>Stripe.apiKey</code>；注册成 Bean 后按需注入。
+  另一个区别：Python SDK 可以指定任意 API 版本，而 Java SDK 是强类型的，每个版本的 SDK 绑定一个 API 版本（<code>Stripe.API_VERSION</code>），
+  升级 API 版本就是升级依赖。
+</p>
+
+<h3>把外部服务藏在接口后面</h3>
+
+<div class="code" data-lang="java" data-file="payment/StripeGateway.java">
+<pre>
+public interface StripeGateway {
+    /** 创建 Checkout Session，返回 Stripe 托管支付页的地址 */
+    String createCheckoutSession(Order order, String successUrl, String cancelUrl);
+}
+</pre>
+</div>
+
+<p>控制器只依赖这个接口。生产环境注入真正调用 Stripe 的实现，测试里用 <code>@MockitoBean StripeGateway</code> 换成假的 —— 对应 Python 里 <code>mock.patch('stripe.checkout.Session.create')</code>，但不需要知道被调用的函数“住在哪个模块”。</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · payment_process</div>
+<div class="code" data-lang="py"><pre>
+session_data = {
+    'mode': 'payment',
+    'client_reference_id': order.id,
+    'success_url': success_url,
+    'cancel_url': cancel_url,
+    'line_items': [],
+}
+for item in order.items.all():
+    session_data['line_items'].append({
+        'price_data': {
+            'unit_amount': int(item.price * Decimal('100')),
+            'currency': 'usd',
+            'product_data': {'name': item.product.name},
+        },
+        'quantity': item.quantity,
+    })
+session = stripe.checkout.Session.create(**session_data)
+return redirect(session.url, code=303)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · StripeCheckoutGateway</div>
+<div class="code" data-lang="java"><pre>
+SessionCreateParams.Builder params = SessionCreateParams.builder()
+        .setMode(SessionCreateParams.Mode.PAYMENT)
+        .setClientReferenceId(order.getId().toString())
+        .setSuccessUrl(successUrl)
+        .setCancelUrl(cancelUrl);
+for (OrderItem item : order.getItems()) {
+    params.addLineItem(SessionCreateParams.LineItem.builder()
+        .setQuantity((long) item.getQuantity())
+        .setPriceData(SessionCreateParams.LineItem.PriceData.builder()
+            .setCurrency("usd")
+            // 以“分”为单位，精确转换，有小数就抛异常
+            .setUnitAmount(item.getPrice()
+                .multiply(BigDecimal.valueOf(100)).longValueExact())
+            .setProductData(...setName(item.getProduct().getName())...)
+            .build())
+        .build());
+}
+Session session = stripe.v1().checkout().sessions().create(params.build());
+return session.getUrl();
+</pre></div></div>
+</div>
+
+<p>Python 用字典传参，拼错一个键要到运行时才发现；Java SDK 为每个 API 都生成了 Builder，IDE 能补全、编译器能检查。<code>longValueExact()</code> 在金额出现“半分钱”时直接抛异常，而 <code>int(...)</code> 会悄悄截断。</p>
+
+<h3>303 重定向</h3>
+
+<div class="code" data-lang="java" data-file="payment/PaymentController.java（节选）">
+<pre>
+@PostMapping("/process/")
+public ResponseEntity&lt;Void&gt; process(HttpSession session) {
+    Order order = currentOrder(session);            // request.session.get('order_id')
+    String base = ServletUriComponentsBuilder.fromCurrentContextPath().toUriString();
+    String url = stripe.createCheckoutSession(order, base + "/payment/completed/", base + "/payment/canceled/");
+    return ResponseEntity.status(HttpStatus.SEE_OTHER).location(URI.create(url)).build();
+}
+</pre>
+</div>
+
+<p><code>"redirect:..."</code> 视图名发的是 302。需要 303（“POST 之后请用 GET 访问新地址”）时，直接返回 <code>ResponseEntity</code> 并指定状态码。</p>
+
+<h2 id="webhook">Webhook</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · payment/webhooks.py</div>
+<div class="code" data-lang="py"><pre>
+@csrf_exempt
+def stripe_webhook(request):
+    payload = request.body
+    sig_header = request.META['HTTP_STRIPE_SIGNATURE']
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header,
+            settings.STRIPE_WEBHOOK_SECRET)
+    except ValueError:
+        return HttpResponse(status=400)
+    except stripe.error.SignatureVerificationError:
+        return HttpResponse(status=400)
+
+    if event.type == 'checkout.session.completed':
+        session = event.data.object
+        if (session.mode == 'payment'
+                and session.payment_status == 'paid'):
+            try:
+                order = Order.objects.get(
+                    id=session.client_reference_id)
+            except Order.DoesNotExist:
+                return HttpResponse(status=404)
+            order.paid = True
+            order.stripe_id = session.payment_intent
+            order.save()
+            payment_completed.delay(order.id)
+    return HttpResponse(status=200)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · StripeWebhookController</div>
+<div class="code" data-lang="java"><pre>
+@PostMapping("/payment/webhook/")
+public ResponseEntity&lt;Void&gt; webhook(
+        @RequestBody String payload,   // 原始请求体！
+        @RequestHeader(name = "Stripe-Signature",
+                       required = false) String signature) {
+    Event event;
+    try {
+        event = Webhook.constructEvent(payload, signature,
+                properties.webhookSecret());
+    } catch (SignatureVerificationException
+             | RuntimeException e) {
+        return ResponseEntity.badRequest().build();
+    }
+    if ("checkout.session.completed".equals(event.getType())) {
+        Session session = (Session) dataObject(event);
+        if ("payment".equals(session.getMode())
+                &amp;&amp; "paid".equals(session.getPaymentStatus())) {
+            boolean found = payments.markPaid(
+                Long.valueOf(session.getClientReferenceId()),
+                session.getPaymentIntent());
+            if (!found) {
+                return ResponseEntity.notFound().build();
+            }
+        }
+    }
+    return ResponseEntity.ok().build();
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li><strong>原始请求体</strong>：签名是对 Stripe 发出的原始字节计算的。参数写成 <code>@RequestBody String</code>，拿到的就是原样的 JSON；如果写成对象让 Jackson 转换，再序列化回去就不是原来的字节了，签名必然校验失败。</li>
+  <li><strong>CSRF 豁免</strong>：Stripe 服务器不可能带我们的 CSRF 令牌。Spring 里在安全配置中写 <code>csrf.ignoringRequestMatchers("/payment/webhook/")</code> ≈ <code>@csrf_exempt</code>。安全性由签名保证。</li>
+  <li><strong>缺少签名头</strong>：书中 <code>request.META['HTTP_STRIPE_SIGNATURE']</code> 在没有这个头时抛 <code>KeyError</code>（500）。这里设为 <code>required = false</code>，交给签名校验返回 400。</li>
+</ul>
+
+<h3>重复投递与 API 版本</h3>
+
+<div class="code" data-lang="java" data-file="payment/PaymentService.java（节选）">
+<pre>
+@Transactional
+public boolean markPaid(Long orderId, String paymentIntentId) {
+    return orders.findById(orderId).map(order -&gt; {
+        if (!order.isPaid()) {                      // Stripe 可能重复投递同一个事件
+            order.setPaid(true);
+            order.setStripeId(paymentIntentId);
+            events.publishEvent(new PaymentCompletedEvent(order.getId()));   // 提交后再发“生成发票”任务
+        }
+        return true;
+    }).orElse(false);
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; Webhook 要能承受重复</div>
+  <p>Stripe 在没收到 2xx 响应时会重试，网络抖动时同一事件可能到达多次。书中每次都 <code>payment_completed.delay()</code>，重复投递就会发两份发票。处理 Webhook 的代码必须<strong>幂等</strong>：这里检查“已付款就不再处理”。</p>
+</div>
+
+<p>
+  stripe-java 只有在事件的 API 版本与 SDK 一致时，<code>getDataObjectDeserializer().getObject()</code> 才会返回对象；版本不一致时返回空，需要 <code>deserializeUnsafe()</code>。
+  控制器里先尝试安全方式，失败再退回宽松方式并记日志。更好的做法是在 Stripe 控制台里把 Webhook 端点的 API 版本固定为 SDK 的版本。
+</p>
+
+<h3>本地调试</h3>
+
+<div class="code" data-lang="bash">
+<pre>
+# Stripe CLI 把测试环境的事件转发到本机，并打印 webhook 密钥（填进 .env 的 STRIPE_WEBHOOK_SECRET）
+stripe listen --forward-to localhost:8080/payment/webhook/
+# 测试卡号 4242 4242 4242 4242，任意未来日期和 CVC
+</pre>
+</div>
+
+<h3>在测试里自己签名</h3>
+
+<p>Stripe 的签名算法是公开的：<code>t=时间戳,v1=HMAC-SHA256(密钥, "时间戳.请求体")</code>。测试里按同样的规则生成签名头，就能在没有网络的情况下走通<strong>真实的</strong>校验代码：</p>
+
+<div class="code" data-lang="java" data-file="test/.../StripeSignatures.java（节选）">
+<pre>
+static String sign(String payload, String secret) throws Exception {
+    long timestamp = System.currentTimeMillis() / 1000;
+    Mac mac = Mac.getInstance("HmacSHA256");
+    mac.init(new SecretKeySpec(secret.getBytes(UTF_8), "HmacSHA256"));
+    String signature = HexFormat.of().formatHex(mac.doFinal((timestamp + "." + payload).getBytes(UTF_8)));
+    return "t=" + timestamp + ",v1=" + signature;
+}
+
+// PaymentTests
+mvc.perform(post("/payment/webhook/").contentType(MediaType.APPLICATION_JSON).content(payload)
+                .header("Stripe-Signature", StripeSignatures.sign(payload, stripe.webhookSecret())))
+        .andExpect(status().isOk());
+</pre>
+</div>
+
+<h2 id="pdf">PDF 发票</h2>
+
+<p>书中用 WeasyPrint 把 HTML + CSS 渲染成 PDF。Java 生态里最接近的是 openhtmltopdf（基于 Flying Saucer 和 PDFBox）。流程一样分两步：</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · admin_order_pdf</div>
+<div class="code" data-lang="py"><pre>
+html = render_to_string('orders/order/pdf.html',
+                        {'order': order})
+response = HttpResponse(content_type='application/pdf')
+response['Content-Disposition'] = \
+    f'filename=order_{order.id}.pdf'
+weasyprint.HTML(string=html).write_pdf(
+    response,
+    stylesheets=[weasyprint.CSS(
+        finders.find('css/pdf.css'))])
+return response
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · InvoicePdfRenderer</div>
+<div class="code" data-lang="java"><pre>
+public byte[] render(Order order) {
+    Context context = new Context();
+    context.setVariable("order", order);
+    // ① ≈ render_to_string
+    String html = templateEngine.process("orders/order/pdf", context);
+    // ② HTML → PDF；基准地址让 &lt;link href="css/pdf.css"&gt; 能找到样式表
+    String baseUri = new ClassPathResource("static/")
+            .getURL().toExternalForm();
+    PdfRendererBuilder builder = new PdfRendererBuilder();
+    builder.useFastMode();
+    builder.withHtmlContent(html, baseUri);
+    builder.toStream(out);
+    builder.run();
+    return out.toByteArray();
+}
+</pre></div></div>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; openhtmltopdf 的限制</div>
+  <p>
+    ① 输入必须是 <strong>XHTML</strong>：所有标签都要闭合，模板里写 <code>&lt;br/&gt;</code>、<code>&lt;link ... /&gt;</code>。② 只支持 CSS 2.1 加少量 CSS3，没有 flex/grid，
+    书中 <code>pdf.css</code> 里让“已付款”印章倾斜的 <code>transform: rotate(-15deg)</code> 不生效（印章会正着显示），其他样式都正常。WeasyPrint 对现代 CSS 的支持要好得多。
+    需要复杂排版时，也可以用无头 Chrome（Playwright）打印 PDF。
+  </p>
+</div>
+
+<p>后台的 PDF 视图直接返回字节数组，并设置 <code>Content-Disposition</code>：</p>
+
+<div class="code" data-lang="java" data-file="orders/admin/OrderAdminController.java（节选）">
+<pre>
+@GetMapping("/{id}/pdf/")
+@Transactional(readOnly = true)
+public ResponseEntity&lt;byte[]&gt; pdf(@PathVariable Long id) {
+    Order order = order(id);
+    return ResponseEntity.ok()
+            .contentType(MediaType.APPLICATION_PDF)
+            .header(HttpHeaders.CONTENT_DISPOSITION,
+                    ContentDisposition.inline().filename("order_" + order.getId() + ".pdf").build().toString())
+            .body(invoices.render(order));
+}
+</pre>
+</div>
+
+<h3>带附件的邮件</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · payment/tasks.py</div>
+<div class="code" data-lang="py"><pre>
+email = EmailMessage(subject, message,
+                     'admin@myshop.com', [order.email])
+out = BytesIO()
+weasyprint.HTML(string=html).write_pdf(out, ...)
+email.attach(f'order_{order.id}.pdf',
+             out.getvalue(), 'application/pdf')
+email.send()
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · payment/InvoiceWorker.java</div>
+<div class="code" data-lang="java"><pre>
+MimeMessage mime = mailSender.createMimeMessage();
+MimeMessageHelper mail = new MimeMessageHelper(mime, true); // multipart
+mail.setFrom(properties.defaultFromEmail());
+mail.setTo(order.getEmail());
+mail.setSubject("My Shop - Invoice no. " + order.getId());
+mail.setText("Please, find attached the invoice ...");
+mail.addAttachment("order_" + order.getId() + ".pdf",
+        new ByteArrayResource(invoices.render(order)),
+        "application/pdf");
+mailSender.send(mime);
+</pre></div></div>
+</div>
+
+<p>第 8 章用的 <code>MailSender</code> 只能发纯文本；要附件就得用它的子接口 <code>JavaMailSender</code>。开发时这些邮件都进了 Mailpit，可以直接在网页上打开附件查看 PDF。</p>
+
+<h2 id="admin">订单后台</h2>
+
+<h3>自定义列</h3>
+
+<p>Django 在 <code>list_display</code> 里放函数（<code>order_payment</code>、<code>order_detail</code>、<code>order_pdf</code>）生成链接，用 <code>mark_safe</code> 输出 HTML。手写后台里它们就是表格里多出来的几列：</p>
+
+<div class="code" data-lang="th" data-file="templates/admin/orders/order_list.html（节选）">
+<pre>
+&lt;td&gt;&lt;a th:if="${o.stripeId != ''}" th:href="${o.stripeUrl(stripeTestMode)}" target="_blank"
+       th:text="${o.stripeId}"&gt;pi_&lt;/a&gt;&lt;/td&gt;
+&lt;td&gt;&lt;a th:href="@{/admin/orders/order/{id}/detail/(id=${o.id})}"&gt;View&lt;/a&gt;&lt;/td&gt;
+&lt;td&gt;&lt;a th:href="@{/admin/orders/order/{id}/pdf/(id=${o.id})}"&gt;PDF&lt;/a&gt;&lt;/td&gt;
+</pre>
+</div>
+
+<p><code>Order.stripeUrl(boolean testMode)</code> 对应 <code>get_stripe_url()</code>。Django 版在模型方法里读 <code>settings.STRIPE_SECRET_KEY</code> 判断是否测试模式；Spring 版的实体不访问配置，由控制器把 <code>stripeTestMode</code> 传给模板 —— 实体保持“纯数据 + 业务规则”。</p>
+
+<h3>管理动作：导出 CSV</h3>
+
+<div class="code" data-lang="java" data-file="orders/admin/OrderAdminController.java（节选）">
+<pre>
+@PostMapping("/action/")
+@Transactional(readOnly = true)
+public Object action(@RequestParam String action, @RequestParam(name = "ids", required = false) List&lt;Long&gt; ids,
+                     HttpServletResponse response, RedirectAttributes redirect) throws IOException {
+    if (ids == null || ids.isEmpty()) {
+        Messages.info(redirect, "Items must be selected in order to perform actions on them. ...");
+        return "redirect:/admin/orders/order/";
+    }
+    ...
+    response.setContentType("text/csv;charset=utf-8");
+    response.setHeader(HttpHeaders.CONTENT_DISPOSITION,
+            ContentDisposition.attachment().filename("order.csv").build().toString());
+    csvExporter.write(orders.findByIdInOrderByIdAsc(ids), response.getWriter());
+    return null;   // 已经直接写了响应体
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="orders/admin/OrderCsvExporter.java（节选）">
+<pre>
+CSVFormat format = CSVFormat.DEFAULT.builder()
+        .setHeader("ID", "first name", "last name", "email", ...)
+        .get();
+try (CSVPrinter csv = new CSVPrinter(writer, format)) {
+    for (Order o : orders) {
+        csv.printRecord(o.getId(), o.getFirstName(), ..., o.getCreated().format(DATE), o.isPaid(), o.getStripeId());
+    }
+}
+</pre>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 通用 vs 显式</div>
+  <p>
+    书中的 <code>export_to_csv</code> 通过 <code>modeladmin.model._meta.get_fields()</code> 反射出任意模型的字段，一个函数给所有 ModelAdmin 复用。
+    Java 也能用 JPA 的 <code>Metamodel</code> 或反射做到，但这里选择显式列出列 —— 导出文件往往是给财务、给其他系统用的，列名和格式应该是“契约”，不应随模型字段变化而悄悄改变。
+    Apache Commons CSV 负责引号和逗号转义，不要自己拼字符串。
+  </p>
+</div>
+
+<h3>自定义后台视图</h3>
+
+<p>Django 的 <code>admin_order_detail</code> 视图用 <code>@staff_member_required</code> 保护，模板继承 <code>admin/base_site.html</code> 融入后台外观。手写后台里所有 <code>/admin/**</code> 都由安全配置统一要求 <code>ROLE_STAFF</code>，模板继承我们自己的 <code>admin/layout</code> —— 自定义视图和“内置”视图没有区别，这是手写后台少有的好处。</p>
+
+<h2 id="tests">测试</h2>
+
+<ul>
+  <li><code>PaymentTests</code>：会话里没有订单返回 404；Mock 网关验证 303 和 <code>Location</code>；无签名和错误签名返回 400；正确签名的事件把订单标记为已付款；未知订单返回 404。</li>
+  <li><code>InvoiceEmailTests</code>（不加 <code>@Transactional</code>）：Webhook → 提交 → RabbitMQ → <code>InvoiceWorker</code> → 带 <code>order_N.pdf</code> 附件的邮件。</li>
+  <li><code>OrderAdminTests</code>：按 paid 过滤、Stripe 链接、CSV 内容与文件名、未勾选时的提示、详情页、PDF 以 <code>%PDF-</code> 开头。</li>
+</ul>
+
+<p>本章共 15 个测试。另外在真实环境生成了一张发票 PDF，版式与书中 WeasyPrint 的输出一致（除了上面说的印章旋转）。</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 9 章 Spring 版点评 <small>springboot/Chapter09</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> Webhook 幂等、容错</h4>
+    <p>重复事件不会重复发发票；缺少签名头返回 400 而不是 500；发票任务在支付状态提交后才入队。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 类型安全的 Stripe 调用</h4>
+    <p>Builder 让参数名和类型都在编译期检查；<code>longValueExact()</code> 避免金额被悄悄截断。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 订单 id 放在会话里</h4>
+    <p>和书中一样，支付页从会话取 <code>order_id</code>。会话过期后顾客就无法再支付这个订单。更完善的做法是给订单生成一个不可猜测的公开令牌（UUID），支付链接里带上它。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> PDF 渲染在请求线程里做</h4>
+    <p>后台点“PDF”时同步渲染；发票数量多、模板复杂时可以缓存生成结果，或者在付款时生成一次存进对象存储。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 为什么不把 Stripe 调用放进事务</h4>
+    <p><code>PaymentController.process()</code> 没有 <code>@Transactional</code>：远程调用可能耗时数秒，放在事务里会一直占着数据库连接。原则是“事务里只做数据库操作”，外部调用放在事务之外，或者像本章一样用事件在提交后触发。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>Stripe Checkout：创建 Session → 303 到托管支付页；付款结果以签名 Webhook 为准。</li>
+  <li>外部服务包在接口后面，测试时替换；Webhook 签名可以在测试里自己生成。</li>
+  <li>Webhook 要读原始请求体、豁免 CSRF、保证幂等。</li>
+  <li>PDF：Thymeleaf 渲染 XHTML → openhtmltopdf；附件用 <code>MimeMessageHelper</code>。</li>
+  <li>后台的自定义列、管理动作、自定义视图都只是普通的控制器和模板。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>注册一个 Stripe 测试账户，用 Stripe CLI 在本地走通完整支付流程，在 Mailpit 里查看发票附件。</li>
+    <li>给订单加一个 UUID 字段，支付页改为 <code>/payment/process/{uuid}/</code>，不再依赖会话。</li>
+    <li>再加一个管理动作“标记为已付款”，并确保它也会触发发票任务（提示：复用 <code>PaymentService.markPaid</code>）。</li>
+    <li>把 PDF 模板里的印章改成用背景图片实现，绕开 <code>transform</code> 不支持的问题。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

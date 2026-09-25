@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 17 章 · 上线部署 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="17">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 17 章 · 项目四：在线学习平台</span>
+<h1>上线部署</h1>
+<p class="lede">
+  最后一章把 Educa 部署到生产环境：配置分环境、换成 PostgreSQL、用 Docker Compose 编排数据库、Redis、应用和 Nginx，配置 HTTPS，
+  再加上一个自定义中间件（课程子域名）和一个管理命令（选课提醒邮件）。书中的生产架构有五个容器：PostgreSQL、Redis、uWSGI（HTTP）、Daphne（WebSocket）、Nginx。
+  Spring Boot 应用是一个自带服务器的 jar，HTTP 和 WebSocket 都在里面，<strong>少了两个组件</strong>；但“生产环境的那些开关”一个也不能少 ——
+  这一章会逐一对照 Django 的 <code>check --deploy</code> 清单，并在真正的 Docker 环境里走一遍。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 Profile 分离开发和生产配置（≈ <code>settings/base.py</code> + <code>local.py</code> + <code>prod.py</code>），机密从环境变量读取</li>
+    <li>让同一套 Flyway 迁移和手写 SQL 在 H2 与 PostgreSQL 上都能运行，并用 Testcontainers 验证</li>
+    <li>写多阶段、分层、非 root 的 Dockerfile；用健康检查代替 wait-for-it.sh</li>
+    <li>配置 Nginx：HTTPS、WebSocket、上传文件、转发头；理解 <code>forward-headers-strategy</code></li>
+    <li>把 <code>SECURE_*</code>、<code>ALLOWED_HOSTS</code> 等安全设置翻译成 Spring 配置，并写测试</li>
+    <li>用 Servlet 过滤器实现子域名中间件；用 <code>ApplicationRunner</code> 实现 <code>enroll_reminder</code> 命令</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch17.html">Django 版第 17 章</a>；本章代码在 <code>springboot/Chapter17/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="overview">全景：生产架构</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 236" role="img" aria-label="生产架构对比。Django：浏览器到 Nginx，Nginx 把普通请求通过 uWSGI 套接字交给 Django，把 /ws/ 交给 Daphne，两者都连接 PostgreSQL 和 Redis。Spring：浏览器到 Nginx，Nginx 把所有请求（包括 /ws/ 升级请求）转发给同一个 Spring Boot 应用的 8080 端口，应用连接 PostgreSQL 和 Redis；上传文件由 Nginx 从共享卷直接返回">
+  <text class="ttl" x="190" y="20" text-anchor="middle">Django（书中）</text>
+  <rect class="bx" x="10" y="40" width="100" height="44" rx="8"/>
+  <text class="ttl" x="60" y="67" text-anchor="middle">浏览器</text>
+  <rect class="bx-d" x="140" y="40" width="100" height="44" rx="8"/>
+  <text class="ttl" x="190" y="67" text-anchor="middle">Nginx</text>
+  <rect class="bx-b" x="270" y="30" width="100" height="40" rx="8"/>
+  <text class="sm on-b" x="320" y="55" text-anchor="middle">uWSGI + Django</text>
+  <rect class="bx-p" x="270" y="80" width="100" height="40" rx="8"/>
+  <text class="sm on-p" x="320" y="105" text-anchor="middle">Daphne（/ws/）</text>
+  <rect class="bx" x="140" y="150" width="100" height="36" rx="8"/>
+  <text class="sm" x="190" y="173" text-anchor="middle">PostgreSQL</text>
+  <rect class="bx" x="270" y="150" width="100" height="36" rx="8"/>
+  <text class="sm" x="320" y="173" text-anchor="middle">Redis</text>
+  <path class="ln" d="M112 62 H136" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M242 55 H266" marker-end="url(#ar-b)"/>
+  <path class="ln-p" d="M242 72 H254 V100 H266" marker-end="url(#ar-p)"/>
+  <path class="ln-d" d="M300 122 V146"/>
+  <path class="ln-d" d="M300 122 H200 V146"/>
+  <text class="sm" x="190" y="220" text-anchor="middle">5 个容器；/static/ 需要 collectstatic 后由 Nginx 提供</text>
+
+  <text class="ttl on-g" x="580" y="20" text-anchor="middle">Spring Boot（本章）</text>
+  <rect class="bx" x="410" y="40" width="100" height="44" rx="8"/>
+  <text class="ttl" x="460" y="67" text-anchor="middle">浏览器</text>
+  <rect class="bx-d" x="540" y="40" width="100" height="44" rx="8"/>
+  <text class="ttl" x="590" y="67" text-anchor="middle">Nginx</text>
+  <rect class="bx-g" x="660" y="30" width="95" height="90" rx="8"/>
+  <text class="ttl on-g" x="707" y="56" text-anchor="middle">web</text>
+  <text class="sm" x="707" y="76" text-anchor="middle">Spring Boot</text>
+  <text class="sm" x="707" y="94" text-anchor="middle">HTTP + WS</text>
+  <text class="mono sm" x="707" y="110" text-anchor="middle">:8080</text>
+  <rect class="bx" x="540" y="150" width="100" height="36" rx="8"/>
+  <text class="sm" x="590" y="173" text-anchor="middle">PostgreSQL</text>
+  <rect class="bx" x="660" y="150" width="95" height="36" rx="8"/>
+  <text class="sm" x="707" y="173" text-anchor="middle">Redis</text>
+  <rect class="bx-a" x="420" y="150" width="100" height="36" rx="8"/>
+  <text class="sm on-a" x="470" y="173" text-anchor="middle">media 卷</text>
+  <path class="ln" d="M512 62 H536" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M642 62 H656" marker-end="url(#ar-g)"/>
+  <path class="ln-d" d="M707 122 V146"/>
+  <path class="ln-d" d="M690 122 V135 H600 V146"/>
+  <path class="ln-a" d="M560 86 V110 H470 V146"/>
+  <text class="sm on-a" x="515" y="104" text-anchor="middle">/media/</text>
+  <text class="sm" x="590" y="220" text-anchor="middle">4 个容器；静态文件在 jar 里，带内容哈希由应用返回</text>
+</svg>
+<figcaption>图 S17-1　Spring Boot 应用自带服务器，同一个端口处理 HTTP 和 WebSocket</figcaption>
+</figure>
+
+<h2 id="profiles">配置分环境：Profile</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · settings 包</div>
+<div class="code" data-lang="python"><pre>
+# settings/base.py：公共设置
+# settings/local.py
+from .base import *
+DEBUG = True
+DATABASES = {'default': {'ENGINE': '...sqlite3', ...}}
+
+# settings/prod.py
+from decouple import config
+from .base import *
+DEBUG = False
+ALLOWED_HOSTS = ['.educaproject.com']
+DATABASES = {'default': {
+    'ENGINE': 'django.db.backends.postgresql',
+    'NAME': config('POSTGRES_DB'), ...}}
+CSRF_COOKIE_SECURE = True
+SESSION_COOKIE_SECURE = True
+SECURE_SSL_REDIRECT = True
+
+# 选择：DJANGO_SETTINGS_MODULE=educa.settings.prod
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · application.yaml + application-prod.yaml</div>
+<div class="code" data-lang="yaml"><pre>
+# application.yaml：公共设置 + 本地开发的默认值
+spring:
+  datasource:
+    url: jdbc:h2:file:./data/educa
+
+# application-prod.yaml：叠加在上面
+spring:
+  datasource:
+    url: jdbc:postgresql://${POSTGRES_HOST:db}:5432/${POSTGRES_DB}
+    username: ${POSTGRES_USER}
+    password: ${POSTGRES_PASSWORD}
+server:
+  forward-headers-strategy: native
+  servlet.session.cookie:
+    secure: true
+    http-only: true
+educa:
+  require-https: true
+  allowed-hosts: .${SITE_DOMAIN:educaproject.com}, localhost
+
+# 选择：SPRING_PROFILES_ACTIVE=prod
+</pre></div></div>
+</div>
+
+<ul>
+  <li><strong>叠加而不是继承</strong>：激活 <code>prod</code> 后，Spring 先读 <code>application.yaml</code>，再用 <code>application-prod.yaml</code> 覆盖同名的键 —— 效果等同于 <code>from .base import *</code> 后再改几个值，但没有 Python 的 import 技巧。</li>
+  <li><strong>机密</strong>：<code>${POSTGRES_PASSWORD}</code> 从环境变量读取，没有默认值（缺少时启动失败，而不是悄悄用一个默认密码）。python-decouple 的 <code>config()</code> 也是这个思路。Compose 从 <code>.env</code> 文件注入环境变量，<code>.env</code> 不进代码仓库，只提交一份 <code>.env.example</code>。</li>
+  <li><strong>自己的配置项</strong>用 <code>@ConfigurationProperties</code> 绑定到 record（<code>EducaProperties</code>），有类型、有默认值、IDE 能补全，比散落的 <code>@Value</code> 好维护。</li>
+</ul>
+
+<h2 id="postgres">换成 PostgreSQL</h2>
+
+<p>
+  书中换数据库只需要改 <code>DATABASES</code>，重新 <code>migrate</code>、<code>loaddata</code> 即可 —— ORM 屏蔽了差异。
+  我们的迁移是手写 SQL，还有几处原生查询，所以要确认它们在两种数据库上都成立：
+</p>
+
+<ul>
+  <li><code>BIGINT GENERATED BY DEFAULT AS IDENTITY</code>、<code>TIMESTAMP WITH TIME ZONE</code>、<code>CROSS JOIN (VALUES ...) AS p(codename)</code>：SQL 标准写法，H2 和 PostgreSQL 都支持。</li>
+  <li>fixture 导入用的 <code>MERGE INTO ... USING (VALUES ...)</code>：PostgreSQL 15 起支持。</li>
+  <li>重置自增序列：两边语法不同，<code>LoadDataCommand</code> 里按数据库类型分支（第 12 章）。</li>
+  <li>加上 <code>org.postgresql:postgresql</code> 驱动和 <code>flyway-database-postgresql</code>（Flyway 10 起各数据库的支持拆成了单独的模块）。</li>
+</ul>
+
+<div class="code" data-lang="java" data-file="PostgresCompatibilityTests.java（节选）">
+<pre>
+@SpringBootTest
+@Import({TestcontainersConfiguration.class, PostgresCompatibilityTests.Postgres.class})
+class PostgresCompatibilityTests {
+
+    @TestConfiguration(proxyBeanMethods = false)
+    static class Postgres {
+        @Bean @ServiceConnection
+        PostgreSQLContainer postgres() { return new PostgreSQLContainer("postgres:16"); }
+    }
+
+    @Test
+    void migrationsFixturesAndQueriesWorkOnPostgres() {
+        assertThat(groups.findByName("Instructors")).isPresent();   // V3 数据迁移
+        assertThat(loadData.load("subjects")).isEqualTo(4);         // MERGE
+        assertThat(loadData.load("subjects")).isEqualTo(4);         // 可重复执行
+        Subject chemistry = subjects.save(new Subject("Chemistry", "chemistry"));
+        assertThat(chemistry.getId()).isGreaterThan(4L);             // setval() 生效
+        assertThat(subjects.summaries(PageRequest.of(0, 10)).getContent()) ...;   // group by 分页
+    }
+}
+</pre>
+</div>
+
+<p>
+  其他测试仍然用 H2（快），这一个测试启动真正的 PostgreSQL 16 容器，跑完全部迁移和几个手写查询。
+  <code>@ServiceConnection</code> 让容器的地址自动覆盖 <code>spring.datasource.*</code>，不用写任何连接配置。
+</p>
+
+<h2 id="docker">Dockerfile：多阶段、分层、非 root</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django 书 · Dockerfile</div>
+<div class="code" data-lang="dockerfile"><pre>
+FROM python:3.12.3
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+WORKDIR /code
+RUN pip install --upgrade pip
+COPY requirements.txt .
+RUN pip install -r requirements.txt
+COPY . .
+</pre></div></div>
+  <div class="sb"><div class="h">Spring 版 · Dockerfile</div>
+<div class="code" data-lang="dockerfile"><pre>
+FROM maven:3.9-eclipse-temurin-21 AS build
+WORKDIR /src
+COPY pom.xml .
+RUN --mount=type=cache,target=/root/.m2 mvn -B -q dependency:go-offline
+COPY src src
+RUN --mount=type=cache,target=/root/.m2 mvn -B -q package -DskipTests
+
+FROM eclipse-temurin:21-jre AS extract
+WORKDIR /extract
+COPY --from=build /src/target/educa-*.jar app.jar
+RUN java -Djarmode=tools -jar app.jar extract --layers --launcher --destination extracted
+
+FROM eclipse-temurin:21-jre
+RUN useradd --system --uid 1001 educa &amp;&amp; mkdir -p /app/media &amp;&amp; chown educa /app/media
+WORKDIR /app
+COPY --from=extract /extract/extracted/dependencies/ ./
+COPY --from=extract /extract/extracted/spring-boot-loader/ ./
+COPY --from=extract /extract/extracted/snapshot-dependencies/ ./
+COPY --from=extract /extract/extracted/application/ ./
+USER educa
+ENTRYPOINT ["java", "org.springframework.boot.loader.launch.JarLauncher"]
+</pre></div></div>
+</div>
+
+<ul>
+  <li><strong>多阶段</strong>：编译用带 Maven 和 JDK 的镜像，运行只用 JRE 镜像。最终镜像里没有源码、没有构建工具，更小也更安全。书中的镜像把整个项目目录（包括 <code>.git</code>、本地数据库……）都复制了进去，开发时还用卷挂载源码。</li>
+  <li><strong>分层</strong>：<code>-Djarmode=tools extract --layers</code> 把 fat jar 拆成“依赖 / 加载器 / 快照依赖 / 应用代码”四层，按变化频率从低到高依次 <code>COPY</code>。只改了代码时，只有最上面一层变化，推送和拉取镜像只传几百 KB。</li>
+  <li><strong>缓存挂载</strong>：<code>--mount=type=cache,target=/root/.m2</code> 让 Maven 仓库在多次构建之间复用，依赖只下载一次。</li>
+  <li><strong>非 root</strong>：应用以 uid 1001 运行；<code>/app/media</code> 事先 <code>chown</code>，命名卷第一次创建时会继承这个属主。</li>
+  <li><strong>管理命令</strong>：<code>ENTRYPOINT</code> 是 java，参数追加在后面：<code>docker compose -f compose.prod.yaml run --rm web --loaddata=subjects</code>（≈ <code>docker compose exec web python manage.py loaddata ...</code>）。</li>
+</ul>
+
+<h2 id="compose">Docker Compose</h2>
+
+<div class="code" data-lang="yaml" data-file="compose.prod.yaml（节选）">
+<pre>
+services:
+  db:
+    image: postgres:16
+    volumes: [pgdata:/var/lib/postgresql/data]
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?在 .env 里设置 POSTGRES_PASSWORD}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+  cache:
+    image: redis:7.2
+    healthcheck: {test: ["CMD", "redis-cli", "ping"]}
+  web:
+    build: .
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      JAVA_TOOL_OPTIONS: -XX:MaxRAMPercentage=75
+    volumes: [media:/app/media]
+    depends_on:
+      db: {condition: service_healthy}        # 代替 wait-for-it.sh
+      cache: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/actuator/health/readiness"]
+  nginx:
+    image: nginx:1.27
+    ports: ["80:80", "443:443"]
+    volumes:
+      - ./deploy/nginx:/etc/nginx/templates:ro
+      - ./deploy/certs:/etc/nginx/certs:ro
+      - media:/app/media:ro
+    depends_on:
+      web: {condition: service_healthy}
+volumes: {pgdata: {}, redisdata: {}, media: {}}
+</pre>
+</div>
+
+<ul>
+  <li><strong>等待依赖就绪</strong>：书中用 <code>wait-for-it.sh db:5432</code> 等端口打开。端口打开不代表数据库能接受连接；Compose 的 <code>healthcheck</code> + <code>condition: service_healthy</code> 用 <code>pg_isready</code> 真正检查，而且不需要额外的脚本。</li>
+  <li><strong>应用自己的健康检查</strong>：<code>management.endpoint.health.probes.enabled=true</code> 提供 <code>/actuator/health/liveness</code> 和 <code>/readiness</code>（≈ Kubernetes 探针）。Nginx 要等 web 真正就绪才启动，避免刚上线时的 502。</li>
+  <li><strong>命名卷</strong>：书中把数据放在 <code>./data/db</code> 目录；命名卷由 Docker 管理，权限问题更少。<code>${VAR:?提示}</code> 在变量缺失时让 compose 直接报错。</li>
+  <li><strong>JVM 内存</strong>：<code>-XX:MaxRAMPercentage=75</code> 让堆大小跟随容器的内存限制，而不是宿主机的内存。</li>
+  <li>本地开发用的 <code>compose.yaml</code>（只有 Redis）不变，<code>mvn spring-boot:run</code> 时由 spring-boot-docker-compose 自动启动；它不会被打进 jar。</li>
+</ul>
+
+<h2 id="nginx">Nginx：HTTPS、WebSocket 与转发头</h2>
+
+<div class="code" data-lang="nginx" data-file="deploy/nginx/default.conf.template（节选）">
+<pre>
+server {
+    listen 443 ssl;
+    http2  on;
+    server_name .${SITE_DOMAIN};           # 主域名和所有子域名
+    ssl_certificate     /etc/nginx/certs/educa.crt;
+    ssl_certificate_key /etc/nginx/certs/educa.key;
+    client_max_body_size 11m;
+
+    proxy_set_header Host              $host;
+    proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    location / { proxy_pass http://educa; }
+
+    location /ws/ {
+        proxy_pass         http://educa;
+        proxy_http_version 1.1;
+        proxy_set_header   Upgrade $http_upgrade;
+        proxy_set_header   Connection "upgrade";
+        proxy_set_header   Host              $host;          # 必须重复！见下文
+        proxy_set_header   X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header   X-Forwarded-Proto $scheme;
+        proxy_read_timeout 1h;
+    }
+
+    location /media/   { alias /app/media/; }  # 上传文件由 Nginx 直接返回
+    location /actuator/ { return 404; }        # 监控端点不对外
+}
+server { listen 443 ssl default_server; ... return 444; }   # 其他主机名一律拒绝
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 真实部署时踩到的坑：proxy_set_header 不会“叠加”</div>
+  <p>
+    第一版的 <code>/ws/</code> 只写了 <code>Upgrade</code> 和 <code>Connection</code> 两行。在 Docker 里实测时，WebSocket 握手返回 400。
+    原因是 Nginx 的规则：<strong>location 里只要写了任何一条 <code>proxy_set_header</code>，就完全不继承 server 级别的 <code>proxy_set_header</code></strong>。
+    于是握手请求的 Host 变成了 upstream 的名字 <code>educa</code>，被应用的 ALLOWED_HOSTS 检查（下文）拒绝；
+    X-Forwarded-Proto 也丢了，应用会以为这是 http 请求。在 location 里把几个头重复写一遍就好了。
+    书中的配置同样只写了两行，只是 Django 版没有做 Host 检查之外的依赖，问题不那么明显。
+  </p>
+</div>
+
+<ul>
+  <li><strong>转发头</strong>：应用在 Nginx 后面，看到的连接来自 Nginx、协议是 http。<code>server.forward-headers-strategy=native</code> 让 Tomcat 的 <code>RemoteIpValve</code> 根据 <code>X-Forwarded-Proto</code>/<code>X-Forwarded-For</code> 还原真实的协议和客户端 IP（只信任内网地址发来的这些头），≈ Django 的 <code>SECURE_PROXY_SSL_HEADER</code>。不配置的话，重定向地址、API 分页链接都会是 <code>http://</code>，HTTPS 重定向还会陷入死循环。</li>
+  <li><strong>WebSocket</strong>：书中把 <code>/ws/</code> 转给另一个 daphne 容器；这里转给同一个应用，只是要带上升级头。<code>proxy_read_timeout</code> 调长，否则空闲 60 秒的聊天连接会被 Nginx 断开。</li>
+  <li><strong>静态文件</strong>：Django 需要 <code>collectstatic</code> 把文件收集到一个目录，由 Nginx 提供。Spring 的静态文件在 jar 里，由应用返回；生产环境打开内容哈希（下文），配合一年的缓存头，性能不是问题。</li>
+  <li><strong>证书</strong>：<code>scripts/dev-cert.sh</code> 用 openssl 生成覆盖 <code>educaproject.com</code> 和 <code>*.educaproject.com</code> 的自签名证书，供本机测试；正式环境用 Let's Encrypt。</li>
+</ul>
+
+<h2 id="security">生产环境安全设置</h2>
+
+<div class="tw">
+<table>
+  <tr><th>Django（<code>check --deploy</code> 关心的）</th><th>Spring 版</th></tr>
+  <tr><td><code>DEBUG = False</code></td><td><code>server.error.include-stacktrace=never</code>（默认就是不显示）；不要带着 devtools 上线（打包时自动排除）</td></tr>
+  <tr><td><code>SECRET_KEY</code> 从环境读取</td><td>本项目没有需要签名的机密；数据库密码等从环境变量读取</td></tr>
+  <tr><td><code>ALLOWED_HOSTS = ['.educaproject.com']</code></td><td>自定义 <code>AllowedHostsFilter</code>（Spring 默认不检查 Host）+ Nginx 的 <code>default_server</code> 返回 444</td></tr>
+  <tr><td><code>SECURE_SSL_REDIRECT = True</code></td><td><code>http.redirectToHttps(...)</code>（<code>/actuator/**</code> 除外）；Nginx 也把 80 端口重定向到 443</td></tr>
+  <tr><td><code>SESSION_COOKIE_SECURE = True</code></td><td><code>server.servlet.session.cookie.secure=true</code>，另加 <code>http-only</code>、<code>same-site=lax</code></td></tr>
+  <tr><td><code>CSRF_COOKIE_SECURE = True</code></td><td>不需要：Spring Security 默认把 CSRF 令牌存在会话里，没有单独的 cookie</td></tr>
+  <tr><td><code>SECURE_HSTS_SECONDS</code></td><td>Spring Security 在 HTTPS 响应上默认发送 <code>Strict-Transport-Security: max-age=31536000 ; includeSubDomains</code></td></tr>
+  <tr><td><code>X_FRAME_OPTIONS</code>、<code>SECURE_CONTENT_TYPE_NOSNIFF</code></td><td>Spring Security 默认发送 <code>X-Frame-Options: DENY</code>、<code>X-Content-Type-Options: nosniff</code></td></tr>
+  <tr><td>—</td><td>接口文档 <code>/v3/api-docs</code>、<code>/swagger-ui.html</code> 在生产环境关闭；日志输出 JSON（<code>logging.structured.format.console=ecs</code>）</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="java" data-file="AllowedHostsFilter.java（节选）">
+<pre>
+/** ≈ ALLOWED_HOSTS：Host 头不在白名单里的请求直接返回 400 */
+boolean isAllowed(String host) {
+    String h = host.toLowerCase(Locale.ROOT);
+    for (String pattern : allowedHosts) {
+        if (pattern.equals("*") || pattern.equals(h)) return true;
+        // '.example.com' 匹配 example.com 以及它的所有子域名
+        if (pattern.startsWith(".") &amp;&amp; (h.equals(pattern.substring(1)) || h.endsWith(pattern))) return true;
+    }
+    return false;
+}
+</pre>
+</div>
+
+<p>
+  为什么要检查 Host：应用会用请求的 Host 生成绝对地址（API 分页的 <code>next</code>、将来邮件里的链接）。伪造的 Host 会让这些链接指向攻击者的网站（Host 头注入）。
+  Django 默认就检查；Spring 需要自己加，这里写成最外层的过滤器（比 Security 还早），<code>localhost</code> 留给容器内部的健康检查。
+</p>
+
+<p>
+  <strong>静态文件的内容哈希</strong>（≈ <code>ManifestStaticFilesStorage</code>）：<code>spring.web.resources.chain.strategy.content.enabled=true</code> 后，
+  模板里 <code>@{/static/css/base.css}</code> 自动输出 <code>/static/css/base-2a7adc75….css</code>；文件内容变了哈希就变，所以可以放心地设置一年的缓存。
+</p>
+
+<h2 id="middleware">自定义中间件 → 过滤器：课程子域名</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · courses/middleware.py</div>
+<div class="code" data-lang="python"><pre>
+def subdomain_course_middleware(get_response):
+    def middleware(request):
+        host_parts = request.get_host().split('.')
+        if (len(host_parts) &gt; 2
+                and host_parts[0] != 'www'):
+            course = get_object_or_404(
+                Course, slug=host_parts[0])
+            course_url = reverse('course_detail',
+                                 args=[course.slug])
+            url = '{}://{}{}'.format(request.scheme,
+                '.'.join(host_parts[1:]), course_url)
+            return redirect(url)
+        return get_response(request)
+    return middleware
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · SubdomainCourseFilter.java</div>
+<div class="code" data-lang="java"><pre>
+public class SubdomainCourseFilter extends OncePerRequestFilter {
+
+    @Override
+    protected void doFilterInternal(HttpServletRequest request,
+            HttpServletResponse response, FilterChain chain)
+            throws ServletException, IOException {
+        String subdomain = subdomainOf(request.getServerName());
+        if (subdomain == null) {
+            chain.doFilter(request, response);     // get_response(request)
+            return;
+        }
+        if (courses.findBySlug(subdomain).isEmpty()) {
+            response.sendError(404);
+            return;
+        }
+        response.sendRedirect(UriComponentsBuilder.newInstance()
+                .scheme(request.getScheme()).host(siteDomain)
+                .path("/course/{slug}/").buildAndExpand(subdomain)
+                .toUriString());
+    }
+
+    /** 只处理 &lt;slug&gt;.educaproject.com；www、主域名、无关主机返回 null */
+    String subdomainOf(String host) { ... }
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li>Django 的中间件是一个包住 <code>get_response</code> 的函数；Servlet 过滤器是包住 <code>chain.doFilter()</code> 的方法 —— 结构几乎一样：可以直接返回响应，也可以交给后面的链。</li>
+  <li>注册与顺序：<code>FilterRegistrationBean</code> 的 <code>setOrder()</code>，数字越小越靠外（≈ 在 <code>MIDDLEWARE</code> 列表里的位置）。</li>
+  <li>
+    <strong>书中的 bug</strong>：判断条件是“Host 按点拆开多于两段，且第一段不是 www”。用 IP 访问时（<code>127.0.0.1</code> 拆成 4 段），
+    <code>'127'</code> 被当作课程 slug，<strong>所有请求</strong>都 404 —— 包括健康检查。这里改为只处理“配置的主域名之下的一级子域名”，并有测试覆盖。
+  </li>
+</ul>
+
+<h2 id="command">管理命令：选课提醒</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · enroll_reminder.py</div>
+<div class="code" data-lang="python"><pre>
+class Command(BaseCommand):
+    def add_arguments(self, parser):
+        parser.add_argument('--days', dest='days', type=int)
+
+    def handle(self, *args, **options):
+        date_joined = timezone.now().today() - \
+            datetime.timedelta(days=options['days'] or 0)
+        users = User.objects.annotate(
+            course_count=Count('courses_joined')
+        ).filter(course_count=0,
+                 date_joined__date__lte=date_joined)
+        for user in users:
+            emails.append((subject, message,
+                           settings.DEFAULT_FROM_EMAIL,
+                           [user.email]))
+        send_mass_mail(emails)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · EnrollReminderCommand.java</div>
+<div class="code" data-lang="java"><pre>
+@Component
+public class EnrollReminderCommand implements ApplicationRunner {
+    public void run(ApplicationArguments args) {
+        if (!args.containsOption("enroll-reminder")) return;
+        int days = args.containsOption("days")
+                ? Integer.parseInt(args.getOptionValues("days").getFirst()) : 0;
+        System.out.println("Sent " + sendReminders(days) + " reminders");
+        ... // 退出
+    }
+
+    public int sendReminders(int days) {
+        OffsetDateTime cutoff = LocalDate.now(clock).minusDays(days)
+                .plusDays(1).atStartOfDay().atOffset(ZoneOffset.UTC);
+        SimpleMailMessage[] messages = users.findNotEnrolledJoinedBefore(cutoff)
+                .stream().map(this::reminder).toArray(SimpleMailMessage[]::new);
+        if (messages.length &gt; 0) mailSender.send(messages);  // ≈ send_mass_mail
+        return messages.length;
+    }
+}
+
+// UserRepository
+@Query("""
+    select u from User u
+    where u.dateJoined &lt; :cutoff and u.email &lt;&gt; '' and u.active = true
+      and not exists (select 1 from Course c join c.students s where s = u)
+    """)
+List&lt;User&gt; findNotEnrolledJoinedBefore(@Param("cutoff") OffsetDateTime cutoff);
+</pre></div></div>
+</div>
+
+<ul>
+  <li><code>not exists</code> 子查询比 <code>annotate(Count) + filter(count=0)</code> 更直接，也不需要 group by。</li>
+  <li>跳过没有邮箱的用户（书中会给空地址发信，SMTP 服务器会拒绝，整批发送可能因此失败）。</li>
+  <li><code>SimpleMailMessage...</code> 一次调用发送全部邮件，复用同一个 SMTP 连接（≈ <code>send_mass_mail</code>）。没有配置 <code>spring.mail.host</code> 时由 <code>ConsoleMailSender</code> 打印到日志（≈ console 邮件后端）。</li>
+  <li><strong>定时执行</strong>：书中用 cron 调用 <code>manage.py</code>。这里同样可以用 cron 执行 <code>docker compose run --rm web --enroll-reminder --days=20</code>；也可以在应用里用 <code>@Scheduled(cron = "0 0 9 * * *")</code>，但多实例部署时每个实例都会执行一次，需要 ShedLock 之类的分布式锁。</li>
+</ul>
+
+<h2 id="verify">在 Docker 里走一遍</h2>
+
+<div class="code" data-lang="bash">
+<pre>
+cd springboot/Chapter17
+scripts/dev-cert.sh                          # 自签名证书 → deploy/certs/
+cp .env.example .env                         # 修改 POSTGRES_PASSWORD
+docker compose -f compose.prod.yaml up -d --build
+docker compose -f compose.prod.yaml run --rm web --loaddata=subjects
+docker compose -f compose.prod.yaml run --rm web --createsuperuser --username=admin --password=...
+# /etc/hosts 加上：127.0.0.1 educaproject.com django.educaproject.com
+</pre>
+</div>
+
+<p>实际验证的结果（本机用 8081/8443 端口）：</p>
+<ul>
+  <li><code>http://</code> → 301 到 <code>https://</code>；HTTPS 响应带 HSTS 头；会话 cookie 带 <code>Secure; HttpOnly; SameSite=Lax</code>。</li>
+  <li>页面里的样式表地址是 <code>/static/css/base-2a7adc75….css</code>，响应头 <code>cache-control: max-age=31536000, public</code>。</li>
+  <li>用 IP 访问被 Nginx 直接断开；外部访问 <code>/actuator/health</code> 得到 404；容器内部的健康检查正常。</li>
+  <li>登录、创建课程、上传图片后，<code>/media/...</code> 由 Nginx 返回（<code>server: nginx</code>，<code>content-type: image/png</code>）。</li>
+  <li><code>https://django.educaproject.com/</code> → 302 到 <code>https://educaproject.com/course/django/</code>。</li>
+  <li>WebSocket：修复 Nginx 配置后握手返回 101，通过 <code>wss://</code> 发出的聊天消息经 Redis 广播回来。</li>
+  <li><code>--enroll-reminder</code> 命令在容器里执行并正常退出。</li>
+</ul>
+
+<h2 id="tests">测试</h2>
+
+<div class="code" data-lang="java" data-file="ProductionSettingsTests.java（节选）">
+<pre>
+@EducaTest
+@TestPropertySource(properties = {
+        "educa.require-https=true",
+        "educa.site-domain=educaproject.com",
+        "educa.allowed-hosts=.educaproject.com,localhost"
+})
+class ProductionSettingsTests {
+
+    @Test
+    void httpIsRedirectedToHttpsAndHstsIsSent() throws Exception {
+        mvc.perform(get("/").with(host("educaproject.com")))
+                .andExpect(redirectedUrl("https://educaproject.com/"));
+        mvc.perform(get("/").with(https("educaproject.com")))
+                .andExpect(header().string("Strict-Transport-Security", startsWith("max-age=")));
+        mvc.perform(get("/actuator/health/liveness")).andExpect(status().isOk());   // 不重定向
+    }
+
+    @Test
+    void unknownHostsAreRejected() throws Exception {
+        mvc.perform(get("/").with(https("evil.example"))).andExpect(status().isBadRequest());
+    }
+}
+</pre>
+</div>
+
+<p>
+  本章新增 8 个测试（共 55 个）：两个过滤器的纯逻辑测试（包括 IP 地址不被当作子域名）、生产安全设置（HTTPS 重定向、HSTS、健康检查例外、
+  非法 Host、子域名跳转）、选课提醒（只提醒老用户、跳过已选课和无邮箱的用户、一次发送）、PostgreSQL 兼容性。
+  测试过程中还发现 <code>/actuator/health/liveness</code> 这类子路径没有被放行（规则只写了 <code>/actuator/health</code>），一并修正。
+</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 17 章 Spring 版点评 <small>springboot/Chapter17</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 架构更简单</h4>
+    <p>一个进程处理 HTTP 和 WebSocket，不需要 uWSGI、Daphne 两套服务器和对应的 Nginx 分流；镜像是多阶段构建的只读 JRE 镜像，非 root 运行。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 部署配置经过真实验证</h4>
+    <p>生产安全设置有自动化测试；PostgreSQL 兼容性有 Testcontainers 测试；整套 Compose 在本机实际跑过，并因此发现了 Nginx <code>proxy_set_header</code> 继承的问题。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 书中中间件的 IP 地址问题</h4>
+    <p>书中的子域名中间件会把 <code>127.0.0.1</code> 当作子域名，导致用 IP 访问时所有请求 404（包括负载均衡器的健康检查）。这里改为只匹配配置的主域名。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 上传文件的存储</h4>
+    <p>媒体文件放在 Docker 卷里，只适合单机部署；多台机器时要换成对象存储（S3、MinIO），<code>MediaStorage</code> 是唯一需要修改的地方 —— 这也是一开始就把文件操作集中到一个类里的好处。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 不写 Dockerfile 也能构建镜像</h4>
+    <p><code>mvn spring-boot:build-image</code> 用 Cloud Native Buildpacks 直接生成分层、非 root、带内存计算器的镜像，适合不想维护 Dockerfile 的团队；本章手写 Dockerfile 是为了把每一步讲清楚。另一个方向是 GraalVM 原生镜像（启动毫秒级，内存更少），但要为反射、代理额外配置。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>Profile 叠加配置，机密来自环境变量；自定义配置项用 <code>@ConfigurationProperties</code>。</li>
+  <li>手写 SQL 要在目标数据库上测试：Testcontainers 启动真正的 PostgreSQL。</li>
+  <li>Dockerfile：多阶段 + 分层 + 缓存挂载 + 非 root；Compose 用健康检查编排启动顺序。</li>
+  <li>Nginx：HTTPS、WebSocket 升级头、转发头（location 里要重复写）、媒体文件；应用侧 <code>forward-headers-strategy=native</code>。</li>
+  <li>Django 的 <code>SECURE_*</code>、<code>ALLOWED_HOSTS</code> 在 Spring 里有的是默认行为，有的要自己加，逐项对照并写测试。</li>
+  <li>中间件 → <code>OncePerRequestFilter</code>；管理命令 → <code>ApplicationRunner</code>。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>用 <code>mvn spring-boot:build-image</code> 构建镜像，和手写 Dockerfile 的镜像比较大小和层数。</li>
+    <li>把 <code>enroll-reminder</code> 改成 <code>@Scheduled</code> 定时任务，并用 ShedLock 保证多实例时只执行一次。</li>
+    <li>把 <code>MediaStorage</code> 改成写入 MinIO（S3 兼容），在 Compose 里加一个 minio 服务。</li>
+    <li>给 Nginx 加上 <code>limit_req</code>，限制 <code>/api/</code> 每个 IP 每秒 10 个请求。</li>
+    <li>配置 Let's Encrypt（certbot 容器）为真实域名签发证书。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title th:text="|Chat room for &quot;${course.title}&quot;|">Chat room</title></head>
+<body>
+<div layout:fragment="content">
+  <div id="chat">
+    <div th:each="message : ${latestMessages}" class="message"
+         th:classappend="${message.user.id == #authentication.principal.id()} ? 'me' : 'other'">
+      <strong th:text="${message.user.username}">user</strong>
+      <!--/* {{ message.sent_on|date:"Y.m.d H:i A" }} */-->
+      <span class="date" th:text="${#temporals.format(message.sentOn, 'yyyy.MM.dd hh:mm a', #locale.ENGLISH)}">date</span>
+      <br>
+      <th:block th:text="${message.content}">content</th:block>
+    </div>
+  </div>
+  <div id="chat-input">
+    <input id="chat-message-input" type="text" maxlength="2000">
+    <input id="chat-message-submit" type="submit" value="Send">
+  </div>
+</div>
+
+<!--/* ≈ {{ course.id|json_script:"course-id" }}：Thymeleaf 的 JavaScript 内联模式会把值安全地转义成 JS 字面量 */-->
+<script layout:fragment="domready" th:inline="javascript">
+  const courseId = /*[[${course.id}]]*/ 1;
+  const requestUser = /*[[${#authentication.name}]]*/ 'user';
+  // 书中写死了 ws://；页面走 HTTPS 时浏览器会拒绝不加密的 WebSocket，这里跟随页面协议
+  const scheme = window.location.protocol === 'https:' ? 'wss://' : 'ws://';
+  const url = scheme + window.location.host + '/ws/chat/room/' + courseId + '/';
+  const chatSocket = new WebSocket(url);
+
+  chatSocket.onmessage = function (event) {
+    const data = JSON.parse(event.data);
+    const chat = document.getElementById('chat');
+
+    const dateOptions = {hour: 'numeric', minute: 'numeric', hour12: true};
+    const datetime = new Date(data.datetime).toLocaleString('en', dateOptions);
+    const isMe = data.user === requestUser;
+
+    // 书中用 innerHTML += '...' + data.message 拼接 HTML：别人发一条 <img src=x onerror=...> 就能在所有人的浏览器里执行脚本。
+    // 这里逐个创建元素，用户输入只通过 textContent 写入，永远当作纯文本。
+    const div = document.createElement('div');
+    div.className = 'message ' + (isMe ? 'me' : 'other');
+    const name = document.createElement('strong');
+    name.textContent = isMe ? 'Me' : data.user;
+    const date = document.createElement('span');
+    date.className = 'date';
+    date.textContent = datetime;
+    div.append(name, ' ', date, document.createElement('br'), data.message);
+    chat.appendChild(div);
+    chat.scrollTop = chat.scrollHeight;
+  };
+
+  chatSocket.onclose = function () {
+    console.error('Chat socket closed unexpectedly');
+  };
+
+  const input = document.getElementById('chat-message-input');
+  const submitButton = document.getElementById('chat-message-submit');
+
+  submitButton.addEventListener('click', function () {
+    const message = input.value;
+    if (message) {
+      chatSocket.send(JSON.stringify({'message': message}));
+      input.value = '';
+      input.focus();
+    }
+  });
+
+  input.addEventListener('keypress', function (event) {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      submitButton.click();
+    }
+  });
+
+  input.focus();
+</script>
+</body>
+</html>

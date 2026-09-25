@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Delete course</title></head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="|Delete course &quot;${object.title}&quot;|">Delete course</h1>
+  <div class="module">
+    <form method="post">
+      <p th:text="|Are you sure you want to delete &quot;${object}&quot;?|">Are you sure?</p>
+      <input type="submit" value="Confirm">
+    </form>
+  </div>
+</div>
+</body>
+</html>

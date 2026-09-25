@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{admin/layout}">
+<head><title>Categories</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Categories</h1>
+  <table>
+    <thead><tr><th>Name (en)</th><th>Slug (en)</th><th>Name (es)</th><th>Slug (es)</th></tr></thead>
+    <tbody>
+      <tr th:each="c : ${categories}">
+        <td th:text="${c.translation('en')?.name}">name</td><td th:text="${c.translation('en')?.slug}">slug</td>
+        <td th:text="${c.translation('es')?.name}">nombre</td><td th:text="${c.translation('es')?.slug}">slug</td>
+      </tr>
+    </tbody>
+  </table>
+  <h2>Add category</h2>
+  <form method="post" th:action="@{/admin/shop/category/add/}" th:object="${form}">
+    <fieldset th:each="language : ${languages}" th:with="code=${language.code}">
+      <legend th:text="${language.nameLocal}">English</legend>
+      <label th:for="|name-${code}|">Name:</label> <input type="text" th:id="|name-${code}|" th:field="*{translations[__${code}__].name}">
+      <label th:for="|slug-${code}|">Slug:</label> <input type="text" th:id="|slug-${code}|" th:field="*{translations[__${code}__].slug}">
+      <ul class="errorlist" th:if="${#fields.hasErrors('translations[' + code + '].*')}"><li th:each="e : ${#fields.errors('translations[' + code + '].*')}" th:text="${e}"></li></ul>
+    </fieldset>
+    <button type="submit">Save</button>
+  </form>
+  <script th:replace="~{admin/shop/product_form :: prepopulate('name-en', 'slug-en')}"></script>
+  <script th:replace="~{admin/shop/product_form :: prepopulate('name-es', 'slug-es')}"></script>
+</div>
+</body>
+</html>

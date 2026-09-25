@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<!--/* blog/post/latest_posts.html：inclusion tag 使用的模板，这里写成带参数的片段 */-->
+<html xmlns:th="http://www.thymeleaf.org">
+<body>
+<ul th:fragment="latestPosts(latestPosts)">
+  <li th:each="post : ${latestPosts}">
+    <a th:href="@{${post.absoluteUrl}}" th:text="${post.title}">title</a>
+  </li>
+</ul>
+</body>
+</html>

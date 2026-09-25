@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 4 章 · 构建社交网站 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="4">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 4 章 · 项目二：图片书签社交网站</span>
+<h1>构建社交网站</h1>
+<p class="lede">
+  第二个项目从“用户系统”开始：登录、登出、修改密码、找回密码、注册、扩展用户资料、上传头像。
+  Django 的 <code>django.contrib.auth</code> 把这些视图、表单、模板名都准备好了，你只需要 <code>include('django.contrib.auth.urls')</code>；
+  Spring Security 负责最核心的“认证”，但注册、改密码、找回密码这些页面都要自己写。这一章会把 Spring Security 的工作原理完整地走一遍。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>画出 Spring Security 表单登录的完整流程，认识过滤器链、<code>AuthenticationManager</code>、<code>UserDetailsService</code>、<code>PasswordEncoder</code></li>
+    <li>自定义登录页、登出、“必须登录”的规则，对应 Django 的 <code>LOGIN_URL</code>、<code>LOGIN_REDIRECT_URL</code>、<code>@login_required</code></li>
+    <li>自己实现修改密码和找回密码，理解 Django 无状态重置令牌的原理</li>
+    <li>实现注册：密码哈希、唯一性检查、两次密码一致</li>
+    <li>用一对一的 <code>Profile</code> 扩展用户，用两个表单对象同时编辑，处理文件上传</li>
+    <li>用 Spring 事件更新 <code>last_login</code>，用 <code>@ControllerAdvice</code> 让模板访问当前用户</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch04.html">Django 版第 4 章</a>；本章代码在 <code>springboot/Chapter04/</code>（Maven 项目名 <code>bookmarks</code>）。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="project">新项目：bookmarks</h2>
+
+<p>和原书一样，第 4–7 章是一个新项目，数据库仍然用文件型的 H2（对应原书的 SQLite），第 7 章再加入 Redis。包结构按功能划分：</p>
+
+<div class="tw">
+<table class="filemap">
+  <tr><th>Django（Chapter04/bookmarks）</th><th>Spring Boot（springboot/Chapter04）</th></tr>
+  <tr><td>account/models.py</td><td>account/User.java、Profile.java</td></tr>
+  <tr><td>account/forms.py</td><td>account/UserRegistrationForm.java、UserEditForm.java、ProfileEditForm.java、PasswordChangeForm.java…</td></tr>
+  <tr><td>account/views.py</td><td>account/AccountController.java、AuthController.java、PasswordResetController.java</td></tr>
+  <tr><td>django.contrib.auth（后端、视图、令牌）</td><td>config/SecurityConfig.java、account/JpaUserDetailsService.java、PasswordResetTokens.java</td></tr>
+  <tr><td>templates/registration/*.html</td><td>templates/registration/*.html（沿用同样的文件名）</td></tr>
+  <tr><td>MEDIA_ROOT / MEDIA_URL</td><td>common/MediaStorage.java + config/WebConfig.java</td></tr>
+</table>
+</div>
+
+<h2 id="security">Spring Security 是怎么认证的</h2>
+
+<p>第 1 章只用了 Spring Security 最少的功能。这一章我们要自己定制登录页和各种流程，先把它的工作方式弄清楚：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 330" role="img" aria-label="Spring Security 表单登录流程：POST 登录请求被 UsernamePasswordAuthenticationFilter 拦截，交给 AuthenticationManager，后者调用 UserDetailsService 查用户、用 PasswordEncoder 比对密码，成功后把 Authentication 存进 SecurityContext 并保存到 HttpSession，然后重定向">
+  <rect class="bx" x="10" y="20" width="160" height="56" rx="10"/>
+  <text class="ttl" x="90" y="44" text-anchor="middle">浏览器</text>
+  <text class="mono sm" x="90" y="63" text-anchor="middle">POST /account/login/</text>
+
+  <rect class="bx-a" x="196" y="20" width="300" height="56" rx="10"/>
+  <text class="ttl on-a" x="346" y="44" text-anchor="middle">UsernamePasswordAuthenticationFilter</text>
+  <text class="sm" x="346" y="63" text-anchor="middle">过滤器链中的一环，只拦截登录 POST</text>
+
+  <rect class="bx-b" x="520" y="20" width="230" height="56" rx="10"/>
+  <text class="ttl on-b" x="635" y="44" text-anchor="middle">AuthenticationManager</text>
+  <text class="sm" x="635" y="63" text-anchor="middle">≈ AUTHENTICATION_BACKENDS</text>
+
+  <rect class="bx-b" x="440" y="130" width="150" height="56" rx="10"/>
+  <text class="ttl on-b" x="515" y="154" text-anchor="middle">UserDetailsService</text>
+  <text class="sm" x="515" y="173" text-anchor="middle">按用户名查 auth_user</text>
+
+  <rect class="bx-b" x="610" y="130" width="140" height="56" rx="10"/>
+  <text class="ttl on-b" x="680" y="154" text-anchor="middle">PasswordEncoder</text>
+  <text class="sm" x="680" y="173" text-anchor="middle">比对 bcrypt 哈希</text>
+
+  <rect class="bx-g" x="220" y="250" width="250" height="60" rx="10"/>
+  <text class="ttl on-g" x="345" y="274" text-anchor="middle">SecurityContext → HttpSession</text>
+  <text class="sm" x="345" y="294" text-anchor="middle">≈ login(request, user) 写入会话</text>
+
+  <rect class="bx" x="10" y="250" width="160" height="60" rx="10"/>
+  <text class="ttl" x="90" y="274" text-anchor="middle">302 重定向</text>
+  <text class="mono sm" x="90" y="294" text-anchor="middle">/account/</text>
+
+  <path class="ln" d="M172 48 H192" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M498 48 H516" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M600 78 L535 126" marker-end="url(#ar-b)"/>
+  <path class="ln-b" d="M660 78 L675 126" marker-end="url(#ar-b)"/>
+  <path class="ln-g" d="M560 188 C 560 230, 520 270, 474 278" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="572" y="232">成功：Authentication</text>
+  <path class="ln-g" d="M218 280 H174" marker-end="url(#ar-g)"/>
+  <path class="ln-r" d="M300 78 V168" marker-end="url(#ar-r)"/>
+  <text class="sm on-r" x="300" y="186" text-anchor="middle">失败 → 302 /account/login/?error</text>
+</svg>
+<figcaption>图 S4-1　表单登录：过滤器拦截 POST，管理器调用“查用户”和“比密码”两个组件，成功后把认证结果存进会话</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <tr><th>Django</th><th>Spring Security</th></tr>
+  <tr><td><code>authenticate(request, username, password)</code></td><td><code>AuthenticationManager.authenticate(token)</code></td></tr>
+  <tr><td>认证后端 <code>ModelBackend</code></td><td><code>DaoAuthenticationProvider</code> + 你写的 <code>UserDetailsService</code></td></tr>
+  <tr><td><code>check_password</code> / <code>PASSWORD_HASHERS</code></td><td><code>PasswordEncoder</code>（本项目用 <code>DelegatingPasswordEncoder</code>，默认 bcrypt）</td></tr>
+  <tr><td><code>login(request, user)</code></td><td>把 <code>Authentication</code> 放进 <code>SecurityContext</code>，由过滤器保存到 <code>HttpSession</code></td></tr>
+  <tr><td><code>request.user</code></td><td><code>@AuthenticationPrincipal CurrentUser me</code> / <code>SecurityContextHolder</code></td></tr>
+  <tr><td><code>AnonymousUser</code></td><td>未登录时 <code>me</code> 是 <code>null</code>（Spring 内部用 <code>AnonymousAuthenticationToken</code>）</td></tr>
+  <tr><td><code>is_active=False</code> 不能登录</td><td><code>UserDetails.isEnabled()</code> 返回 false 时抛 <code>DisabledException</code></td></tr>
+</table>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 书中先手写了 user_login 视图</div>
+  <p>
+    Django 书先写了一个 <code>user_login</code> 视图，自己调用 <code>authenticate()</code> 和 <code>login()</code>，再换成内置的 <code>LoginView</code>。
+    Spring 里也能在控制器里注入 <code>AuthenticationManager</code> 手动登录，但那样还得自己处理会话固定攻击防护、保存 SecurityContext 等细节。
+    实践中几乎总是用 <code>formLogin()</code>：你只提供登录页面，POST 交给过滤器。
+  </p>
+</div>
+
+<h2 id="login">登录、登出与“必须登录”</h2>
+
+<div class="code" data-lang="java" data-file="config/SecurityConfig.java">
+<pre>
+@Bean
+@ConditionalOnWebApplication
+SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    http
+        .authorizeHttpRequests(auth -&gt; auth
+            .requestMatchers("/account/login/", "/account/register/", "/account/logged-out/",
+                             "/account/password-reset/**").permitAll()
+            .requestMatchers("/static/**", "/media/**", "/error").permitAll()
+            .anyRequest().authenticated())             // 其余一律要求登录
+        .formLogin(form -&gt; form
+            .loginPage("/account/login/")               // ≈ LOGIN_URL = 'login'
+            .defaultSuccessUrl("/account/")             // ≈ LOGIN_REDIRECT_URL = 'dashboard'
+            .permitAll())
+        .logout(logout -&gt; logout
+            .logoutUrl("/account/logout/")              // 只接受 POST
+            .logoutSuccessUrl("/account/logged-out/"));
+    return http.build();
+}
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>Django 设置 / 写法</th><th>这里的对应</th></tr>
+  <tr><td><code>LOGIN_URL = 'login'</code></td><td><code>loginPage("/account/login/")</code>：未登录访问受保护页面时重定向到这里</td></tr>
+  <tr><td><code>LOGIN_REDIRECT_URL = 'dashboard'</code></td><td><code>defaultSuccessUrl("/account/")</code></td></tr>
+  <tr><td>登录表单里的 <code>next</code> 隐藏字段</td><td>不需要：Spring Security 把被拦截的原始请求存进会话（<code>RequestCache</code>），登录后自动跳回</td></tr>
+  <tr><td>每个视图加 <code>@login_required</code></td><td><code>anyRequest().authenticated()</code> 一条规则覆盖全部，再用 <code>permitAll()</code> 列出例外</td></tr>
+  <tr><td>Django 5.1 <code>LoginRequiredMiddleware</code> + <code>@login_not_required</code></td><td>正是上面这种“默认需要登录、显式放行”的思路</td></tr>
+  <tr><td><code>LogoutView</code>（Django 5 起只接受 POST）</td><td><code>logout()</code>：开启 CSRF 时也只接受 POST</td></tr>
+</table>
+</div>
+
+<p>登录页的控制器只负责“显示页面”，POST 由过滤器处理；登录失败时 Spring 会重定向到 <code>/account/login/?error</code>：</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · registration/login.html</div>
+<div class="code" data-lang="html"><pre>
+{% if form.errors %}
+  &lt;p&gt;Your username and password didn't match.&lt;/p&gt;
+{% endif %}
+&lt;form action="{% url 'login' %}" method="post"&gt;
+  {{ form.as_p }}
+  {% csrf_token %}
+  &lt;input type="hidden" name="next" value="{{ next }}" /&gt;
+  &lt;p&gt;&lt;input type="submit" value="Log-in"&gt;&lt;/p&gt;
+&lt;/form&gt;
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · AuthController + login.html</div>
+<div class="code" data-lang="java"><pre>
+@GetMapping("/login/")
+public String login(@RequestParam(required = false) String error,
+                    Model model) {
+    model.addAttribute("loginError", error != null);
+    return "registration/login";
+}
+</pre></div>
+<div class="code" data-lang="th"><pre>
+&lt;p th:if="${loginError}"&gt;Your username and password didn't match.&lt;/p&gt;
+&lt;form th:action="@{/account/login/}" method="post"&gt;
+  &lt;!-- 字段名 username / password 是默认约定 --&gt;
+  &lt;input type="text" name="username"&gt;
+  &lt;input type="password" name="password"&gt;
+  &lt;input type="submit" value="Log-in"&gt;
+&lt;/form&gt;
+</pre></div></div>
+</div>
+
+<h3>只有模板、没有逻辑的页面</h3>
+
+<p>“已登出”“密码已修改”这类页面没有任何逻辑。Django 用 <code>TemplateView</code> 或内置视图；Spring 可以在 <code>WebMvcConfigurer</code> 里直接注册“URL → 视图名”，不必写控制器：</p>
+
+<div class="code" data-lang="java" data-file="config/WebConfig.java（节选）">
+<pre>
+@Override
+public void addViewControllers(ViewControllerRegistry registry) {
+    registry.addRedirectViewController("/", "/account/");
+    registry.addViewController("/account/logged-out/").setViewName("registration/logged_out");
+    registry.addViewController("/account/password-change/done/").setViewName("registration/password_change_done");
+    registry.addViewController("/account/password-reset/done/").setViewName("registration/password_reset_done");
+    registry.addViewController("/account/password-reset/complete/").setViewName("registration/password_reset_complete");
+}
+</pre>
+</div>
+
+<h3>模板里的当前用户</h3>
+
+<p>
+  Django 模板能直接用 <code>{{ request.user }}</code>，因为 auth 上下文处理器每次请求都把用户加载好。
+  Spring 会话里保存的 <code>CurrentUser</code> 只是<strong>登录那一刻的快照</strong>，用户改了名字它不会变。
+  我们用一个 <code>@ControllerAdvice</code> 在每个请求里放一个最新的 <code>requestUser</code>：
+</p>
+
+<div class="code" data-lang="java" data-file="account/CurrentUserAdvice.java">
+<pre>
+@ControllerAdvice
+public class CurrentUserAdvice {
+
+    @ModelAttribute("requestUser")     // 所有控制器渲染的页面都会有这个属性
+    public User requestUser(@AuthenticationPrincipal CurrentUser me) {
+        return me == null ? null : users.findById(me.id()).orElse(null);
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="th" data-file="templates/base.html（节选）">
+<pre>
+&lt;th:block th:if="${requestUser}"&gt;
+  Hello &lt;span th:text="${requestUser.displayName}"&gt;user&lt;/span&gt;,   &lt;!-- first_name|default:username --&gt;
+  &lt;form th:action="@{/account/logout/}" method="post"&gt;
+    &lt;button type="submit"&gt;Logout&lt;/button&gt;
+  &lt;/form&gt;
+&lt;/th:block&gt;
+&lt;a th:unless="${requestUser}" th:href="@{/account/login/}"&gt;Log-in&lt;/a&gt;
+</pre>
+</div>
+
+<p><code>@ControllerAdvice</code> + <code>@ModelAttribute</code> 就是 Spring 版的“上下文处理器”，第 8 章做购物车时还会用到。</p>
+
+<h2 id="password-change">修改密码</h2>
+
+<p>Django 内置 <code>PasswordChangeView</code> 和 <code>PasswordChangeForm</code>。Spring Security 不提供这类页面，自己写一个表单对象和两个控制器方法：</p>
+
+<div class="code" data-lang="java" data-file="account/AuthController.java（节选）">
+<pre>
+@PostMapping("/password-change/")
+public String passwordChange(@AuthenticationPrincipal CurrentUser me,
+                             @Valid @ModelAttribute("form") PasswordChangeForm form, BindingResult errors) {
+    if (!errors.hasFieldErrors("oldPassword") &amp;&amp; !accounts.checkPassword(me.id(), form.getOldPassword())) {
+        errors.rejectValue("oldPassword", "password_incorrect",
+                "Your old password was entered incorrectly. Please enter it again.");
+    }
+    if (!errors.hasFieldErrors("newPassword2") &amp;&amp; !form.passwordsMatch()) {
+        errors.rejectValue("newPassword2", "password_mismatch", "The two password fields didn't match.");
+    }
+    if (errors.hasErrors()) {
+        return "registration/password_change_form";
+    }
+    accounts.setPassword(me.id(), form.getNewPassword1());
+    return "redirect:/account/password-change/done/";
+}
+</pre>
+</div>
+
+<p>错误信息沿用了 Django 表单的原文，方便对照。注意 <code>errors.hasFieldErrors(...)</code> 的检查：字段本身已经有“必填”之类的错误时，就不再叠加业务错误 —— Django 的 <code>clean_&lt;field&gt;()</code> 也只在字段基础校验通过后才调用。</p>
+
+<h2 id="password-reset">找回密码：无状态令牌</h2>
+
+<p>找回密码是四个页面：输入邮箱 → “已发送” → 点邮件里的链接设置新密码 → “已完成”。最有意思的是链接里的令牌。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="密码重置令牌：令牌由时间戳和 HMAC 组成，HMAC 的输入包括用户 id、密码哈希、上次登录时间、邮箱和时间戳；验证时服务器重新计算并比对，不需要数据库存储令牌">
+  <rect class="bx" x="10" y="20" width="230" height="130" rx="10"/>
+  <text class="ttl" x="125" y="44" text-anchor="middle">HMAC 的输入</text>
+  <text class="sm" x="125" y="68" text-anchor="middle">用户 id</text>
+  <text class="sm" x="125" y="86" text-anchor="middle">密码哈希（改密码 → 失效）</text>
+  <text class="sm" x="125" y="104" text-anchor="middle">上次登录时间（登录 → 失效）</text>
+  <text class="sm" x="125" y="122" text-anchor="middle">邮箱、时间戳</text>
+
+  <rect class="bx-p" x="290" y="55" width="160" height="60" rx="10"/>
+  <text class="ttl on-p" x="370" y="80" text-anchor="middle">HMAC-SHA256</text>
+  <text class="sm" x="370" y="99" text-anchor="middle">密钥 = SECRET_KEY</text>
+
+  <rect class="bx-a" x="500" y="55" width="250" height="60" rx="10"/>
+  <text class="mono sm on-a" x="625" y="80" text-anchor="middle">t1abc2d-3f9a…（36 进制时间戳-签名）</text>
+  <text class="sm" x="625" y="99" text-anchor="middle">放进重置链接</text>
+
+  <path class="ln" d="M242 85 H286" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M452 85 H496" marker-end="url(#ar-p)"/>
+
+  <rect class="bx-g" x="290" y="170" width="460" height="60" rx="10"/>
+  <text class="ttl on-g" x="520" y="194" text-anchor="middle">验证：用同样的输入重新算一遍，常量时间比较；再检查是否过期</text>
+  <text class="sm" x="520" y="214" text-anchor="middle">不需要建表存令牌，也不需要定时清理</text>
+  <path class="ln-d" d="M625 117 V166" marker-end="url(#ar)"/>
+</svg>
+<figcaption>图 S4-2　Django 的 PasswordResetTokenGenerator 思路，Spring 版用约 100 行 Java 复刻</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="account/PasswordResetTokens.java（节选）">
+<pre>
+public String make(User user) {
+    long timestamp = clock.instant().getEpochSecond();
+    return Long.toString(timestamp, 36) + "-" + hash(user, timestamp);
+}
+
+public boolean check(User user, String token) {
+    ...
+    boolean signatureOk = MessageDigest.isEqual(            // 常量时间比较，防计时攻击
+            hash(user, timestamp).getBytes(UTF_8), parts[1].getBytes(UTF_8));
+    long age = clock.instant().getEpochSecond() - timestamp;
+    return signatureOk &amp;&amp; age &gt;= 0 &amp;&amp; age &lt;= timeout.toSeconds();   // ≈ PASSWORD_RESET_TIMEOUT
+}
+
+private String hash(User user, long timestamp) {
+    String lastLogin = user.getLastLogin() == null ? "" : String.valueOf(user.getLastLogin().toEpochSecond());
+    String value = user.getId() + user.getPassword() + lastLogin + timestamp + user.getEmail();
+    Mac mac = Mac.getInstance("HmacSHA256");
+    mac.init(new SecretKeySpec(key, "HmacSHA256"));
+    byte[] digest = mac.doFinal(("bookmarks.PasswordResetTokens" + value).getBytes(UTF_8));
+    return HexFormat.of().formatHex(digest).substring(0, 32);
+}
+</pre>
+</div>
+
+<p>链接格式和 Django 一样：<code>/account/password-reset/&lt;uidb64&gt;/&lt;token&gt;/</code>，其中 <code>uidb64</code> 是 URL 安全的 Base64 编码的用户 id。控制器把几个步骤串起来：</p>
+
+<div class="code" data-lang="java" data-file="account/PasswordResetController.java（节选）">
+<pre>
+/** 无论邮箱是否存在都跳到同一个页面，避免被用来探测哪些邮箱注册过。 */
+@PostMapping("/")
+public String send(@Valid @ModelAttribute("form") PasswordResetForm form, BindingResult errors) {
+    ...
+    for (User user : users.findByEmailIgnoreCaseAndActiveTrue(form.getEmail())) {
+        String link = "%s/account/password-reset/%s/%s/".formatted(baseUrl, tokens.uid(user), tokens.make(user));
+        mailSender.send(message);   // 开发时由 ConsoleMailSender 打印到日志
+    }
+    return "redirect:/account/password-reset/done/";
+}
+
+private User resolve(String uidb64, String token) {
+    return tokens.decodeUid(uidb64)
+            .flatMap(users::findById)
+            .filter(User::isActive)
+            .filter(user -&gt; tokens.check(user, token))
+            .orElse(null);                  // null → 模板显示“链接无效”（validlink = false）
+}
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 为什么要注入 Clock</div>
+  <p>
+    令牌逻辑依赖“现在几点”。把 <code>Clock</code> 作为构造参数传进来，测试时就能传一个固定时间的 <code>Clock.fixed(...)</code>，
+    轻松验证“3 天后过期”，不用真的等 3 天，也不用 mock 静态方法。Django 里通常用 <code>freezegun</code> 或 <code>time-machine</code> 做同样的事。
+  </p>
+</div>
+
+<div class="code" data-lang="java" data-file="PasswordResetTokensTests.java（节选）">
+<pre>
+@Test
+void validTokenExpiresAfterTimeout() {
+    User user = user();
+    String token = at("2025-01-01T00:00:00Z").make(user);
+    assertThat(at("2025-01-03T23:59:00Z").check(user, token)).isTrue();
+    assertThat(at("2025-01-04T00:00:01Z").check(user, token)).isFalse();
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; Spring Security 自己的方案：一次性令牌登录</div>
+  <p>
+    Spring Security 6.4 起提供了“一次性令牌登录”（<code>oneTimeTokenLogin()</code>）：给用户发一个“魔法链接”直接登录。
+    它和“重置密码”不完全一样，令牌默认存在内存或数据库里，不是无状态的。本章为了和 Django 对照，自己实现了 Django 的做法。
+  </p>
+</div>
+
+<h2 id="register">注册</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+class UserRegistrationForm(forms.ModelForm):
+    password = forms.CharField(widget=forms.PasswordInput)
+    password2 = forms.CharField(widget=forms.PasswordInput)
+
+    class Meta:
+        model = get_user_model()
+        fields = ['username', 'first_name', 'email']
+
+    def clean_password2(self):
+        cd = self.cleaned_data
+        if cd['password'] != cd['password2']:
+            raise forms.ValidationError(
+                "Passwords don't match.")
+        return cd['password2']
+
+def register(request):
+    ...
+    new_user = user_form.save(commit=False)
+    new_user.set_password(
+        user_form.cleaned_data['password'])
+    new_user.save()
+    Profile.objects.create(user=new_user)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring</div>
+<div class="code" data-lang="java"><pre>
+@PostMapping("/register/")
+public String register(
+        @Valid @ModelAttribute("userForm") UserRegistrationForm form,
+        BindingResult errors, Model model) {
+    // ModelForm 会自动检查 username 唯一
+    if (!errors.hasFieldErrors("username")
+            &amp;&amp; users.existsByUsername(form.getUsername())) {
+        errors.rejectValue("username", "unique",
+            "A user with that username already exists.");
+    }
+    // clean_password2
+    if (!errors.hasFieldErrors("password2")
+            &amp;&amp; !form.passwordsMatch()) {
+        errors.rejectValue("password2", "mismatch",
+            "Passwords don't match.");
+    }
+    if (errors.hasErrors()) {
+        return "account/register";
+    }
+    model.addAttribute("newUser", accounts.register(form));
+    return "account/register_done";
+}
+
+// AccountService（@Transactional）
+public User register(UserRegistrationForm form) {
+    User user = new User(form.getUsername(),
+        passwordEncoder.encode(form.getPassword()),  // set_password
+        form.getEmail());
+    user.setFirstName(form.getFirstName());
+    users.save(user);
+    profiles.save(new Profile(user));
+    return user;
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li><code>passwordEncoder.encode(...)</code> ≈ <code>set_password</code>。存进库的是 <code>{bcrypt}$2a$10$...</code>：大括号里的前缀标明算法，将来换算法时旧哈希仍能验证 —— 和 Django 哈希字符串开头的 <code>pbkdf2_sha256$</code> 是同一个思路。</li>
+  <li>“建用户 + 建资料”放在一个 <code>@Transactional</code> 方法里：任何一步失败都会整体回滚。Django 默认每条 SQL 自动提交，要达到同样效果需要 <code>transaction.atomic()</code>。</li>
+  <li>用户名规则用 <code>@Pattern(regexp = "[\\w.@+-]+")</code> 表达，对应 Django 的 <code>UnicodeUsernameValidator</code>；密码至少 8 位对应 <code>MinimumLengthValidator</code>（书中的表单其实没有调用密码校验器）。</li>
+</ul>
+
+<div class="box warn">
+  <div class="t">&#9888; 密码框不能回填</div>
+  <p>
+    校验失败重新显示表单时，<code>th:field</code> 会把用户输入写回 <code>value</code> 属性。对密码框来说这等于把明文密码塞回 HTML。
+    我们的字段片段对 <code>password</code> 和 <code>file</code> 类型只生成 <code>id</code>/<code>name</code>，不写 <code>value</code>；测试里专门断言了响应中不包含输入的密码。
+  </p>
+</div>
+
+<h2 id="profile">扩展用户：一对一的 Profile</h2>
+
+<p>给用户加“生日”和“头像”，两个框架的做法完全一样：另建一张表，用唯一外键指回用户。</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+class Profile(models.Model):
+    user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE
+    )
+    date_of_birth = models.DateField(blank=True, null=True)
+    photo = models.ImageField(
+        upload_to='users/%Y/%m/%d/',
+        blank=True
+    )
+</pre></div></div>
+  <div class="sb"><div class="h">Spring</div>
+<div class="code" data-lang="java"><pre>
+@Entity
+@Table(name = "account_profile")
+public class Profile {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @OneToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "user_id", unique = true)
+    private User user;
+
+    @Column(name = "date_of_birth")
+    private LocalDate dateOfBirth;
+
+    /** ImageField 在库里只存相对路径 */
+    @Column(nullable = false, length = 100)
+    private String photo = "";
+}
+</pre></div></div>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 自定义用户模型的问题在 Spring 里不存在</div>
+  <p>
+    Django 的 <code>User</code> 是框架自带的模型，想加字段只能用 Profile 或在项目一开始就换成自定义用户模型（<code>AUTH_USER_MODEL</code>），中途更换非常痛苦。
+    Spring Security 根本不提供用户实体 —— <code>User</code> 从第一天起就是你自己的类，想加字段直接加。
+    本项目仍然使用 Profile，是为了和原书保持一致，也因为“认证信息”和“展示资料”分开存放本身就是合理的设计。
+  </p>
+</div>
+
+<h2 id="edit">编辑资料：两个表单对象 + 文件上传</h2>
+
+<p>Django 视图同时处理 <code>user_form</code> 和 <code>profile_form</code>。Spring 的控制器方法可以有多个 <code>@ModelAttribute</code> 参数，它们从<strong>同一个请求</strong>里各取所需，每个后面紧跟自己的 <code>BindingResult</code>：</p>
+
+<div class="code" data-lang="java" data-file="account/AccountController.java（节选）">
+<pre>
+@PostMapping("/edit/")
+public String edit(@AuthenticationPrincipal CurrentUser me,
+                   @Valid @ModelAttribute("userForm") UserEditForm userForm, BindingResult userErrors,
+                   @Valid @ModelAttribute("profileForm") ProfileEditForm profileForm, BindingResult profileErrors,
+                   Model model) {
+    if (!userErrors.hasErrors() &amp;&amp; !profileErrors.hasErrors()) {
+        try {
+            accounts.updateAccount(me.id(), userForm, profileForm);
+        } catch (InvalidImageException e) {
+            profileErrors.rejectValue("photo", "invalid_image", e.getMessage());
+        }
+    }
+    return renderEdit(me, model);
+}
+</pre>
+</div>
+
+<div class="code" data-lang="th" data-file="templates/account/edit.html（节选）">
+<pre>
+&lt;!-- 上传文件必须 multipart/form-data；th:object 可以放在任何元素上 --&gt;
+&lt;form method="post" th:action="@{/account/edit/}" enctype="multipart/form-data"&gt;
+  &lt;div th:object="${userForm}"&gt;
+    &lt;div th:replace="~{fragments/forms :: field('firstName', 'First name', 'text')}"&gt;&lt;/div&gt;
+    ...
+  &lt;/div&gt;
+  &lt;div th:object="${profileForm}"&gt;
+    &lt;div th:replace="~{fragments/forms :: field('dateOfBirth', 'Date of birth', 'date')}"&gt;&lt;/div&gt;
+    &lt;div th:replace="~{fragments/forms :: field('photo', 'Photo', 'file')}"&gt;&lt;/div&gt;
+  &lt;/div&gt;
+  &lt;p&gt;&lt;input type="submit" value="Save changes"&gt;&lt;/p&gt;
+&lt;/form&gt;
+</pre>
+</div>
+
+<h3>保存上传文件</h3>
+
+<p>
+  上传的文件绑定为 <code>MultipartFile</code>（≈ <code>request.FILES['photo']</code>）。Django 的 <code>ImageField</code> 会用 Pillow 确认它真的是图片，并按 <code>upload_to</code> 保存；
+  我们写一个 <code>MediaStorage</code> 做同样的事：
+</p>
+
+<div class="code" data-lang="java" data-file="common/MediaStorage.java（节选）">
+<pre>
+public String saveImage(String uploadTo, String filename, byte[] content) {
+    if (!isImage(content)) {                 // ImageIO 读不出来 → 不是图片（≈ Pillow 校验）
+        throw new InvalidImageException("Upload a valid image. ...");
+    }
+    String safeName = sanitize(filename);    // 只保留安全字符，并加随机后缀避免重名覆盖
+    String relative = uploadTo + "/" + LocalDate.now().format(DATE_DIRS) + "/" + safeName;
+    Path target = root.resolve(relative).normalize();
+    if (!target.startsWith(root)) {          // 防止 ../../ 路径穿越
+        throw new InvalidImageException("Invalid file name.");
+    }
+    Files.createDirectories(target.getParent());
+    Files.write(target, content);
+    return relative;                         // 数据库里只存 users/2025/01/31/me_1a2b3c4d.png
+}
+</pre>
+</div>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · 开发时提供上传文件</div>
+<div class="code" data-lang="py"><pre>
+MEDIA_URL = 'media/'
+MEDIA_ROOT = BASE_DIR / 'media'
+
+if settings.DEBUG:
+    urlpatterns += static(settings.MEDIA_URL,
+                          document_root=settings.MEDIA_ROOT)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · WebConfig</div>
+<div class="code" data-lang="java"><pre>
+@Override
+public void addResourceHandlers(ResourceHandlerRegistry registry) {
+    String location = properties.mediaRoot()
+            .toAbsolutePath().normalize().toUri().toString();
+    registry.addResourceHandler("/media/**")
+            .addResourceLocations(location);
+}
+</pre></div></div>
+</div>
+
+<p>上传大小限制写在 <code>spring.servlet.multipart.max-file-size</code>（本项目 5MB）。生产环境中上传文件应该交给 Nginx 或对象存储提供，第 17 章再讨论。</p>
+
+<h2 id="last-login">登录成功事件：更新 last_login</h2>
+
+<p>
+  Django 登录成功后会发出 <code>user_logged_in</code> 信号，内置的接收者 <code>update_last_login</code> 更新 <code>last_login</code>。
+  Spring Security 登录成功时会发布 <code>AuthenticationSuccessEvent</code>，用 <code>@EventListener</code> 监听即可 —— 这是我们第一次接触 Spring 的事件机制，第 7 章会用它替代 Django 的信号：
+</p>
+
+<div class="code" data-lang="java" data-file="account/LastLoginListener.java">
+<pre>
+@Component
+public class LastLoginListener {
+
+    @EventListener
+    public void onSuccess(AuthenticationSuccessEvent event) {
+        users.updateLastLogin(event.getAuthentication().getName(), OffsetDateTime.now(ZoneOffset.UTC));
+    }
+}
+
+// UserRepository：只更新一列，不必先查出实体
+@Transactional
+@Modifying(flushAutomatically = true, clearAutomatically = true)
+@Query("update User u set u.lastLogin = :now where u.username = :username")
+int updateLastLogin(@Param("username") String username, @Param("now") OffsetDateTime now);
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 批量更新会绕过一级缓存</div>
+  <p>
+    <code>@Modifying</code> 的 JPQL <code>update</code> 直接发 SQL，不经过持久化上下文。如果同一个事务里之前已经加载过这个用户，缓存里的对象还是旧值。
+    <code>clearAutomatically = true</code> 让它执行完就清空缓存。测试里正是因为少了这一项，“登录后 last_login 不为空”的断言才失败 —— 对应 Django 里 <code>QuerySet.update()</code> 之后要 <code>refresh_from_db()</code>。
+  </p>
+</div>
+
+<h2 id="tests">测试</h2>
+
+<p>Spring Security 的测试支持非常完善，常用的几个：</p>
+
+<div class="tw">
+<table>
+  <tr><th>需求</th><th>Django</th><th>Spring Security Test</th></tr>
+  <tr><td>模拟已登录用户</td><td><code>self.client.force_login(user)</code></td><td><code>.with(user(CurrentUser.from(alice)))</code></td></tr>
+  <tr><td>走一遍真正的登录</td><td><code>self.client.login(username=..., password=...)</code></td><td><code>mvc.perform(formLogin("/account/login/").user("alice").password("..."))</code></td></tr>
+  <tr><td>断言登录状态</td><td><code>response.wsgi_request.user.is_authenticated</code></td><td><code>.andExpect(authenticated().withUsername("alice"))</code></td></tr>
+  <tr><td>CSRF</td><td>测试客户端默认不检查</td><td>默认检查，需要 <code>.with(csrf())</code></td></tr>
+  <tr><td>上传文件</td><td><code>SimpleUploadedFile</code></td><td><code>multipart(...).file(new MockMultipartFile(...))</code></td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="java" data-file="AccountFlowTests.java（节选）">
+<pre>
+@Test
+void passwordResetFlowWorksOnlyOnce() throws Exception {
+    createUser("alice", "correct-horse", "alice@example.com");
+    mvc.perform(post("/account/password-reset/").with(csrf()).param("email", "ALICE@example.com"))
+            .andExpect(redirectedUrl("/account/password-reset/done/"));
+
+    ArgumentCaptor&lt;SimpleMailMessage&gt; mail = ArgumentCaptor.forClass(SimpleMailMessage.class);
+    verify(mailSender).send(mail.capture());
+    String path = ...;   // 从邮件正文里提取链接
+
+    mvc.perform(get(path)).andExpect(model().attribute("validlink", true));
+    mvc.perform(post(path).with(csrf()).param("newPassword1", "brand-new-pass").param("newPassword2", "brand-new-pass"))
+            .andExpect(redirectedUrl("/account/password-reset/complete/"));
+    mvc.perform(get(path)).andExpect(model().attribute("validlink", false));   // 密码变了，链接失效
+    mvc.perform(formLogin("/account/login/").user("alice").password("brand-new-pass"))
+            .andExpect(authenticated());
+}
+</pre>
+</div>
+
+<p>本章共 11 个测试，覆盖：未登录重定向、注册与登录、注册表单错误、登录失败与登出、编辑资料与头像上传（含非图片文件）、修改密码、完整的找回密码流程、未知邮箱不泄露信息，以及令牌的过期、篡改和编码。</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 4 章 Spring 版点评 <small>springboot/Chapter04</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 默认拒绝，显式放行</h4>
+    <p><code>anyRequest().authenticated()</code> 让“忘了加 <code>@login_required</code>”这类漏洞不再可能。Django 直到 5.1 才提供 <code>LoginRequiredMiddleware</code> 实现同样的策略。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 修掉了原书的几个小问题</h4>
+    <p>超级用户也会自动创建 Profile（原书中 admin 访问编辑页会报 <code>RelatedObjectDoesNotExist</code>）；<code>profileOf()</code> 找不到资料时自动补建；上传文件名做了清洗和防穿越；密码至少 8 位。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 认证相关页面全部要自己写</h4>
+    <p>Django 的 <code>django.contrib.auth.urls</code> 一行代码带来 8 个视图；Spring 版为此写了 3 个控制器、6 个表单类和一个令牌类。好处是每一步都清清楚楚，坏处是容易漏掉细节（比如防止账号探测、常量时间比较）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">建议改进</span> 编辑资料后仍然没有提示</h4>
+    <p>和原书第 4 章一样，保存成功后只是重新显示表单。第 5 章会引入“消息”，并改成 PRG（保存后重定向）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 登录限流</h4>
+    <p>两边都没有防暴力破解。Django 常用 django-axes；Spring 可以监听 <code>AuthenticationFailureBadCredentialsEvent</code> 计数，或在网关/Nginx 层限流（见 <a href="t06.html">专题 6</a>）。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>表单登录 = 过滤器拦截 POST → <code>AuthenticationManager</code> → <code>UserDetailsService</code> + <code>PasswordEncoder</code> → <code>SecurityContext</code> 存进会话。</li>
+  <li><code>loginPage</code>、<code>defaultSuccessUrl</code>、<code>anyRequest().authenticated()</code> 分别对应 <code>LOGIN_URL</code>、<code>LOGIN_REDIRECT_URL</code>、<code>@login_required</code>。</li>
+  <li>改密码、找回密码、注册要自己写；找回密码用 HMAC 做无状态令牌，改密码后自动失效。</li>
+  <li>用一对一实体扩展用户；一个 HTML 表单可以绑定多个表单对象；上传文件是 <code>MultipartFile</code>。</li>
+  <li><code>@ControllerAdvice</code> + <code>@ModelAttribute</code> ≈ 上下文处理器；<code>@EventListener</code> ≈ 信号接收者。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>给登录加上“记住我”：<code>http.rememberMe(...)</code>，观察浏览器里多出的 cookie，并思考它和 Django 的 <code>SESSION_EXPIRE_AT_BROWSER_CLOSE</code> 的区别。</li>
+    <li>把密码校验提升到 Django 默认的四个校验器的水平：最少 8 位、不能全是数字、不能和用户名太像、不能是常见密码（可以放一个小的常见密码列表）。</li>
+    <li>用 <code>@EventListener</code> 监听 <code>AuthenticationFailureBadCredentialsEvent</code>，同一用户名 5 分钟内失败 5 次就暂时拒绝登录。</li>
+    <li>把邮件正文改成用 Thymeleaf 的 TEXT 模式渲染（提示：再配置一个 <code>SpringTemplateEngine</code>，模板解析器的 <code>templateMode</code> 设为 <code>TEXT</code>）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

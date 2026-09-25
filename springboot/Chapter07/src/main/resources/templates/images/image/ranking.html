@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Images ranking</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Images ranking</h1>
+  <ol>
+    <li th:each="image : ${mostViewed}">
+      <a th:href="@{${image.absoluteUrl}}" th:text="${image.title}">title</a>
+    </li>
+  </ol>
+</div>
+</body>
+</html>

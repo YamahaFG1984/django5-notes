@@ -1,0 +1,68 @@
+spring:
+  application:
+    name: myshop
+  config:
+    import: optional:file:.env[.properties]
+  datasource:
+    # 原书第 8–11 章用 SQLite，这里用 H2 文件库
+    url: jdbc:h2:file:./data/myshop;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    # 表结构脚本在 db/migration；--spring.profiles.active=sample 时再加载 db/sample 里的示例商品
+    locations: classpath:db/migration
+  messages:
+    # ≈ LOCALE_PATHS：翻译文件 i18n/messages.properties、i18n/messages_es.properties
+    basename: i18n/messages
+    fallback-to-system-locale: false   # 找不到对应语言时用 messages.properties，而不是操作系统的语言
+  mvc:
+    static-path-pattern: /static/**
+  servlet:
+    multipart:
+      max-file-size: 5MB
+  mail:
+    # 开发时发给 Mailpit（compose.yaml），在 http://localhost:8025 查看邮件
+    host: ${MAIL_HOST:localhost}
+    port: ${MAIL_PORT:1025}
+  data:
+    redis:
+      # ≈ REDIS_HOST / REDIS_PORT / REDIS_DB = 1
+      host: ${REDIS_HOST:localhost}
+      port: ${REDIS_PORT:6379}
+      database: 1
+  rabbitmq:
+    # ≈ CELERY_BROKER_URL；mvn spring-boot:run 时由 docker compose 自动注入
+    host: ${RABBITMQ_HOST:localhost}
+    port: ${RABBITMQ_PORT:5672}
+    listener:
+      simple:
+        retry:
+          enabled: true          # 任务失败自动重试（≈ Celery 的 autoretry），默认 3 次
+          initial-interval: 2s
+
+# ≈ STRIPE_PUBLISHABLE_KEY / STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET，写在 .env 里
+stripe:
+  publishable-key: ${STRIPE_PUBLISHABLE_KEY:pk_test_placeholder}
+  secret-key: ${STRIPE_SECRET_KEY:sk_test_placeholder}
+  webhook-secret: ${STRIPE_WEBHOOK_SECRET:whsec_placeholder}
+
+myshop:
+  default-from-email: admin@myshop.com
+  media-root: ${MEDIA_ROOT:media}
+
+---
+# 示例数据（≈ 用 admin 手动录入几个商品）：--spring.profiles.active=sample
+spring:
+  config:
+    activate:
+      on-profile: sample
+  flyway:
+    locations: classpath:db/migration,classpath:db/sample

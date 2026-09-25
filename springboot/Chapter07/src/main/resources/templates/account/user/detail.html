@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title th:text="${user.fullName}">User</title></head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="${user.fullName ?: user.username}">name</h1>
+  <div class="profile-info" th:if="${profile != null and profile.photo != ''}">
+    <img th:src="${#thumbnail.url(profile.photo, 180, 180, true)}" class="user-detail">
+  </div>
+  <span class="count">
+    <span class="total" th:text="${totalFollowers}">0</span>
+    follower<th:block th:unless="${totalFollowers == 1}">s</th:block>
+  </span>
+  <a href="#" th:data-id="${user.id}" th:data-action="${following} ? 'unfollow' : 'follow'"
+     class="follow button" th:text="${following} ? 'Unfollow' : 'Follow'">Follow</a>
+  <div id="image-list" class="image-container">
+    <!--/* {% include "images/image/list_images.html" with images=user.images_created.all %} */-->
+    <th:block th:replace="~{images/image/list_images :: images}"></th:block>
+  </div>
+</div>
+
+<script layout:fragment="domready" th:inline="javascript">
+  const url = /*[[@{/account/users/follow/}]]*/ '/account/users/follow/';
+  document.querySelector('a.follow').addEventListener('click', function (e) {
+    e.preventDefault();
+    const followButton = this;
+    const formData = new FormData();
+    formData.append('id', followButton.dataset.id);
+    formData.append('action', followButton.dataset.action);
+
+    fetch(url, {method: 'POST', headers: {[csrfHeader]: csrfToken}, mode: 'same-origin', body: formData})
+      .then(response => response.json())
+      .then(data => {
+        if (data.status === 'ok') {
+          const previousAction = followButton.dataset.action;
+          const action = previousAction === 'follow' ? 'unfollow' : 'follow';
+          followButton.dataset.action = action;
+          followButton.innerHTML = action;
+
+          const followerCount = document.querySelector('span.count .total');
+          const totalFollowers = parseInt(followerCount.innerHTML);
+          followerCount.innerHTML = previousAction === 'follow' ? totalFollowers + 1 : totalFollowers - 1;
+        }
+      });
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      xmlns:sec="http://www.thymeleaf.org/extras/spring-security">
+<head>
+  <meta charset="utf-8">
+  <title layout:title-pattern="$CONTENT_TITLE | Site administration">Site administration</title>
+  <link th:href="@{/static/css/admin.css}" rel="stylesheet">
+</head>
+<body>
+<header>
+  <a class="brand" th:href="@{/admin/}">Site administration</a>
+  <span class="user">
+    Welcome, <strong sec:authentication="name">admin</strong>.
+    <a th:href="@{/blog/}">View site</a>
+    <form th:action="@{/logout}" method="post"><button type="submit">Log out</button></form>
+  </span>
+</header>
+<nav>
+  <a th:href="@{/admin/blog/post/}">Posts</a>
+  <a th:href="@{/admin/blog/comment/}">Comments</a>
+</nav>
+<main>
+  <p class="message" th:if="${message}" th:text="${message}">Saved.</p>
+  <div layout:fragment="content"></div>
+</main>
+</body>
+</html>

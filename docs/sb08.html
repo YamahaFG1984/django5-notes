@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 8 章 · 构建在线商店 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="8">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 8 章 · 项目三：在线商店</span>
+<h1>构建在线商店</h1>
+<p class="lede">
+  第三个项目是一家网店：商品目录、存在会话里的购物车、下单，以及下单后异步发送确认邮件。
+  Django 版用 <code>request.session</code> 做购物车、用上下文处理器让每个页面都能显示购物车、用 Celery + RabbitMQ 跑后台任务。
+  Spring 版对应的是 <code>@SessionScope</code> Bean、<code>@ControllerAdvice</code> 和 Spring AMQP —— 还会遇到一个 Django 版不太明显的问题：
+  消息应该在事务提交<strong>之后</strong>再发。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 <code>BigDecimal</code> 建模价格，理解“最具体优先”的 URL 匹配</li>
+    <li>用 <code>@SessionScope</code> Bean 实现会话购物车，理解作用域代理</li>
+    <li>用 <code>@ControllerAdvice</code> + <code>@ModelAttribute</code> 实现上下文处理器</li>
+    <li>把订单和订单项建模成一个聚合（级联保存）</li>
+    <li>用 Spring AMQP + RabbitMQ 实现 Celery 式的异步任务，并用 <code>@TransactionalEventListener</code> 保证时机正确</li>
+    <li>在手写后台里实现 <code>list_editable</code>：把一张表格绑定到对象列表</li>
+    <li>用 Docker Compose 管理 RabbitMQ 和 Mailpit，用 profile 加载示例数据</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch08.html">Django 版第 8 章</a>；本章代码在 <code>springboot/Chapter08/</code>（Maven 项目名 <code>myshop</code>）。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="project">新项目：myshop</h2>
+
+<div class="tw">
+<table class="filemap">
+  <tr><th>Django（Chapter08/myshop）</th><th>Spring Boot（springboot/Chapter08）</th></tr>
+  <tr><td>shop/models.py、views.py</td><td>shop/Category.java、Product.java、ShopController.java</td></tr>
+  <tr><td>cart/cart.py</td><td>cart/Cart.java（@SessionScope）、CartService.java</td></tr>
+  <tr><td>cart/context_processors.py</td><td>cart/CartAdvice.java（@ControllerAdvice）</td></tr>
+  <tr><td>orders/models.py、forms.py、views.py</td><td>orders/Order.java、OrderItem.java、OrderCreateForm.java、OrderService.java、OrderController.java</td></tr>
+  <tr><td>myshop/celery.py</td><td>config/RabbitConfig.java</td></tr>
+  <tr><td>orders/tasks.py（@shared_task）</td><td>orders/OrderTasks.java（发消息）+ OrderNotificationWorker.java（@RabbitListener）</td></tr>
+  <tr><td>shop/admin.py、orders/admin.py</td><td>shop/admin/ShopAdminController.java 等</td></tr>
+</table>
+</div>
+
+<p>开发环境需要的外部服务写在 <code>compose.yaml</code> 里，<code>mvn spring-boot:run</code> 会自动启动它们：</p>
+
+<div class="code" data-lang="yaml" data-file="compose.yaml">
+<pre>
+services:
+  rabbitmq:
+    # ≈ 书中的 docker run ... rabbitmq:3.13.1-management
+    image: rabbitmq:3.13-management
+    ports:
+      - "${RABBITMQ_PORT:-5672}:5672"
+      - "${RABBITMQ_UI_PORT:-15672}:15672"   # 管理界面，部分替代 Flower
+  mailpit:
+    # 假的 SMTP 服务器：收下所有邮件，在 http://localhost:8025 查看
+    image: axllent/mailpit:latest
+    ports:
+      - "${MAIL_PORT:-1025}:1025"
+      - "${MAIL_UI_PORT:-8025}:8025"
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 用 Mailpit 代替 console 邮件后端</div>
+  <p>
+    博客项目里我们写过一个把邮件打印到日志的 <code>ConsoleMailSender</code>。商店从第 9 章起要发带 PDF 附件的邮件，日志里看不了附件。
+    Mailpit 是一个“假的”SMTP 服务器：应用照常通过 SMTP 发信，Mailpit 全部收下，在网页里可以看正文、附件和原始报文。
+    应用这边只需要 <code>spring.mail.host=localhost</code>、<code>spring.mail.port=1025</code>。
+  </p>
+</div>
+
+<h3>示例数据：profile + Flyway</h3>
+
+<p>
+  书中要求用 Django admin 手动录入分类和商品。为了打开就能逛，Spring 版准备了一个 <code>sample</code> profile：
+  它让 Flyway 多扫描一个目录 <code>db/sample</code>，里面的脚本插入几个示例商品。
+</p>
+
+<div class="code" data-lang="yaml" data-file="application.yaml（节选）">
+<pre>
+spring:
+  flyway:
+    locations: classpath:db/migration
+
+---
+spring:
+  config:
+    activate:
+      on-profile: sample             # mvn spring-boot:run -Dspring-boot.run.profiles=sample
+  flyway:
+    locations: classpath:db/migration,classpath:db/sample
+</pre>
+</div>
+
+<p>示例脚本的版本号取 <code>V1000</code>，保证总在正式迁移之后执行。第 12 章讲 fixtures 时会再比较几种“初始数据”的做法。</p>
+
+<h2 id="catalog">商品目录</h2>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · shop/models.py</div>
+<div class="code" data-lang="py"><pre>
+class Product(models.Model):
+    category = models.ForeignKey(Category,
+        related_name='products',
+        on_delete=models.CASCADE)
+    name = models.CharField(max_length=200)
+    slug = models.SlugField(max_length=200)
+    image = models.ImageField(
+        upload_to='products/%Y/%m/%d', blank=True)
+    description = models.TextField(blank=True)
+    price = models.DecimalField(max_digits=10,
+                                decimal_places=2)
+    available = models.BooleanField(default=True)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · shop/Product.java（节选）</div>
+<div class="code" data-lang="java"><pre>
+@ManyToOne(fetch = FetchType.LAZY, optional = false)
+@JoinColumn(name = "category_id")
+private Category category;
+
+@Column(nullable = false, length = 200) private String name;
+@Column(nullable = false, length = 200) private String slug;
+@Column(nullable = false, length = 100) private String image = "";
+
+@Column(nullable = false, precision = 10, scale = 2)
+private BigDecimal price;           // NUMERIC(10, 2)
+
+@Column(nullable = false)
+private boolean available = true;
+
+/** 没有图片时显示占位图 */
+public String getImageUrl() {
+    return image.isEmpty() ? "/static/img/no_image.png" : "/media/" + image;
+}
+</pre></div></div>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; 钱永远用 BigDecimal</div>
+  <p>
+    Python 的 <code>DecimalField</code> 返回 <code>Decimal</code>；Java 里对应 <code>BigDecimal</code>。千万不要用 <code>double</code>：<code>0.1 + 0.2 == 0.30000000000000004</code>。
+    还要注意 <code>BigDecimal</code> 的比较：<code>new BigDecimal("30.0").equals(new BigDecimal("30.00"))</code> 是 <code>false</code>（精度不同），比较数值要用 <code>compareTo</code>，测试里用 AssertJ 的 <code>isEqualByComparingTo</code>。
+  </p>
+</div>
+
+<h3>URL：最具体优先</h3>
+
+<p>商店挂在网站根路径：<code>/</code>、<code>/{分类}/</code>、<code>/{id}/{slug}/</code>。书中特意提醒：<code>shop.urls</code> 必须放在主 <code>urls.py</code> 的最后，否则 <code>'&lt;slug:category_slug&gt;/'</code> 会把 <code>cart/</code>、<code>orders/</code> 也当成分类吞掉。</p>
+
+<div class="code" data-lang="java" data-file="shop/ShopController.java（节选）">
+<pre>
+@GetMapping("/{categorySlug}/")
+public String productListByCategory(@PathVariable String categorySlug, Model model) { ... }
+
+@GetMapping("/{id:\\d+}/{slug}/")          // {变量:正则}，≈ &lt;int:id&gt;
+public String productDetail(@PathVariable Long id, @PathVariable String slug, Model model) { ... }
+</pre>
+</div>
+
+<p>
+  Spring MVC 不按书写顺序匹配，而是在所有候选里选<strong>最具体</strong>的：字面量路径 <code>/cart/</code> 优先于变量 <code>/{categorySlug}/</code>。
+  所以控制器写在哪里、先注册谁都无所谓。<code>{id:\d+}</code> 限定 id 只能是数字，作用和 Django 的 <code>&lt;int:id&gt;</code> 转换器一样。
+</p>
+
+<h2 id="cart">会话购物车</h2>
+
+<p>购物车不需要登录：匿名用户也有会话。Django 版每次请求都 <code>Cart(request)</code>，从 <code>request.session['cart']</code> 里取一个字典。Spring 有更“声明式”的写法：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 240" role="img" aria-label="会话作用域 Bean：控制器注入的是一个代理，每次调用时代理根据当前请求的会话找到对应的 Cart 实例；每个 HttpSession 里存着自己的 Cart">
+  <rect class="bx-a" x="10" y="90" width="170" height="60" rx="10"/>
+  <text class="ttl on-a" x="95" y="115" text-anchor="middle">CartController</text>
+  <text class="sm" x="95" y="134" text-anchor="middle">注入的 cart 字段</text>
+
+  <rect class="bx-p" x="240" y="90" width="170" height="60" rx="10"/>
+  <text class="ttl on-p" x="325" y="115" text-anchor="middle">作用域代理</text>
+  <text class="sm" x="325" y="134" text-anchor="middle">每次调用找“当前会话”</text>
+
+  <rect class="bx" x="480" y="20" width="270" height="56" rx="10"/>
+  <text class="ttl" x="615" y="43" text-anchor="middle">会话 A（Cookie JSESSIONID=a…）</text>
+  <text class="mono sm" x="615" y="62" text-anchor="middle">Cart { 1 → 2 件, 30.00 }</text>
+
+  <rect class="bx" x="480" y="92" width="270" height="56" rx="10"/>
+  <text class="ttl" x="615" y="115" text-anchor="middle">会话 B</text>
+  <text class="mono sm" x="615" y="134" text-anchor="middle">Cart { 3 → 1 件, 21.20 }</text>
+
+  <rect class="bx" x="480" y="164" width="270" height="56" rx="10"/>
+  <text class="ttl" x="615" y="187" text-anchor="middle">会话 C</text>
+  <text class="mono sm" x="615" y="206" text-anchor="middle">Cart { }</text>
+
+  <path class="ln" d="M182 120 H236" marker-end="url(#ar)"/>
+  <path class="ln-p" d="M412 110 L476 50" marker-end="url(#ar-p)"/>
+  <path class="ln-d" d="M412 120 H476"/>
+  <path class="ln-d" d="M412 130 L476 190"/>
+  <text class="sm" x="445" y="226" text-anchor="middle">请求来自哪个会话，就用哪个</text>
+</svg>
+<figcaption>图 S8-1　@SessionScope：控制器是单例，但通过代理拿到的是“当前会话”的购物车</figcaption>
+</figure>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · cart/cart.py（节选）</div>
+<div class="code" data-lang="py"><pre>
+class Cart:
+    def __init__(self, request):
+        self.session = request.session
+        cart = self.session.get(settings.CART_SESSION_ID)
+        if not cart:
+            cart = self.session[settings.CART_SESSION_ID] = {}
+        self.cart = cart
+
+    def add(self, product, quantity=1,
+            override_quantity=False):
+        product_id = str(product.id)
+        if product_id not in self.cart:
+            self.cart[product_id] = {
+                'quantity': 0,
+                'price': str(product.price)}
+        if override_quantity:
+            self.cart[product_id]['quantity'] = quantity
+        else:
+            self.cart[product_id]['quantity'] += quantity
+        self.save()
+
+    def save(self):
+        self.session.modified = True
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · cart/Cart.java（节选）</div>
+<div class="code" data-lang="java"><pre>
+@Component
+@SessionScope          // 每个 HTTP 会话一个实例
+public class Cart implements Serializable {
+
+    public record Item(int quantity, String price)
+            implements Serializable { ... }
+
+    private final Map&lt;Long, Item&gt; items = new LinkedHashMap&lt;&gt;();
+
+    public void add(Product product, int quantity,
+                    boolean overrideQuantity) {
+        Item current = items.get(product.getId());
+        int newQuantity = overrideQuantity || current == null
+                ? quantity : current.quantity() + quantity;
+        String price = current == null
+                ? product.getPrice().toPlainString()
+                : current.price();
+        items.put(product.getId(), new Item(newQuantity, price));
+    }
+    // 不需要 session.modified = True
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li><strong>作用域代理</strong>：<code>CartController</code> 是单例，却能注入一个“每个会话一份”的 <code>Cart</code>。容器注入的是代理对象，每次方法调用时，代理从当前请求的 <code>HttpSession</code> 里取出（或创建）真正的实例。</li>
+  <li><strong>Serializable</strong>：会话可能被持久化（重启不丢）或复制到其他节点（集群），里面的对象必须可序列化 —— 和 Django 默认要求会话数据能 JSON 序列化是同一个道理。所以两边都只存“商品 id → 数量和价格字符串”，不存商品对象。</li>
+  <li>不需要 <code>session.modified = True</code>：Spring 在请求结束时会把会话作用域的 Bean 重新写回会话。</li>
+</ul>
+
+<div class="box note">
+  <div class="t">&#9432; 也可以像 Django 一样直接用 HttpSession</div>
+  <p>控制器方法可以直接声明 <code>HttpSession session</code> 参数，<code>session.getAttribute("cart")</code> 自己管理。第 9 章保存 <code>order_id</code> 就是这么做的。<code>@SessionScope</code> 更适合“有行为的对象”，<code>HttpSession</code> 更适合零散的值。</p>
+</div>
+
+<h3>把 id 变成商品：CartService</h3>
+
+<p>Django 的 <code>Cart.__iter__</code> 在遍历时查询商品。Spring 版把这件事放进 service，一条 IN 查询取回所有商品，得到模板要用的“购物车行”：</p>
+
+<div class="code" data-lang="java" data-file="cart/CartService.java（节选）">
+<pre>
+public record Line(Product product, int quantity, BigDecimal price) {
+    public BigDecimal totalPrice() {
+        return price.multiply(BigDecimal.valueOf(quantity));
+    }
+}
+
+public List&lt;Line&gt; lines() {
+    Map&lt;Long, Cart.Item&gt; items = cart.items();
+    Map&lt;Long, Product&gt; byId = products.findByIdIn(items.keySet()).stream()
+            .collect(Collectors.toMap(Product::getId, Function.identity()));
+    return items.entrySet().stream()
+            .filter(entry -&gt; byId.containsKey(entry.getKey()))   // 商品已被删除：跳过
+            .map(entry -&gt; new Line(byId.get(entry.getKey()), entry.getValue().quantity(), entry.getValue().unitPrice()))
+            .toList();
+}
+</pre>
+</div>
+
+<h3>表单：数量 + 隐藏的 override</h3>
+
+<div class="code" data-lang="java" data-file="cart/CartController.java（节选）">
+<pre>
+@PostMapping("/add/{productId}/")
+public String add(@PathVariable Long productId, @Valid @ModelAttribute CartAddProductForm form, BindingResult errors) {
+    Product product = products.findById(productId)
+            .filter(Product::isAvailable)   // 书中没有检查：下架商品也能加进购物车
+            .orElseThrow(() -&gt; new NotFoundException("No Product matches the given query."));
+    if (!errors.hasErrors()) {
+        cart.add(product, form.getQuantity(), form.isOverride());
+    }
+    return "redirect:/cart/";
+}
+</pre>
+</div>
+
+<p><code>CartAddProductForm</code> 用 <code>@Min(1) @Max(20)</code> 表达 <code>TypedChoiceField(choices=1..20)</code>：Django 的 choices 字段会拒绝列表外的值，Spring 里要用约束注解明确写出来 —— 否则有人手工提交 <code>quantity=-5</code> 就能“退款”。</p>
+
+<h2 id="context-processor">上下文处理器 → @ControllerAdvice</h2>
+
+<p>每个页面顶部都显示“购物车：3 件，$91.50”。Django 用上下文处理器把 <code>cart</code> 放进所有模板的上下文；Spring 用 <code>@ControllerAdvice</code> 里的 <code>@ModelAttribute</code> 方法：</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+# cart/context_processors.py
+def cart(request):
+    return {'cart': Cart(request)}
+
+# settings.py
+TEMPLATES = [{ ...
+    'OPTIONS': {'context_processors': [
+        ...
+        'cart.context_processors.cart',
+    ]},
+}]
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · cart/CartAdvice.java</div>
+<div class="code" data-lang="java"><pre>
+@ControllerAdvice   // 对所有控制器生效
+public class CartAdvice {
+
+    public record CartSummary(int totalItems,
+                              BigDecimal totalPrice) { }
+
+    private final Cart cart;
+
+    @ModelAttribute("cartSummary")   // 每个请求都执行
+    public CartSummary cartSummary() {
+        return new CartSummary(cart.size(), cart.totalPrice());
+    }
+}
+</pre></div></div>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 两者的细微差别</div>
+  <p>
+    Django 的上下文处理器只在<strong>用 RequestContext 渲染模板</strong>时执行；<code>@ModelAttribute</code> 方法在<strong>每个控制器方法之前</strong>执行，哪怕它最后返回的是重定向或 JSON。
+    所以这里只放计算很便宜的数据（数量和总价都来自会话，不查库）。需要限定范围时可以写 <code>@ControllerAdvice(assignableTypes = ...)</code> 或 <code>basePackages</code>。
+  </p>
+</div>
+
+<h2 id="orders">订单：一个聚合</h2>
+
+<div class="code" data-lang="java" data-file="orders/Order.java（节选）">
+<pre>
+@Entity
+@Table(name = "orders_order")      // “order” 是 SQL 关键字，不能直接当表名
+public class Order {
+    ...
+    @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
+    private List&lt;OrderItem&gt; items = new ArrayList&lt;&gt;();
+
+    public void addItem(OrderItem item) {   // 同时维护关系的两端
+        items.add(item);
+        item.setOrder(this);
+    }
+
+    /** get_total_cost() */
+    public BigDecimal getTotalCost() {
+        return items.stream().map(OrderItem::getCost).reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+}
+</pre>
+</div>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · orders/views.py</div>
+<div class="code" data-lang="py"><pre>
+order = form.save()
+for item in cart:
+    OrderItem.objects.create(
+        order=order,
+        product=item['product'],
+        price=item['price'],
+        quantity=item['quantity'])
+cart.clear()
+order_created.delay(order.id)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · orders/OrderService.java</div>
+<div class="code" data-lang="java"><pre>
+@Transactional
+public Order create(OrderCreateForm form) {
+    Order order = form.toOrder();
+    for (CartService.Line line : cartService.lines()) {
+        order.addItem(new OrderItem(line.product(),
+                line.price(), line.quantity()));
+    }
+    orders.save(order);   // cascade：订单项一起插入
+    cart.clear();
+    events.publishEvent(new OrderCreatedEvent(order.getId()));
+    return order;
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li><code>cascade = CascadeType.ALL</code>：保存订单时自动保存订单项，不必逐个 <code>save</code>。订单项离开订单没有意义，这种“一起创建、一起删除”的对象组合在领域驱动设计里叫<strong>聚合</strong>。</li>
+  <li>Django 版的多条 <code>INSERT</code> 默认各自提交，中途出错会留下“有订单没订单项”的半成品；Spring 版整个方法在一个事务里。</li>
+  <li>订单项保存<strong>下单时的价格</strong>：以后商品调价，历史订单不受影响。测试 <code>checkoutCreatesOrderWithItemsAndClearsCart</code> 专门验证了这一点。</li>
+  <li>书中允许用空购物车下单（生成一个没有商品的订单），Spring 版在控制器里挡掉了。</li>
+</ul>
+
+<h2 id="async">异步任务：Celery → Spring AMQP</h2>
+
+<p>下单后要给顾客发确认邮件。发邮件慢而且可能失败，不应该让用户等着 —— 所以放进消息队列，由后台“工作者”处理。</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 270" role="img" aria-label="异步任务流程：OrderService 在事务中发布 OrderCreatedEvent；事务提交后 OrderTasks 把消息发到 RabbitMQ 队列；OrderNotificationWorker 通过 @RabbitListener 消费消息，查询订单并发送邮件">
+  <rect class="bx-d" x="10" y="20" width="400" height="160" rx="12"/>
+  <text class="sm" x="210" y="40" text-anchor="middle">一个数据库事务</text>
+  <rect class="bx-a" x="30" y="55" width="170" height="56" rx="10"/>
+  <text class="ttl on-a" x="115" y="79" text-anchor="middle">OrderService.create</text>
+  <text class="sm" x="115" y="98" text-anchor="middle">保存订单、清空购物车</text>
+  <rect class="bx" x="230" y="55" width="160" height="56" rx="10"/>
+  <text class="ttl" x="310" y="79" text-anchor="middle">publishEvent</text>
+  <text class="mono sm" x="310" y="98" text-anchor="middle">OrderCreatedEvent</text>
+  <path class="ln" d="M202 83 H226" marker-end="url(#ar)"/>
+  <text class="sm" x="210" y="160" text-anchor="middle">COMMIT</text>
+  <path class="ln-d" d="M30 145 H390"/>
+
+  <rect class="bx-g" x="450" y="55" width="140" height="56" rx="10"/>
+  <text class="ttl on-g" x="520" y="79" text-anchor="middle">OrderTasks</text>
+  <text class="sm" x="520" y="98" text-anchor="middle">AFTER_COMMIT</text>
+  <path class="ln-g" d="M310 113 C 310 200, 520 200, 520 115" marker-end="url(#ar-g)"/>
+  <text class="sm on-g" x="415" y="205" text-anchor="middle">提交成功后才触发</text>
+
+  <rect class="bx-b" x="620" y="55" width="130" height="56" rx="10"/>
+  <text class="ttl on-b" x="685" y="79" text-anchor="middle">RabbitMQ</text>
+  <text class="mono sm" x="685" y="98" text-anchor="middle">order_created</text>
+  <path class="ln-b" d="M592 83 H616" marker-end="url(#ar-b)"/>
+
+  <rect class="bx-p" x="560" y="190" width="190" height="60" rx="10"/>
+  <text class="ttl on-p" x="655" y="214" text-anchor="middle">@RabbitListener</text>
+  <text class="sm" x="655" y="233" text-anchor="middle">查订单 → 发邮件</text>
+  <path class="ln-b" d="M685 113 V186" marker-end="url(#ar-b)"/>
+</svg>
+<figcaption>图 S8-2　事件把“保存订单”和“发消息”解耦；AFTER_COMMIT 保证消费者一定查得到订单</figcaption>
+</figure>
+
+<div class="tw">
+<table>
+  <tr><th>Celery</th><th>Spring AMQP</th></tr>
+  <tr><td><code>app = Celery('myshop')</code> + <code>autodiscover_tasks()</code></td><td>加上 <code>spring-boot-starter-amqp</code>，Boot 自动配置连接和 <code>RabbitTemplate</code></td></tr>
+  <tr><td><code>@shared_task def order_created(order_id)</code></td><td>任何 Bean 里的 <code>@RabbitListener(queues = "...")</code> 方法</td></tr>
+  <tr><td><code>order_created.delay(order.id)</code></td><td><code>rabbit.convertAndSend(queue, new OrderCreatedMessage(id))</code></td></tr>
+  <tr><td>Celery 自动建队列</td><td>声明 <code>Queue</code> Bean，启动时自动在 RabbitMQ 上创建</td></tr>
+  <tr><td>单独启动 <code>celery -A myshop worker</code></td><td>监听器就在应用进程里运行；需要独立 worker 时，以非 Web 模式再启动几份应用</td></tr>
+  <tr><td>默认 JSON 序列化参数</td><td>配置 <code>JacksonJsonMessageConverter</code>，消息体为 <code>{"orderId": 1}</code></td></tr>
+  <tr><td><code>autoretry_for</code>、<code>retry_backoff</code></td><td><code>spring.rabbitmq.listener.simple.retry.*</code></td></tr>
+  <tr><td>Flower 监控</td><td>RabbitMQ 管理界面（15672 端口）+ Actuator 指标</td></tr>
+</table>
+</div>
+
+<div class="code" data-lang="java" data-file="orders/OrderTasks.java 与 OrderNotificationWorker.java（节选）">
+<pre>
+@Component
+public class OrderTasks {
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    public void onOrderCreated(OrderCreatedEvent event) {
+        rabbit.convertAndSend(RabbitConfig.ORDER_CREATED_QUEUE, new OrderCreatedMessage(event.orderId()));
+    }
+}
+
+@Component
+public class OrderNotificationWorker {
+    @RabbitListener(queues = RabbitConfig.ORDER_CREATED_QUEUE)
+    @Transactional(readOnly = true)
+    public void orderCreated(OrderCreatedMessage message) {
+        orders.findById(message.orderId()).ifPresentOrElse(order -&gt; {
+            SimpleMailMessage mail = new SimpleMailMessage();
+            mail.setSubject("Order nr. " + order.getId());
+            mail.setText("Dear %s,%n%nYou have successfully placed an order. Your order ID is %d."
+                    .formatted(order.getFirstName(), order.getId()));
+            ...
+            mailSender.send(mail);
+        }, () -&gt; log.warn("订单 {} 不存在，忽略消息", message.orderId()));
+    }
+}
+</pre>
+</div>
+
+<div class="box key">
+  <div class="t">&#128273; 为什么要等事务提交后再发消息</div>
+  <p>
+    如果在 <code>OrderService.create()</code> 里直接 <code>convertAndSend</code>，消息会在事务提交<strong>之前</strong>进入队列。
+    消费者可能比事务更快，去数据库里找订单时发现“不存在”；更糟的是，如果事务最终回滚，确认邮件却已经发出去了。
+    Django 版没有暴露这个问题，只是因为 Django 默认自动提交（每条 SQL 立即提交）；一旦你把视图包进 <code>transaction.atomic()</code>，
+    就必须改成 <code>transaction.on_commit(lambda: order_created.delay(order.id))</code> —— 这正是 <code>@TransactionalEventListener(AFTER_COMMIT)</code> 的对应物。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 不用消息队列行不行</div>
+  <p>
+    Spring 自带更轻量的选择：给方法加 <code>@Async</code>（配合 <code>@EnableAsync</code>），它会在线程池里执行。缺点是任务只存在于内存，应用重启就丢了，也无法由多台机器分担。
+    对“发确认邮件”这种可以丢、可以重试的任务，<code>@Async</code> 往往就够了；对“扣库存”“对账”这类不能丢的任务，才值得上 RabbitMQ。书中用 Celery 主要是为了演示。
+  </p>
+</div>
+
+<h2 id="admin">后台：list_editable</h2>
+
+<p>Django 的 <code>list_editable = ['price', 'available']</code> 让管理员在列表页直接改价格和上架状态，一次保存多行。在 Spring 里，这是“把一张表格绑定到对象列表”的问题：</p>
+
+<div class="code" data-lang="java" data-file="shop/admin/ProductListForm.java（节选）">
+<pre>
+public class ProductListForm {
+    @Valid                                 // 级联校验列表里的每一行
+    private List&lt;Row&gt; rows = new ArrayList&lt;&gt;();
+
+    public static class Row {
+        @NotNull private Long id;
+        @NotNull @DecimalMin("0.00") @Digits(integer = 8, fraction = 2) private BigDecimal price;
+        private boolean available;
+        ...
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="th" data-file="templates/admin/shop/product_list.html（节选）">
+<pre>
+&lt;form method="post" th:action="@{/admin/shop/product/}" th:object="${form}"&gt;
+  &lt;tr th:each="p, stat : ${products}"&gt;
+    &lt;td&gt;&lt;input type="hidden" th:field="*{rows[__${stat.index}__].id}"&gt; ...&lt;/td&gt;
+    &lt;!-- 生成 name="rows[0].price" 之类的名字，提交后 Spring 自动填回 List --&gt;
+    &lt;td&gt;&lt;input type="text" th:field="*{rows[__${stat.index}__].price}"&gt;&lt;/td&gt;
+    &lt;td&gt;&lt;input type="checkbox" th:field="*{rows[__${stat.index}__].available}"&gt;&lt;/td&gt;
+  &lt;/tr&gt;
+&lt;/form&gt;
+</pre>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 复选框的小坑</div>
+  <p>未勾选的复选框根本不会被提交，服务器无法区分“没勾选”和“没这个字段”。<code>th:field</code> 会额外生成一个隐藏的 <code>_rows[0].available</code> 字段，Spring 看到它就知道“这个复选框存在但没勾选”，于是设为 <code>false</code>。Django 的 <code>CheckboxInput</code> 是靠“字段不在 POST 里就是 False”来处理的。</p>
+</div>
+
+<p>这种 <code>List&lt;Row&gt;</code> 绑定是第 13 章实现 Django formset 的基础。</p>
+
+<h2 id="tests">测试</h2>
+
+<ul>
+  <li><strong>会话</strong>：<code>MockHttpSession</code> 在多个请求间共享，相当于 Django 测试客户端自动保存会话 cookie。另开一个会话就看不到别人的购物车。</li>
+  <li><strong>异步任务</strong>：<code>OrderNotificationTests</code> 走完整链路 —— 下单、事务提交、消息进入 Testcontainers 启动的 RabbitMQ、监听器消费、发邮件（被 Mock 替换）。用 Awaitility 等待断言成立。</li>
+  <li><strong>这个测试不能加 <code>@Transactional</code></strong>：测试事务结束时回滚、从不提交，<code>AFTER_COMMIT</code> 的监听器就永远不会执行。不加事务的测试要自己清理数据（<code>@AfterEach</code> 里删除订单）。</li>
+  <li><strong>共享上下文</strong>：所有集成测试继承同一个 <code>IntegrationTest</code> 基类，统一 <code>@MockitoBean</code>。Spring 缓存测试上下文时会把“替换了哪些 Bean”算进缓存键，各测试类各 mock 一点，就会各启动一个上下文和一套容器。</li>
+</ul>
+
+<div class="code" data-lang="java" data-file="OrderNotificationTests.java（节选）">
+<pre>
+@Test
+void placingAnOrderSendsConfirmationEmailAsynchronously() throws Exception {
+    MockHttpSession session = new MockHttpSession();
+    mvc.perform(post("/cart/add/{id}/", productId).session(session).with(csrf()).param("quantity", "1"));
+    mvc.perform(post("/orders/create/").session(session).with(csrf())
+            .param("firstName", "Ada") ... );
+
+    ArgumentCaptor&lt;SimpleMailMessage&gt; mail = ArgumentCaptor.forClass(SimpleMailMessage.class);
+    await().atMost(Duration.ofSeconds(20))
+            .untilAsserted(() -&gt; verify(mailSender, atLeastOnce()).send(any(SimpleMailMessage.class)));
+    ...
+}
+</pre>
+</div>
+
+<p>本章共 8 个测试。另外在真实环境里验证过：<code>mvn spring-boot:run</code> 自动启动 RabbitMQ 和 Mailpit，下单后 Mailpit 收到了“Order nr. 1”。</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 8 章 Spring 版点评 <small>springboot/Chapter08</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 消息在事务提交后才发出</h4>
+    <p>用 <code>@TransactionalEventListener(AFTER_COMMIT)</code> 解决了“消费者比事务快”和“回滚后仍发邮件”两个问题。Django 版若加上事务，也需要 <code>on_commit</code>。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 修补了几个输入校验的漏洞</h4>
+    <p>下架商品不能加入购物车、数量限制在 1–20、空购物车不能下单。Django 版前两项依赖表单的 choices 和视图的 <code>get_object_or_404(Product, id=...)</code>（没有过滤 available）。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 会话作用域 Bean 的并发</h4>
+    <p>同一个用户在两个标签页里同时点“加入购物车”，两个请求会并发修改同一个 <code>Cart</code> 实例。<code>LinkedHashMap</code> 不是线程安全的；负载不高时问题不大，严格起见可以把 <code>add</code> 等方法加上 <code>synchronized</code>。Django 的会话也有“后写覆盖先写”的问题。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 管理命令要自己退出</h4>
+    <p>这个项目里有 RabbitMQ 监听器线程，以非 Web 模式运行 <code>--createsuperuser</code> 时进程不会自己结束。<code>CreateSuperuserCommand</code> 执行完后调用 <code>SpringApplication.exit()</code> 显式退出 —— 这是在本地验证时发现的。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 会话存在哪里</h4>
+    <p>默认存在 Tomcat 的内存里，重启就丢、多台机器之间不共享。Django 默认存在数据库里。生产环境可以加 <code>spring-boot-starter-session-data-redis</code>（或 <code>session-jdbc</code>），一行依赖就把会话挪到 Redis，代码不用改。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>价格用 <code>BigDecimal</code>，比较用 <code>compareTo</code>；URL 按“最具体优先”匹配。</li>
+  <li><code>@SessionScope</code> Bean 通过代理访问当前会话的实例；会话里的对象要可序列化，只存 id 和简单值。</li>
+  <li><code>@ControllerAdvice</code> + <code>@ModelAttribute</code> ≈ 上下文处理器，但在每个控制器方法前执行。</li>
+  <li>订单和订单项是一个聚合：<code>cascade = ALL</code>，在一个事务里保存。</li>
+  <li>异步任务：事件 → <code>AFTER_COMMIT</code> → <code>RabbitTemplate</code> → <code>@RabbitListener</code>。</li>
+  <li>表格编辑 = 绑定 <code>List</code>，复选框靠隐藏的 <code>_</code> 字段表示“未勾选”。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>把 <code>OrderTasks</code> 删掉，直接在 <code>OrderService</code> 里 <code>convertAndSend</code>，在监听器里加 <code>Thread.sleep</code> 前后观察：能否复现“查不到订单”？</li>
+    <li>打开 RabbitMQ 管理界面，停掉应用后下几单（直接往队列里 publish 消息），再启动应用，观察积压的消息被消费。</li>
+    <li>改用 <code>@Async</code> 发送确认邮件，比较两种方式在“应用重启”时的差别。</li>
+    <li>加入 <code>spring-boot-starter-session-data-redis</code>，让购物车在应用重启后依然存在。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

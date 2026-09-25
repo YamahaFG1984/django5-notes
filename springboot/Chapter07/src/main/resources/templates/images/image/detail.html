@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title th:text="${detail.image.title}">Image</title></head>
+<body>
+<div layout:fragment="content" th:with="image=${detail.image}, totalLikes=${detail.totalLikes}">
+  <h1 th:text="${image.title}">title</h1>
+  <a th:href="@{${image.imageUrl}}">
+    <!--/* {% thumbnail image.image 300x0 %}：宽 300，高度按比例 */-->
+    <img th:src="${#thumbnail.url(image.image, 300, 0, false)}" class="image-detail">
+  </a>
+  <div class="image-info">
+    <div>
+      <span class="count">
+        <span class="total" th:text="${totalLikes}">0</span>
+        like<th:block th:unless="${totalLikes == 1}">s</th:block>
+      </span>
+      <!--/* 浏览数来自 Redis */-->
+      <span class="count" th:text="|${totalViews} view${totalViews == 1 ? '' : 's'}|">0 views</span>
+      <a href="#" th:data-id="${image.id}" th:data-action="${detail.likedByMe} ? 'unlike' : 'like'"
+         class="like button" th:text="${detail.likedByMe} ? 'Unlike' : 'Like'">Like</a>
+    </div>
+    <div th:utext="${#text.linebreaks(image.description)}"></div>
+  </div>
+  <div class="image-likes">
+    <div th:each="liker : ${detail.likers}">
+      <img th:if="${liker.photo != ''}" th:src="${#thumbnail.url(liker.photo, 180, 180, true)}">
+      <p th:text="${liker.user.firstName}">name</p>
+    </div>
+    <th:block th:if="${#lists.isEmpty(detail.likers)}">Nobody likes this image yet.</th:block>
+  </div>
+</div>
+
+<!--/* th:inline="javascript" 让 [[...]] 表达式输出为安全的 JS 字面量 */-->
+<script layout:fragment="domready" th:inline="javascript">
+  const url = /*[[@{/images/like/}]]*/ '/images/like/';
+  document.querySelector('a.like').addEventListener('click', function (e) {
+    e.preventDefault();
+    const likeButton = this;
+
+    const formData = new FormData();
+    formData.append('id', likeButton.dataset.id);
+    formData.append('action', likeButton.dataset.action);
+
+    fetch(url, {
+      method: 'POST',
+      headers: {[csrfHeader]: csrfToken},   // X-CSRF-TOKEN: ...（≈ Django 的 X-CSRFToken）
+      mode: 'same-origin',
+      body: formData
+    })
+      .then(response => response.json())
+      .then(data => {
+        if (data.status === 'ok') {
+          const previousAction = likeButton.dataset.action;
+          const action = previousAction === 'like' ? 'unlike' : 'like';
+          likeButton.dataset.action = action;
+          likeButton.innerHTML = action;
+
+          const likeCount = document.querySelector('span.count .total');
+          const totalLikes = parseInt(likeCount.innerHTML);
+          likeCount.innerHTML = previousAction === 'like' ? totalLikes + 1 : totalLikes - 1;
+        }
+      });
+  });
+</script>
+</body>
+</html>

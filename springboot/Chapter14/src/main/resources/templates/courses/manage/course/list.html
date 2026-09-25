@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>My courses</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>My courses</h1>
+  <div class="module">
+    <div class="course-info" th:each="course : ${courses}">
+      <h3 th:text="${course.title}">Course</h3>
+      <p>
+        <a th:href="@{/course/{id}/edit/(id=${course.id})}">Edit</a>
+        <a th:href="@{/course/{id}/delete/(id=${course.id})}">Delete</a>
+        <a th:href="@{/course/{id}/module/(id=${course.id})}">Edit modules</a>
+        <!--/* {% if course.modules.count > 0 %}：modules 已经用 @EntityGraph 一次查出，这里不会再发 SQL */-->
+        <a th:unless="${course.modules.isEmpty()}"
+           th:href="@{/course/module/{id}/(id=${course.modules[0].id})}">Manage contents</a>
+      </p>
+    </div>
+    <p th:if="${courses.isEmpty()}">You haven't created any courses yet.</p>
+    <p><a th:href="@{/course/create/}" class="button">Create new course</a></p>
+  </div>
+</div>
+</body>
+</html>

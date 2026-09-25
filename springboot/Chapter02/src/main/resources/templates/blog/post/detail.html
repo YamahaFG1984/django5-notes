@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{blog/base}">
+<head>
+  <title th:text="${post.title}">Post</title>
+</head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="${post.title}">Post title</h1>
+  <p class="date">
+    Published <span th:text="${#temporals.format(post.publish, 'MMM d, yyyy, HH:mm')}">date</span>
+    by <span th:text="${post.author}">author</span>
+  </p>
+  <div th:utext="${#text.linebreaks(post.body)}"></div>
+  <p>
+    <a th:href="@{/blog/{id}/share/(id=${post.id})}">Share this post</a>
+  </p>
+
+  <!--/* {% with comments.count as total_comments %} … {{ total_comments|pluralize }} */-->
+  <h2 th:with="total=${#lists.size(comments)}"
+      th:text="|${total} comment${total == 1 ? '' : 's'}|">0 comments</h2>
+
+  <!--/* th:each 的状态变量 stat ≈ forloop：stat.count 从 1 开始，≈ forloop.counter */-->
+  <div class="comment" th:each="comment, stat : ${comments}">
+    <p class="info">
+      Comment <span th:text="${stat.count}">1</span> by <span th:text="${comment.name}">name</span>
+      <span th:text="${#temporals.format(comment.created, 'MMM d, yyyy, HH:mm')}">date</span>
+    </p>
+    <div th:utext="${#text.linebreaks(comment.body)}"></div>
+  </div>
+  <!--/* {% empty %} */-->
+  <p th:if="${#lists.isEmpty(comments)}">There are no comments yet.</p>
+
+  <!--/* {% include "blog/post/includes/comment_form.html" %} */-->
+  <div th:replace="~{blog/post/includes/comment_form :: commentForm}"></div>
+</div>
+</body>
+</html>

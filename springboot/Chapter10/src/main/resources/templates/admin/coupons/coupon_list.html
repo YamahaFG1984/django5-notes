@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{admin/layout}">
+<head><title>Coupons</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Coupons</h1>
+  <form method="get" class="search">
+    <input type="search" name="q" th:value="${q}" placeholder="Search code">
+    <button type="submit">Search</button>
+  </form>
+  <div class="layout">
+    <table>
+      <thead><tr><th>Code</th><th>Valid from</th><th>Valid to</th><th>Discount</th><th>Active</th></tr></thead>
+      <tbody>
+        <tr th:each="c : ${coupons}">
+          <td th:text="${c.code}">code</td>
+          <td th:text="${#temporals.format(c.validFrom, 'yyyy-MM-dd HH:mm')}">from</td>
+          <td th:text="${#temporals.format(c.validTo, 'yyyy-MM-dd HH:mm')}">to</td>
+          <td th:text="|${c.discount}%|">10%</td>
+          <td th:text="${c.active} ? '✔' : '✘'">✔</td>
+        </tr>
+      </tbody>
+    </table>
+    <aside class="filter">
+      <h3>By active</h3>
+      <ul>
+        <li th:classappend="${active == null} ? 'selected'"><a th:href="@{/admin/coupons/coupon/}">All</a></li>
+        <li th:classappend="${active == true} ? 'selected'"><a th:href="@{/admin/coupons/coupon/(active=true)}">Yes</a></li>
+        <li th:classappend="${active == false} ? 'selected'"><a th:href="@{/admin/coupons/coupon/(active=false)}">No</a></li>
+      </ul>
+    </aside>
+  </div>
+  <h2>Add coupon</h2>
+  <form method="post" th:action="@{/admin/coupons/coupon/add/}" th:object="${form}">
+    <div th:replace="~{fragments/forms :: field('code', 'Code', 'text')}"></div>
+    <div th:replace="~{fragments/forms :: field('validFrom', 'Valid from (UTC)', 'datetime-local')}"></div>
+    <div th:replace="~{fragments/forms :: field('validTo', 'Valid to (UTC)', 'datetime-local')}"></div>
+    <div th:replace="~{fragments/forms :: field('discount', 'Discount (percentage value, 0 to 100)', 'number')}"></div>
+    <div class="field"><label for="active">Active:</label> <input type="checkbox" th:field="*{active}"></div>
+    <button type="submit">Save</button>
+  </form>
+</div>
+</body>
+</html>

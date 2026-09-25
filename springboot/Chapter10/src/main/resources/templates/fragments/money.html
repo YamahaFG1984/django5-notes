@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<!--/* 可复用的“金额明细”行：有优惠券时显示小计和折扣。 */-->
+<html xmlns:th="http://www.thymeleaf.org">
+<body>
+<th:block th:fragment="discountRows(subtotal, coupon, percent, discount, span)">
+  <tr class="subtotal" th:if="${coupon != null}">
+    <td>Subtotal</td>
+    <td th:colspan="${span}"></td>
+    <td class="num" th:text="${'$' + subtotal}">$0</td>
+  </tr>
+  <tr th:if="${coupon != null}">
+    <td th:text="|&quot;${coupon.code}&quot; coupon (${percent}% off)|">"CODE" coupon (10% off)</td>
+    <td th:colspan="${span}"></td>
+    <td class="num neg" th:text="${'- $' + discount}">- $0</td>
+  </tr>
+</th:block>
+</body>
+</html>

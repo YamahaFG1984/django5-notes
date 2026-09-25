@@ -1,0 +1,29 @@
+# ≈ Django 的 settings.py。Spring Boot 的配置项都有默认值，这里只写需要改的。
+spring:
+  application:
+    name: mysite
+  datasource:
+    # 第 1 章原书用 SQLite 文件库，这里用 H2 文件库，数据存在 ./data/ 目录
+    url: jdbc:h2:file:./data/mysite;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+  jpa:
+    # 表结构只由 Flyway 迁移脚本创建；Hibernate 启动时只校验实体和表是否一致
+    hibernate:
+      ddl-auto: validate
+    # 关闭 Open Session In View：不允许模板渲染时再偷偷发 SQL（懒加载），逼自己在查询里把数据取全
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC   # ≈ USE_TZ = True + TIME_ZONE = 'UTC'
+  mvc:
+    # 静态文件挂在 /static/ 下，和 Django 的 STATIC_URL = 'static/' 一致
+    static-path-pattern: /static/**
+
+# 端口用 Spring Boot 默认的 8080（Django runserver 默认是 8000），需要时用 server.port 修改
+
+logging:
+  level:
+    # 想看每条 SQL 就改成 debug（≈ connection.queries / Debug Toolbar 的 SQL 面板）
+    org.hibernate.SQL: info

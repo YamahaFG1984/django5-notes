@@ -1,0 +1,543 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 11 章 · 国际化 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="11">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 11 章 · 项目三：在线商店</span>
+<h1>国际化</h1>
+<p class="lede">
+  商店要支持英语和西班牙语：界面文字要翻译，URL 带语言前缀（<code>/es/carro/</code>），商品名称和描述按语言存储，
+  数字和日期按当地习惯显示，表单校验信息也要翻译。Django 为此提供了 gettext、<code>LocaleMiddleware</code>、<code>i18n_patterns</code>，
+  书中再加上 Rosetta、django-parler 和 django-localflavor。Spring 有同样坚实的底层（<code>MessageSource</code>、<code>LocaleResolver</code>），
+  但“URL 语言前缀”和“模型翻译”需要自己搭 —— 这一章会用到几个很有意思的 Servlet 技巧，也会踩两个很有代表性的坑。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>用 <code>MessageSource</code> 和 <code>messages_xx.properties</code> 翻译界面，处理参数和复数</li>
+    <li>理解 <code>LocaleResolver</code> 的作用，自己实现“语言来自 URL 前缀”</li>
+    <li>用“把语言前缀当作上下文路径”的技巧实现 <code>i18n_patterns</code>，用包装 <code>encodeURL</code> 实现翻译过的 URL</li>
+    <li>用翻译表实现 django-parler 的模型翻译，并把旧数据迁移过去</li>
+    <li>按语言格式化金额；写一个自定义 Bean Validation 约束代替 localflavor，并翻译校验信息</li>
+    <li>理解两个坑：Security 的 <code>DisableEncodeUrlFilter</code>、<code>@EntityGraph</code> 的 FETCH 语义</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch11.html">Django 版第 11 章</a>；本章代码在 <code>springboot/Chapter11/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="overview">全景：一个请求如何得到语言</h2>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 290" role="img" aria-label="国际化请求流程：请求 /es/carro/add/1/ 先经过 Spring Security，再经过 LocalePrefixFilter；过滤器记下语言 es，把上下文路径设为 /es，把路径翻译回 /cart/add/1/；LocaleResolver 从请求属性读出语言；控制器生成的链接和重定向经过 encodeURL 被翻译回西班牙语路径">
+  <rect class="bx" x="10" y="20" width="170" height="56" rx="10"/>
+  <text class="ttl" x="95" y="44" text-anchor="middle">浏览器</text>
+  <text class="mono sm" x="95" y="63" text-anchor="middle">POST /es/carro/add/1/</text>
+
+  <rect class="bx-d" x="210" y="20" width="140" height="56" rx="10"/>
+  <text class="ttl" x="280" y="44" text-anchor="middle">Security 过滤器链</text>
+  <text class="sm" x="280" y="63" text-anchor="middle">CSRF 等</text>
+
+  <rect class="bx-a" x="380" y="10" width="370" height="76" rx="10"/>
+  <text class="ttl on-a" x="565" y="32" text-anchor="middle">LocalePrefixFilter</text>
+  <text class="sm" x="565" y="52" text-anchor="middle">语言 = es；上下文路径 = /es</text>
+  <text class="sm" x="565" y="70" text-anchor="middle">应用内路径 = /cart/add/1/（片段翻译回英文）</text>
+
+  <rect class="bx-b" x="380" y="120" width="170" height="56" rx="10"/>
+  <text class="ttl on-b" x="465" y="144" text-anchor="middle">PrefixLocaleResolver</text>
+  <text class="sm" x="465" y="163" text-anchor="middle">Locale = es</text>
+
+  <rect class="bx-g" x="580" y="120" width="170" height="56" rx="10"/>
+  <text class="ttl on-g" x="665" y="144" text-anchor="middle">CartController</text>
+  <text class="mono sm" x="665" y="163" text-anchor="middle">@PostMapping("/add/…")</text>
+
+  <rect class="bx-p" x="380" y="214" width="370" height="60" rx="10"/>
+  <text class="ttl on-p" x="565" y="238" text-anchor="middle">"redirect:/cart/" 与 @{/cart/}</text>
+  <text class="sm" x="565" y="258" text-anchor="middle">加上下文路径 → /es/cart/ → encodeURL 翻译 → /es/carro/</text>
+
+  <path class="ln" d="M182 48 H206" marker-end="url(#ar)"/>
+  <path class="ln" d="M352 48 H376" marker-end="url(#ar)"/>
+  <path class="ln-b" d="M465 88 V116" marker-end="url(#ar-b)"/>
+  <path class="ln-g" d="M665 88 V116" marker-end="url(#ar-g)"/>
+  <path class="ln-p" d="M665 178 V210" marker-end="url(#ar-p)"/>
+  <path class="ln-p" d="M378 244 H95 V80" marker-end="url(#ar-p)"/>
+  <text class="sm on-p" x="230" y="236" text-anchor="middle">302 Location: /es/carro/</text>
+</svg>
+<figcaption>图 S11-1　控制器只认识英文路径 /cart/；语言前缀和路径翻译都在过滤器里处理</figcaption>
+</figure>
+
+<h2 id="messages">界面翻译：MessageSource</h2>
+
+<div class="tw">
+<table>
+  <tr><th>Django</th><th>Spring</th></tr>
+  <tr><td><code>gettext</code> / <code>{% translate %}</code></td><td><code>MessageSource.getMessage(key, args, locale)</code> / Thymeleaf 的 <code>#{key}</code></td></tr>
+  <tr><td><code>locale/es/LC_MESSAGES/django.po</code>（需 <code>compilemessages</code> 成 <code>.mo</code>）</td><td><code>i18n/messages_es.properties</code>（直接用，不用编译）</td></tr>
+  <tr><td><code>makemessages</code> 自动从代码里提取 msgid</td><td>没有提取工具：用“键”而不是原文，自己维护键表</td></tr>
+  <tr><td>msgid 就是英文原文</td><td>键是抽象名字（<code>cart.title</code>），英文在 <code>messages.properties</code> 里</td></tr>
+  <tr><td><code>{% blocktranslate with code=... %}</code></td><td><code>#{cart.coupon-applied(${coupon.code}, ${percent})}</code></td></tr>
+  <tr><td><code>{% plural %}</code>、<code>ngettext</code></td><td>MessageFormat 的 <code>choice</code> 格式</td></tr>
+  <tr><td>Rosetta（网页上编辑翻译）</td><td>没有对应物；直接编辑 properties，或接入翻译平台</td></tr>
+</table>
+</div>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · base.html + django.po</div>
+<div class="code" data-lang="html"><pre>
+{% load i18n %}
+{% translate "Your cart" %}:
+{% blocktranslate with total=cart.get_total_price
+                  count items=total_items %}
+  {{ items }} item, ${{ total }}
+{% plural %}
+  {{ items }} items, ${{ total }}
+{% endblocktranslate %}
+
+# django.po
+msgid "%(items)s item, $%(total)s"
+msgid_plural "%(items)s items, $%(total)s"
+msgstr[0] "%(items)s producto, $%(total)s"
+msgstr[1] "%(items)s productos, $%(total)s"
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · base.html + messages_es.properties</div>
+<div class="code" data-lang="th"><pre>
+&lt;th:block th:text="|#{cart.yours}:|"&gt;Your cart:&lt;/th:block&gt;
+&lt;a th:href="@{/cart/}"
+   th:text="#{cart.summary(${totalItems},
+            ${#fmt.money(cartSummary.totalPrice)})}"&gt;&lt;/a&gt;
+</pre></div>
+<div class="code" data-lang="properties"><pre>
+# messages.properties（默认，英文）
+cart.yours=Your cart
+cart.summary={0,choice,1#{0} item|1&lt;{0} items}, {1}
+# messages_es.properties
+cart.yours=Su carro
+cart.summary={0,choice,1#{0} producto|1&lt;{0} productos}, {1}
+</pre></div></div>
+</div>
+
+<ul>
+  <li><code>{0,choice,1#…|1&lt;…}</code> 是 <code>java.text.MessageFormat</code> 的选择格式：数量为 1 用第一段，大于 1 用第二段。它比 gettext 的复数规则简单，对英语、西班牙语足够；俄语、阿拉伯语这类复数形式多的语言，建议用 ICU4J 的 <code>MessageFormat</code>（支持 <code>{0, plural, one{…} few{…} other{…}}</code>）。</li>
+  <li>Spring Boot 自动配置 <code>MessageSource</code>，只需告诉它文件位置：<code>spring.messages.basename=i18n/messages</code>。另设 <code>fallback-to-system-locale: false</code>，避免找不到西语时退到服务器操作系统的语言。</li>
+  <li>MessageFormat 里单引号是转义符，文本里的 <code>'</code> 要写成 <code>''</code>（英文的 “don't” 要写成 “don''t”）。</li>
+</ul>
+
+<h2 id="prefix">URL 语言前缀：i18n_patterns</h2>
+
+<p>
+  <code>LocaleResolver</code> 决定“当前请求用什么语言”。Spring 自带几种：按 <code>Accept-Language</code> 头、按 Cookie、按会话。
+  但 Django 的 <code>i18n_patterns</code> 是按 <strong>URL 前缀</strong>，Spring 没有现成实现。我们需要两个部件：
+</p>
+
+<div class="code" data-lang="java" data-file="i18n/PrefixLocaleResolver.java（节选）">
+<pre>
+public class PrefixLocaleResolver implements LocaleResolver {
+    @Override
+    public Locale resolveLocale(HttpServletRequest request) {
+        Object language = request.getAttribute(LocalePrefixFilter.LANGUAGE_ATTRIBUTE);   // 过滤器放进去的
+        return Languages.locale(language instanceof String code ? code : Languages.DEFAULT);
+    }
+}
+
+// I18nConfig：Bean 名字必须是 localeResolver，DispatcherServlet 按名字找
+@Bean
+LocaleResolver localeResolver() {
+    return new PrefixLocaleResolver();
+}
+</pre>
+</div>
+
+<h3>核心技巧：把 /es 当作上下文路径</h3>
+
+<p>
+  最麻烦的不是“读出前缀”，而是<strong>生成链接</strong>：模板里有几十个 <code>@{/cart/}</code>、控制器里有几十个 <code>"redirect:/cart/"</code>，难道都要改成带语言的吗？
+  Servlet 规范里有一个现成的概念：<strong>上下文路径</strong>（应用部署在 <code>/shop</code> 下时就是 <code>/shop</code>）。
+  Thymeleaf 的 <code>@{...}</code> 和 Spring 的重定向都会自动在前面加上上下文路径。
+  那么只要让下游认为“这个请求的上下文路径是 <code>/es</code>”，所有链接就天然带上了语言前缀：
+</p>
+
+<div class="code" data-lang="java" data-file="i18n/LocalePrefixFilter.java（节选）">
+<pre>
+Matcher matcher = PREFIX.matcher(path);                          // ^/(en|es)(/.*)?$
+if (!matcher.matches()) {
+    // 没有语言前缀：按 Accept-Language 重定向（≈ LocaleMiddleware）
+    String language = preferredLanguage(request);
+    response.sendRedirect(contextPath + "/" + language + UrlTranslations.toLocal(language, path) + query);
+    return;
+}
+String language = matcher.group(1);
+String canonical = UrlTranslations.toCanonical(language, rest);   // /carro/add/1/ → /cart/add/1/
+request.setAttribute(LANGUAGE_ATTRIBUTE, language);
+chain.doFilter(new PrefixedRequest(request, contextPath + "/" + language, canonical),
+               new TranslatingResponse(response, contextPath + "/" + language, language));
+
+/** 让下游看到：上下文路径 = /es，应用内路径 = /cart/add/1/ */
+private static final class PrefixedRequest extends HttpServletRequestWrapper {
+    public String getContextPath() { return contextPath; }
+    public String getRequestURI()  { return contextPath + pathWithinApplication; }
+    public String getServletPath() { return pathWithinApplication; }
+    ...
+}
+</pre>
+</div>
+
+<h3>翻译过的 URL：包装 encodeURL</h3>
+
+<p>
+  Django 版还翻译了 URL 片段：<code>path(_('cart/'), ...)</code>，西语里是 <code>/es/carro/</code>。
+  进站方向好办：过滤器把 <code>carro</code> 翻译回 <code>cart</code> 再交给控制器。出站方向又用到一个 Servlet 规范：
+  <strong>所有生成的链接都应该经过 <code>response.encodeURL()</code></strong>（它原本是用来在 Cookie 不可用时往 URL 里加 <code>;jsessionid=</code> 的）。
+  Thymeleaf 的链接和 Spring 的重定向都遵守这个约定，于是我们包装响应对象，在这里把 <code>/es/cart/</code> 翻译成 <code>/es/carro/</code>：
+</p>
+
+<div class="code" data-lang="java" data-file="i18n/LocalePrefixFilter.java（节选）">
+<pre>
+private static final class TranslatingResponse extends HttpServletResponseWrapper {
+    @Override
+    public String encodeURL(String url) {
+        return super.encodeURL(translate(url));          // /es/cart/ → /es/carro/
+    }
+    @Override
+    public String encodeRedirectURL(String url) {
+        return super.encodeRedirectURL(translate(url));
+    }
+}
+</pre>
+</div>
+
+<div class="code" data-lang="java" data-file="i18n/UrlTranslations.java（节选）">
+<pre>
+/** 语言 → (英文片段 → 本地化片段)，≈ .po 里的 msgid "cart/" → msgstr "carro/" */
+private static final Map&lt;String, Map&lt;String, String&gt;&gt; TO_LOCAL = Map.of(
+        "es", Map.of("cart", "carro", "orders", "pedidos", "create", "crear",
+                     "payment", "pago", "process", "procesar", "completed", "completado",
+                     "canceled", "cancelado", "coupons", "cupon"));
+</pre>
+</div>
+
+<p>控制器和模板一行都不用改：<code>@{/orders/create/}</code> 在西语页面上输出 <code>/es/pedidos/crear/</code>。Stripe 的回调地址也调用了 <code>response.encodeURL</code>，西语顾客付款后回到 <code>/es/pago/completado/</code>。</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 坑一：Spring Security 会“吞掉” encodeURL</div>
+  <p>
+    第一版把这个过滤器放在最前面（比 Security 更早），测试发现表单的 <code>action</code> 始终是 <code>/es/cart/add/1/</code>，没有被翻译。
+    原因是 Spring Security 默认的 <code>DisableEncodeUrlFilter</code> 会把响应包成“<code>encodeURL</code> 原样返回”，防止 <code>jsessionid</code> 泄露到 URL 里；
+    它包在我们的包装外面，我们的 <code>encodeURL</code> 根本没被调用。解决办法是把语言过滤器排到 Security 过滤器链<strong>之后</strong>（order 0 &gt; -100），
+    这样我们的包装在最外层：先翻译，再交给它。本项目需要权限控制的只有不带前缀的 <code>/admin/**</code>，所以顺序调整没有副作用。
+  </p>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>Django i18n_patterns 的行为</th><th>Spring 版</th></tr>
+  <tr><td>访问 <code>/</code> → 按浏览器语言跳到 <code>/en/</code> 或 <code>/es/</code></td><td>过滤器按 <code>Accept-Language</code> 重定向，查询参数保留</td></tr>
+  <tr><td>webhook、admin 等放在 <code>i18n_patterns</code> 之外</td><td><code>UNPREFIXED</code> 列表：<code>/static/</code>、<code>/media/</code>、<code>/admin</code>、<code>/payment/webhook/</code>……</td></tr>
+  <tr><td><code>request.LANGUAGE_CODE</code></td><td><code>Languages.current()</code>（读 <code>LocaleContextHolder</code>）</td></tr>
+  <tr><td>语言选择器链接到 <code>/{{ language.code }}/</code></td><td>同样链接到 <code>/en/</code>、<code>/es/</code>（<code>@ControllerAdvice</code> 提供语言列表）</td></tr>
+</table>
+</div>
+
+<h2 id="models">模型翻译：django-parler → 翻译表</h2>
+
+<p>商品名称、描述、slug 也要翻译。django-parler 的做法是为每个可翻译模型生成一张 <code>xxx_translation</code> 表。Spring 版手工建出同样的结构：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 200" role="img" aria-label="翻译表结构：shop_product 主表保存价格、图片、上架状态；shop_product_translation 表每行保存一个语言的名称、slug 和描述，通过 master_id 指向主表，(language_code, master_id) 唯一">
+  <rect class="bx-b" x="20" y="30" width="260" height="140" rx="10"/>
+  <text class="ttl on-b" x="150" y="54" text-anchor="middle">shop_product（主表）</text>
+  <text class="mono sm" x="150" y="80" text-anchor="middle">id, category_id</text>
+  <text class="mono sm" x="150" y="100" text-anchor="middle">price, image, available</text>
+  <text class="mono sm" x="150" y="120" text-anchor="middle">created, updated</text>
+  <text class="sm" x="150" y="150" text-anchor="middle">不需要翻译的字段</text>
+
+  <rect class="bx-g" x="400" y="30" width="340" height="140" rx="10"/>
+  <text class="ttl on-g" x="570" y="54" text-anchor="middle">shop_product_translation</text>
+  <text class="mono sm" x="570" y="80" text-anchor="middle">master_id, language_code</text>
+  <text class="mono sm" x="570" y="100" text-anchor="middle">name, slug, description</text>
+  <text class="sm" x="570" y="130" text-anchor="middle">(1, 'en', 'Green tea', 'green-tea', …)</text>
+  <text class="sm" x="570" y="150" text-anchor="middle">(1, 'es', 'Té verde', 'te-verde', …)</text>
+
+  <path class="ln-g" d="M396 100 H284" marker-end="url(#ar-g)"/>
+  <text class="sm" x="340" y="92" text-anchor="middle">master_id</text>
+</svg>
+<figcaption>图 S11-2　一个商品一行主表 + 每种语言一行译文</figcaption>
+</figure>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · shop/models.py</div>
+<div class="code" data-lang="py"><pre>
+class Product(TranslatableModel):
+    translations = TranslatedFields(
+        name=models.CharField(max_length=200),
+        slug=models.SlugField(max_length=200),
+        description=models.TextField(blank=True),
+    )
+    category = models.ForeignKey(...)
+    image = ...
+    price = ...
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · shop/Product.java（节选）</div>
+<div class="code" data-lang="java"><pre>
+@OneToMany(mappedBy = "master", cascade = CascadeType.ALL,
+           orphanRemoval = true, fetch = FetchType.EAGER)
+@MapKey(name = "languageCode")        // Map&lt;语言, 译文&gt;
+@Fetch(FetchMode.SUBSELECT)
+private Map&lt;String, ProductTranslation&gt; translations = new HashMap&lt;&gt;();
+
+/** 当前语言的译文，没有就回退到英文 */
+private ProductTranslation current() {
+    ProductTranslation t = translations.get(Languages.current());
+    return t != null ? t : translations.get(Languages.DEFAULT);
+}
+
+public String getName() {
+    ProductTranslation t = current();
+    return t == null ? "" : t.getName();
+}
+</pre></div></div>
+</div>
+
+<p>
+  <code>getName()</code> 返回<strong>当前语言</strong>的名字 —— 和 parler 一样，实体依赖一个线程绑定的“当前语言”（<code>LocaleContextHolder</code> ≈ <code>translation.get_language()</code>）。
+  模板照旧写 <code>${product.name}</code>，在 <code>/es/</code> 下自动显示 “Té verde”；没有西语译文的 “Tea powder” 回退显示英文（parler 的 <code>fallback: 'en'</code>）。
+</p>
+
+<h3>按译文查询</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django</div>
+<div class="code" data-lang="py"><pre>
+language = request.LANGUAGE_CODE
+product = get_object_or_404(
+    Product,
+    id=id,
+    translations__language_code=language,
+    translations__slug=slug,
+    available=True)
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · ProductRepository</div>
+<div class="code" data-lang="java"><pre>
+@EntityGraph(attributePaths = "category",
+             type = EntityGraph.EntityGraphType.LOAD)
+@Query("""
+    select p from Product p join p.translations t
+    where p.id = :id and p.available = true
+      and t.languageCode = :language and t.slug = :slug
+    """)
+Optional&lt;Product&gt; findAvailableByTranslatedSlug(
+        @Param("id") Long id, @Param("language") String language,
+        @Param("slug") String slug);
+</pre></div></div>
+</div>
+
+<p>slug 按语言匹配：<code>/es/1/te-verde/</code> 能找到，<code>/en/1/te-verde/</code> 是 404。按名字排序则只能在取出后于内存中进行（名字在译文表里、随语言变化）—— 书中也因此把模型上的 <code>ordering = ['name']</code> 注释掉了。</p>
+
+<div class="box warn">
+  <div class="t">&#9888; 坑二：@EntityGraph 默认会把 EAGER 变成 LAZY</div>
+  <p>
+    这一章最有教育意义的 bug：所有测试都通过了，真正启动应用打开西语商品页却报 <code>LazyInitializationException: Cannot lazily initialize collection Product.translations</code>。
+    有两层原因：
+  </p>
+  <ol>
+    <li>Spring Data 的 <code>@EntityGraph</code> 默认类型是 <strong>FETCH</strong>：图里列出的属性立即加载，<strong>没列出的一律按 LAZY 处理</strong> —— 包括映射上写了 <code>EAGER</code> 的 <code>translations</code>。改成 <code>type = LOAD</code>（没列出的沿用映射设置）就好了。</li>
+    <li>测试为什么没发现？因为测试类上有 <code>@Transactional</code>，整个测试方法在一个事务里，Hibernate 会话一直开着，模板渲染时的懒加载“碰巧”成功了 —— 和 open-in-view 掩盖问题的方式一模一样。</li>
+  </ol>
+  <p>
+    修复后，<code>I18nTests</code> 特意<strong>不加</strong> <code>@Transactional</code>（自己清理数据），并补了一个完整的“西语下单 → 支付页”测试。
+    另外，EAGER 集合配合 <code>@BatchSize</code> 在 Hibernate 7 里也不会立即初始化，这里用的是 <code>@Fetch(FetchMode.SUBSELECT)</code>。
+  </p>
+</div>
+
+<h3>迁移已有数据</h3>
+
+<p>书中为 parler 做了三步迁移：建翻译表、数据迁移（把旧字段复制成英文译文）、删除旧字段。Flyway 里就是一个 SQL 脚本：</p>
+
+<div class="code" data-lang="sql" data-file="db/migration/V7__translate_shop_models.sql（节选）">
+<pre>
+CREATE TABLE shop_product_translation (
+    id             BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+    master_id      BIGINT       NOT NULL REFERENCES shop_product (id) ON DELETE CASCADE,
+    language_code  VARCHAR(15)  NOT NULL,
+    name           VARCHAR(200) NOT NULL,
+    slug           VARCHAR(200) NOT NULL,
+    description    TEXT         NOT NULL DEFAULT '',
+    CONSTRAINT shop_product_translation_lang_master_uniq UNIQUE (language_code, master_id)
+);
+
+INSERT INTO shop_product_translation (master_id, language_code, name, slug, description)
+SELECT id, 'en', name, slug, description FROM shop_product;
+
+DROP INDEX shop_product_name_idx;
+ALTER TABLE shop_product DROP COLUMN name;
+ALTER TABLE shop_product DROP COLUMN slug;
+ALTER TABLE shop_product DROP COLUMN description;
+</pre>
+</div>
+
+<p>Django 需要写一个 <code>RunPython</code> 数据迁移（还要注意用 <code>apps.get_model</code> 取历史模型）；Flyway 直接用 <code>INSERT ... SELECT</code>，一条语句完成，而且在数据库里执行，不用把数据读进 Python。</p>
+
+<h3>后台编辑译文</h3>
+
+<p>parler 的 <code>TranslatableAdmin</code> 为每种语言显示一个标签页。手写后台里，表单对象用 <code>Map&lt;String, TranslationFields&gt;</code>，输入框名字形如 <code>translations[es].name</code>，Spring 的数据绑定能直接填进 Map：</p>
+
+<div class="code" data-lang="th" data-file="templates/admin/shop/product_form.html（节选）">
+<pre>
+&lt;fieldset th:each="language : ${languages}" th:with="code=${language.code}"&gt;
+  &lt;legend th:text="${language.nameLocal}"&gt;English&lt;/legend&gt;
+  &lt;input type="text" th:id="|name-${code}|" th:field="*{translations[__${code}__].name}"&gt;
+  &lt;input type="text" th:id="|slug-${code}|" th:field="*{translations[__${code}__].slug}"&gt;
+  &lt;textarea th:field="*{translations[__${code}__].description}"&gt;&lt;/textarea&gt;
+&lt;/fieldset&gt;
+</pre>
+</div>
+
+<p>校验规则：英文必填；西语要么全空（使用回退），要么名字和 slug 都填。错误用 <code>errors.rejectValue("translations[es].slug", ...)</code> 挂到具体的输入框上。</p>
+
+<h2 id="formats">本地化格式</h2>
+
+<p>Django 5 默认开启本地化：模板里的数字和日期会按当前语言格式化，西语里 45.50 显示为 45,50。Thymeleaf 也有 <code>#numbers</code>、<code>#temporals</code>，它们会使用当前 Locale；这里再写一个小工具统一金额格式：</p>
+
+<div class="code" data-lang="java" data-file="common/Formats.java 与 TemplateHelpersDialect.java（节选）">
+<pre>
+public String money(BigDecimal amount) {
+    NumberFormat format = NumberFormat.getNumberInstance(locale);   // es → 1.234,50
+    format.setMinimumFractionDigits(2);
+    format.setMaximumFractionDigits(2);
+    return "$" + format.format(amount);
+}
+
+// 方言：每次渲染用模板上下文的 Locale 构造
+public Object buildObject(IExpressionContext context, String name) {
+    return "fmt".equals(name) ? new Formats(context.getLocale()) : filters;
+}
+</pre>
+</div>
+
+<p>模板里把第 8–10 章的 <code>${'$' + product.price}</code> 统一换成 <code>${#fmt.money(product.price)}</code>。日期用 <code>#temporals.format(order.created, 'MMM dd, yyyy')</code> 时，月份名称也会自动变成西语。</p>
+
+<h2 id="validation">localflavor → 自定义校验约束</h2>
+
+<p>书中用 django-localflavor 的 <code>USZipCodeField</code> 校验邮编。Bean Validation 里，自定义约束 = 一个注解 + 一个校验器：</p>
+
+<div class="code" data-lang="java" data-file="common/validation/UsZipCode.java 与 UsZipCodeValidator.java">
+<pre>
+@Constraint(validatedBy = UsZipCodeValidator.class)
+@Target({ElementType.FIELD, ElementType.PARAMETER})
+@Retention(RetentionPolicy.RUNTIME)
+public @interface UsZipCode {
+    String message() default "{validation.us-zip-code}";   // 花括号：到消息文件里找这个键
+    Class&lt;?&gt;[] groups() default {};
+    Class&lt;? extends Payload&gt;[] payload() default {};
+}
+
+public class UsZipCodeValidator implements ConstraintValidator&lt;UsZipCode, String&gt; {
+    private static final Pattern ZIP = Pattern.compile("^\\d{5}(-\\d{4})?$");
+
+    public boolean isValid(String value, ConstraintValidatorContext context) {
+        return value == null || value.isBlank() || ZIP.matcher(value.strip()).matches();
+    }
+}
+
+// OrderCreateForm
+@NotBlank @Size(max = 20) @UsZipCode
+private String postalCode;
+</pre>
+</div>
+
+<ul>
+  <li>Spring Boot 让 Bean Validation 从 <code>MessageSource</code> 解析 <code>{...}</code> 消息，所以自定义消息写在 <code>messages*.properties</code> 里就能按语言翻译。</li>
+  <li>内置约束的默认消息（“must not be blank”）Hibernate Validator 自带了多种语言，西语页面上自动显示 “no debe estar vacío”。第 2 章点评里提到的“英文默认消息”问题，在这里一并解决。</li>
+  <li>表单标签也要翻译：字段片段的第二个参数改为 <code>#{order.postal-code}</code>（≈ <code>models.CharField(_('postal code'), ...)</code>）。</li>
+</ul>
+
+<h2 id="tests">测试</h2>
+
+<div class="code" data-lang="java" data-file="I18nTests.java（节选）">
+<pre>
+@Test
+void translatedUrlSegmentsAndPlurals() throws Exception {
+    MockHttpSession session = new MockHttpSession();
+    mvc.perform(get("/es/1/te-verde/").session(session))
+            .andExpect(content().string(containsString("action=\"/es/carro/add/1/\"")));
+    mvc.perform(post("/es/carro/add/1/").session(session).with(csrf()).param("quantity", "1"))
+            .andExpect(redirectedUrl("/es/carro/"));
+    mvc.perform(get("/es/carro/").session(session))
+            .andExpect(content().string(containsString("1 producto, $30,00")))
+            .andExpect(content().string(containsString("href=\"/es/pedidos/crear/\"")));
+}
+</pre>
+</div>
+
+<p>
+  本章共 26 个测试。已有的前台测试全部改为使用 <code>/en/...</code> 地址（没有前缀的请求现在会被重定向）；
+  新增的 <code>I18nTests</code> 覆盖了按 <code>Accept-Language</code> 重定向、西语文本/译文/回退/金额格式、按语言匹配 slug、翻译过的 URL 和复数、
+  翻译过的校验信息，以及完整的西语下单到支付页流程。最后还在真实服务器上走了一遍西语购物流程，确认日志里没有懒加载异常。
+</p>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 11 章 Spring 版点评 <small>springboot/Chapter11</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 控制器和模板对语言“无感”</h4>
+    <p>借助“上下文路径”和 <code>encodeURL</code> 两个 Servlet 标准机制，现有的几十个链接和重定向一行没改就带上了语言前缀和翻译过的路径。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 用真实行为测试</h4>
+    <p>发现 <code>@Transactional</code> 测试掩盖了懒加载问题后，改为无事务测试并补上关键流程。这个教训适用于所有 Spring + JPA 项目。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 没有 makemessages</h4>
+    <p>Django 能从代码里自动提取待翻译文本并标出过期条目；Spring 的 properties 全靠手工维护：西语文件漏了某个键时，会悄悄回退到 <code>messages.properties</code> 里的英文，很难发现；两个文件都没有的键则显示成 <code>??key_es??</code>。可以写一个测试比较两份 properties 的键集合，保证它们一致。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 规范路径在任何语言下都能访问</h4>
+    <p>过滤器只翻译“认识的”片段，所以 <code>/es/cart/</code> 也能访问（Django 版会返回 404）。对 SEO 来说最好把它 301 重定向到 <code>/es/carro/</code>，避免重复内容。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 为什么不在 URL 里用 {lang} 变量</h4>
+    <p>也可以把所有映射改成 <code>@GetMapping("/{lang}/cart/")</code>，但每个控制器方法都要多一个参数，所有链接都要手动带上语言 —— 这正是 <code>i18n_patterns</code> 替你省掉的工作。过滤器方案把横切关注点集中到了一处。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>界面翻译：<code>MessageSource</code> + <code>messages_xx.properties</code>，模板里 <code>#{key(参数)}</code>，复数用 choice 格式。</li>
+  <li>语言来自 URL 前缀：自定义 <code>LocaleResolver</code> + 过滤器；把前缀当作上下文路径，包装 <code>encodeURL</code> 翻译出站链接。</li>
+  <li>模型翻译：主表 + 译文表，<code>Map&lt;语言, 译文&gt;</code>，按当前语言取值并回退；用 SQL 迁移旧数据。</li>
+  <li><code>@EntityGraph</code> 的默认 FETCH 类型会让未列出的属性变成 LAZY；需要保留 EAGER 时用 LOAD。</li>
+  <li>本地化格式用当前 Locale；自定义约束的消息也能翻译。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>写一个测试，读取 <code>messages.properties</code> 和 <code>messages_es.properties</code>，断言两者的键集合完全相同。</li>
+    <li>把 <code>/es/cart/</code> 这类“未翻译的规范路径”改为 301 重定向到翻译后的地址。</li>
+    <li>加入第三种语言（比如德语），需要改动哪些地方？尽量让它只需要新增文件。</li>
+    <li>让语言选择器链接到“当前页面的另一种语言版本”，而不是首页（提示：商品详情页的 slug 也要换成另一种语言的）。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

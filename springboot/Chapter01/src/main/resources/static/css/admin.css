@@ -1,0 +1,30 @@
+/* 迷你后台的样式，配色参考 Django admin */
+body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif; color: #333; font-size: 14px; }
+a { color: #447e9b; text-decoration: none; }
+a:hover { color: #036; }
+header { display: flex; justify-content: space-between; align-items: center; padding: 10px 40px; background: #417690; color: #ffc; }
+header .brand { color: #f5dd5d; font-size: 20px; }
+header .user a { color: #fff; margin: 0 8px; }
+header form { display: inline; }
+header button { background: none; border: 0; color: #fff; cursor: pointer; text-decoration: underline; }
+main { padding: 20px 40px; }
+h1 { font-weight: 300; font-size: 22px; color: #666; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; }
+.button, button { background: #79aec8; color: #fff; border: 0; border-radius: 4px; padding: 7px 14px; cursor: pointer; }
+button.danger { background: #ba2121; margin-top: 12px; }
+.search { background: #f8f8f8; padding: 8px; border: 1px solid #eee; margin-bottom: 12px; }
+.layout { display: flex; gap: 20px; align-items: flex-start; }
+table { flex: 1; border-collapse: collapse; }
+th { background: #f6f6f6; text-align: left; padding: 6px 8px; border-bottom: 1px solid #ddd; }
+td { padding: 6px 8px; border-bottom: 1px solid #eee; }
+.filter { width: 200px; background: #f8f8f8; padding: 8px 14px; }
+.filter h3 { font-size: 13px; margin: 4px 0; }
+.filter ul { list-style: none; padding: 0; }
+.filter li.selected a { color: #5b80b2; font-weight: bold; }
+.message { background: #dfd; padding: 8px 12px; }
+.errornote, .errorlist { color: #ba2121; }
+.row { padding: 8px 0; border-bottom: 1px solid #eee; display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.row label { width: 140px; font-weight: bold; }
+.row input[type=text], .row textarea { width: 60%; }
+.submit-row { padding: 12px; background: #f8f8f8; margin-top: 12px; display: flex; gap: 12px; align-items: center; }
+.paginator { margin-top: 12px; color: #666; }

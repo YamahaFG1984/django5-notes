@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title th:text="|Edit &quot;${course.title}&quot;|">Edit modules</title></head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="|Edit &quot;${course.title}&quot;|">Edit</h1>
+  <div class="module">
+    <h2>Course modules</h2>
+    <!--/* {{ formset }} + {{ formset.management_form }}。
+           Spring 按下标绑定 rows[0].title、rows[1].title……，不需要 TOTAL_FORMS 之类的管理字段 */-->
+    <form method="post" th:object="${formset}">
+      <table>
+        <tbody th:each="row, stat : *{rows}">
+          <tr>
+            <th><label th:for="|rows${stat.index}.title|">Title:</label></th>
+            <td>
+              <ul class="errorlist" th:if="${#fields.hasErrors('rows[__${stat.index}__].title')}">
+                <li th:each="err : ${#fields.errors('rows[__${stat.index}__].title')}" th:text="${err}">error</li>
+              </ul>
+              <input type="text" th:field="*{rows[__${stat.index}__].title}" maxlength="200">
+            </td>
+          </tr>
+          <tr>
+            <th><label th:for="|rows${stat.index}.description|">Description:</label></th>
+            <td><textarea th:field="*{rows[__${stat.index}__].description}" rows="3"></textarea></td>
+          </tr>
+          <tr>
+            <th><label th:for="|rows${stat.index}.delete1|">Delete:</label></th>
+            <td>
+              <input type="checkbox" th:field="*{rows[__${stat.index}__].delete}">
+              <input type="hidden" th:field="*{rows[__${stat.index}__].id}">
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <input type="submit" value="Save modules">
+    </form>
+  </div>
+</div>
+</body>
+</html>

@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout">
+<head>
+  <meta charset="utf-8">
+  <title layout:title-pattern="$CONTENT_TITLE">My shop</title>
+  <link th:href="@{/static/css/base.css}" rel="stylesheet">
+</head>
+<body>
+  <div id="header">
+    <a th:href="@{/}" class="logo">My shop</a>
+  </div>
+  <div id="subheader">
+    <!--/* cartSummary 来自 CartAdvice（≈ 上下文处理器 cart.context_processors.cart） */-->
+    <div class="cart" th:with="totalItems=${cartSummary.totalItems}">
+      <th:block th:if="${totalItems > 0}">
+        Your cart:
+        <a th:href="@{/cart/}">
+          <span th:text="|${totalItems} item${totalItems == 1 ? '' : 's'},|">1 item,</span>
+          <span th:text="${'$' + cartSummary.totalPrice}">$10</span>
+        </a>
+      </th:block>
+      <th:block th:if="${totalItems == 0 and order == null}">Your cart is empty.</th:block>
+    </div>
+  </div>
+  <div id="content">
+    <div layout:fragment="content"></div>
+  </div>
+</body>
+</html>

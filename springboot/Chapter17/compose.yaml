@@ -1,0 +1,7 @@
+# 开发用 Redis（≈ 书中的 docker run -it --rm --name redis -p 6379:6379 redis:7.2.4）
+# mvn spring-boot:run 时由 spring-boot-docker-compose 自动启动，并注入 spring.data.redis.*
+services:
+  redis:
+    image: redis:7.2
+    ports:
+      - "${REDIS_PORT:-6379}:6379"

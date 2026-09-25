@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{admin/layout}">
+<head><title th:text="${product == null} ? 'Add product' : 'Change product'">Product</title></head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="${product == null} ? 'Add product' : 'Change product'">Product</h1>
+  <form method="post" enctype="multipart/form-data" th:object="${form}"
+        th:action="${product == null} ? @{/admin/shop/product/add/} : @{/admin/shop/product/{id}/change/(id=${product.id})}">
+    <div class="field">
+      <label for="categoryId">Category:</label>
+      <select th:field="*{categoryId}">
+        <option value="">---------</option>
+        <option th:each="c : ${categories}" th:value="${c.id}" th:text="${c.name}">category</option>
+      </select>
+      <ul class="errorlist" th:if="${#fields.hasErrors('categoryId')}"><li th:each="e : ${#fields.errors('categoryId')}" th:text="${e}"></li></ul>
+    </div>
+    <!--/* ≈ parler 的 TranslatableAdmin：每种语言一组可翻译字段。输入框名字是 translations[es].name 这种形式 */-->
+    <fieldset th:each="language : ${languages}" th:with="code=${language.code}">
+      <legend th:text="${language.nameLocal}">English</legend>
+      <div class="field">
+        <label th:for="|name-${code}|">Name:</label>
+        <input type="text" th:id="|name-${code}|" th:field="*{translations[__${code}__].name}">
+        <ul class="errorlist" th:if="${#fields.hasErrors('translations[' + code + '].name')}"><li th:each="e : ${#fields.errors('translations[' + code + '].name')}" th:text="${e}"></li></ul>
+      </div>
+      <div class="field">
+        <label th:for="|slug-${code}|">Slug:</label>
+        <input type="text" th:id="|slug-${code}|" th:field="*{translations[__${code}__].slug}">
+        <ul class="errorlist" th:if="${#fields.hasErrors('translations[' + code + '].slug')}"><li th:each="e : ${#fields.errors('translations[' + code + '].slug')}" th:text="${e}"></li></ul>
+      </div>
+      <div class="field">
+        <label th:for="|description-${code}|">Description:</label>
+        <textarea th:id="|description-${code}|" th:field="*{translations[__${code}__].description}" rows="4"></textarea>
+      </div>
+    </fieldset>
+    <div th:replace="~{fragments/forms :: field('price', 'Price', 'text')}"></div>
+    <div class="field">
+      <label for="available">Available:</label> <input type="checkbox" th:field="*{available}">
+    </div>
+    <p th:if="${product != null and product.image != ''}">Currently: <a th:href="@{${product.imageUrl}}" th:text="${product.image}">image</a></p>
+    <div th:replace="~{fragments/forms :: field('image', 'Image', 'file')}"></div>
+    <div class="submit-row"><button type="submit">Save</button> <a th:href="@{/admin/shop/product/}">Cancel</a></div>
+  </form>
+  <script th:replace="~{:: prepopulate('name-en', 'slug-en')}"></script>
+  <script th:replace="~{:: prepopulate('name-es', 'slug-es')}"></script>
+</div>
+
+<!--/* prepopulated_fields = {'slug': ('name',)}：可复用的小片段 */-->
+<script th:fragment="prepopulate(source, target)" th:inline="javascript">
+  (function () {
+    const source = document.getElementById(/*[[${source}]]*/ 'name');
+    const slug = document.getElementById(/*[[${target}]]*/ 'slug');
+    let touched = slug.value !== '';
+    slug.addEventListener('input', () => { touched = true; });
+    source.addEventListener('input', () => {
+      if (touched) return;
+      slug.value = source.value.normalize('NFKD').replace(/[̀-ͯ]/g, '')
+        .toLowerCase().replace(/[^a-z0-9\s-]/g, '').trim().replace(/[\s-]+/g, '-');
+    });
+  })();
+</script>
+</body>
+</html>

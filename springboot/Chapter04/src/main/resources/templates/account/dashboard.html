@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Dashboard</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Dashboard</h1>
+  <p>
+    Welcome to your dashboard. You can <a th:href="@{/account/edit/}">edit your profile</a>
+    or <a th:href="@{/account/password-change/}">change your password</a>.
+  </p>
+</div>
+</body>
+</html>

@@ -1,0 +1,22 @@
+spring:
+  application:
+    name: educa
+  datasource:
+    # 原书第 12–16 章用 SQLite，这里用 H2 文件库（第 17 章换成 PostgreSQL）
+    url: jdbc:h2:file:./data/educa;AUTO_SERVER=TRUE
+    username: sa
+    password: ""
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+        default_batch_fetch_size: 50
+  mvc:
+    static-path-pattern: /static/**
+
+educa:
+  media-root: ${MEDIA_ROOT:media}

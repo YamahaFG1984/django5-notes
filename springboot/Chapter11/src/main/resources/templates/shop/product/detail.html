@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{shop/base}">
+<head><title th:text="${product.name}">Product</title></head>
+<body>
+<div layout:fragment="content">
+  <div class="product-detail">
+    <img th:src="@{${product.imageUrl}}">
+    <h1 th:text="${product.name}">name</h1>
+    <h2><a th:href="@{${product.category.absoluteUrl}}" th:text="${product.category.name}">category</a></h2>
+    <p class="price" th:text="${#fmt.money(product.price)}">$0.00</p>
+    <form th:action="@{/cart/add/{id}/(id=${product.id})}" method="post" th:object="${cartProductForm}">
+      <label for="quantity" th:text="|#{quantity}:|">Quantity:</label>
+      <select th:field="*{quantity}">
+        <option th:each="i : ${#numbers.sequence(1, 20)}" th:value="${i}" th:text="${i}">1</option>
+      </select>
+      <input type="hidden" name="override" value="false">
+      <input type="submit" th:value="#{add-to-cart}" value="Add to cart">
+    </form>
+    <div th:utext="${#text.linebreaks(product.description)}"></div>
+
+    <div th:replace="~{shop/recommendations :: recommendations(${recommendedProducts}, '')}"></div>
+  </div>
+</div>
+</body>
+</html>

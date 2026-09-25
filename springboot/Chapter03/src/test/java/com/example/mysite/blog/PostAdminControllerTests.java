@@ -1,0 +1,123 @@
+package com.example.mysite.blog;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.hamcrest.Matchers.containsString;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.csrf;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.model;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.redirectedUrl;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.context.annotation.Import;
+import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.transaction.annotation.Transactional;
+
+import com.example.mysite.TestcontainersConfiguration;
+import com.example.mysite.account.CurrentUser;
+import com.example.mysite.account.User;
+import com.example.mysite.account.UserRepository;
+
+@SpringBootTest
+@AutoConfigureMockMvc
+@Import(TestcontainersConfiguration.class)
+@Transactional
+class PostAdminControllerTests {
+
+    @Autowired
+    MockMvc mvc;
+
+    @Autowired
+    UserRepository users;
+
+    @Autowired
+    PostRepository posts;
+
+    User staff;
+    User regular;
+
+    @BeforeEach
+    void setUp() {
+        staff = new User("admin", "{noop}secret", "admin@example.com");
+        staff.setStaff(true);
+        users.save(staff);
+        regular = users.save(new User("bob", "{noop}secret", "bob@example.com"));
+    }
+
+    @Test
+    void adminIsOnlyForStaff() throws Exception {
+        mvc.perform(get("/admin/blog/post/"))
+                .andExpect(status().is3xxRedirection());
+        mvc.perform(get("/admin/blog/post/").with(user(CurrentUser.from(regular))))
+                .andExpect(status().isForbidden());
+        mvc.perform(get("/admin/blog/post/").with(user(CurrentUser.from(staff))))
+                .andExpect(status().isOk());
+    }
+
+    @Test
+    void staffCanAddSearchAndFilterPosts() throws Exception {
+        var me = user(CurrentUser.from(staff));
+        mvc.perform(post("/admin/blog/post/add/").with(me).with(csrf())
+                        .param("title", "Who was Django Reinhardt?")
+                        .param("slug", "who-was-django-reinhardt")
+                        .param("authorId", staff.getId().toString())
+                        .param("body", "A jazz guitarist.")
+                        .param("publish", "2025-01-01T10:00")
+                        .param("status", "PUBLISHED"))
+                .andExpect(redirectedUrl("/admin/blog/post/"));
+        assertThat(posts.countByStatus(PostStatus.PUBLISHED)).isEqualTo(1);
+
+        mvc.perform(get("/admin/blog/post/").param("q", "jazz").with(me))
+                .andExpect(content().string(containsString("Who was Django Reinhardt?")))
+                .andExpect(content().string(containsString("Published (1)")));
+        mvc.perform(get("/admin/blog/post/").param("status", "DRAFT").with(me))
+                .andExpect(content().string(containsString("0 posts")));
+    }
+
+    @Test
+    void slugMustBeUniqueForPublishDate() throws Exception {
+        var me = user(CurrentUser.from(staff));
+        Post existing = new Post("Hello", "hello", staff, "Body");
+        existing.setPublish(java.time.OffsetDateTime.parse("2025-03-01T08:00:00Z"));
+        posts.save(existing);
+
+        mvc.perform(post("/admin/blog/post/add/").with(me).with(csrf())
+                        .param("title", "Hello again").param("slug", "hello")
+                        .param("authorId", staff.getId().toString()).param("body", "Body")
+                        .param("publish", "2025-03-01T20:00").param("status", "DRAFT"))
+                .andExpect(status().isOk())
+                .andExpect(model().attributeHasFieldErrorCode("form", "slug", "unique_for_date"));
+
+        // 换一天就可以
+        mvc.perform(post("/admin/blog/post/add/").with(me).with(csrf())
+                        .param("title", "Hello again").param("slug", "hello")
+                        .param("authorId", staff.getId().toString()).param("body", "Body")
+                        .param("publish", "2025-03-02T08:00").param("status", "DRAFT"))
+                .andExpect(redirectedUrl("/admin/blog/post/"));
+
+        // 编辑自己时不算冲突
+        mvc.perform(post("/admin/blog/post/{id}/change/", existing.getId()).with(me).with(csrf())
+                        .param("title", "Hello edited").param("slug", "hello")
+                        .param("authorId", staff.getId().toString()).param("body", "Body")
+                        .param("publish", "2025-03-01T08:00").param("status", "DRAFT"))
+                .andExpect(redirectedUrl("/admin/blog/post/"));
+    }
+
+    @Test
+    void invalidFormIsRedisplayedWithErrors() throws Exception {
+        mvc.perform(post("/admin/blog/post/add/").with(user(CurrentUser.from(staff))).with(csrf())
+                        .param("title", "")
+                        .param("slug", "not a slug!")
+                        .param("publish", "2025-01-01T10:00")
+                        .param("status", "DRAFT"))
+                .andExpect(status().isOk())
+                .andExpect(model().attributeHasFieldErrors("form", "title", "slug", "authorId", "body"));
+    }
+}

@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{admin/layout}">
+<head><title>Categories</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Categories</h1>
+  <table>
+    <thead><tr><th>Name</th><th>Slug</th></tr></thead>
+    <tbody>
+      <tr th:each="c : ${categories}"><td th:text="${c.name}">name</td><td th:text="${c.slug}">slug</td></tr>
+    </tbody>
+  </table>
+  <h2>Add category</h2>
+  <form method="post" th:action="@{/admin/shop/category/add/}" th:object="${form}">
+    <div th:replace="~{fragments/forms :: field('name', 'Name', 'text')}"></div>
+    <div th:replace="~{fragments/forms :: field('slug', 'Slug', 'text')}"></div>
+    <button type="submit">Save</button>
+  </form>
+  <script th:replace="~{admin/shop/product_form :: prepopulate('name')}"></script>
+</div>
+</body>
+</html>

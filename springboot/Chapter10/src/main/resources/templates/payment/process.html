@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{shop/base}">
+<head><title>Pay your order</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Order summary</h1>
+  <table class="cart">
+    <thead><tr><th>Image</th><th>Product</th><th>Price</th><th>Quantity</th><th>Total</th></tr></thead>
+    <tbody>
+      <!--/* {% cycle "1" "2" %} → 状态变量的 odd/even */-->
+      <tr th:each="item, stat : ${order.items}" th:class="${stat.odd} ? 'row1' : 'row2'">
+        <td><img th:src="@{${item.product.imageUrl}}"></td>
+        <td th:text="${item.product.name}">name</td>
+        <td class="num" th:text="${'$' + item.price}">$0</td>
+        <td class="num" th:text="${item.quantity}">1</td>
+        <td class="num" th:text="${'$' + item.cost}">$0</td>
+      </tr>
+      <th:block th:replace="~{fragments/money :: discountRows(${order.totalCostBeforeDiscount}, ${order.coupon}, ${order.discount}, ${order.discountAmount}, 3)}"></th:block>
+      <tr class="total">
+        <td colspan="4">Total</td>
+        <td class="num" th:text="${'$' + order.totalCost}">$0</td>
+      </tr>
+    </tbody>
+  </table>
+  <form th:action="@{/payment/process/}" method="post">
+    <input type="submit" value="Pay now">
+  </form>
+</div>
+</body>
+</html>

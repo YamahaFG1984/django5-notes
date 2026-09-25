@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<!--/* 分页片段 ≈ templates/pagination.html。
+       Spring Data 的 Page.number 从 0 开始，而 URL 里的 ?page= 沿用 Django 的习惯从 1 开始，
+       所以“当前页”显示 number + 1，“上一页”是 number，“下一页”是 number + 2。 */-->
+<html xmlns:th="http://www.thymeleaf.org">
+<body>
+<div class="pagination" th:fragment="pagination(page)">
+  <span class="step-links">
+    <a th:if="${page.hasPrevious()}" th:href="${#querystring.with('page', page.number)}">Previous</a>
+    <span class="current" th:text="|Page ${page.number + 1} of ${page.totalPages}.|">Page 1 of 1.</span>
+    <a th:if="${page.hasNext()}" th:href="${#querystring.with('page', page.number + 2)}">Next</a>
+  </span>
+</div>
+</body>
+</html>

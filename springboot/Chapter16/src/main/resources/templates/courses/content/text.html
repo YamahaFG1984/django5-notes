@@ -1,0 +1,4 @@
+<!--/* ≈ courses/content/text.html：{{ item.content|linebreaks }}（linebreaks 会先转义 HTML） */-->
+<th:block th:fragment="item(item)">
+  <div th:utext="${#text.linebreaks(item.text)}"></div>
+</th:block>

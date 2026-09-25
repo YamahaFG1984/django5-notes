@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout">
+<head>
+  <meta charset="utf-8">
+  <title layout:title-pattern="$CONTENT_TITLE">Bookmarks</title>
+  <link th:href="@{/static/css/base.css}" rel="stylesheet">
+  <!--/* 给 JavaScript 用的 CSRF 令牌。Django 版从 csrftoken cookie 里读，Spring 推荐放在 meta 标签里 */-->
+  <meta name="_csrf" th:content="${_csrf.token}">
+  <meta name="_csrf_header" th:content="${_csrf.headerName}">
+</head>
+<body>
+  <div id="header">
+    <span class="logo">Bookmarks</span>
+    <!--/* requestUser 由 CurrentUserAdvice 放进模型（≈ {{ request.user }}）；section 用来高亮当前菜单 */-->
+    <ul class="menu" th:if="${requestUser}">
+      <li th:classappend="${section == 'dashboard'} ? 'selected'">
+        <a th:href="@{/account/}">My dashboard</a>
+      </li>
+      <li th:classappend="${section == 'images'} ? 'selected'"><a th:href="@{/images/}">Images</a></li>
+      <li th:classappend="${section == 'people'} ? 'selected'"><a th:href="@{/account/users/}">People</a></li>
+    </ul>
+    <span class="user">
+      <th:block th:if="${requestUser}">
+        Hello <span th:text="${requestUser.displayName}">user</span>,
+        <!--/* 登出必须用 POST：Spring Security 开启 CSRF 时只接受 POST /account/logout/ */-->
+        <form th:action="@{/account/logout/}" method="post">
+          <button type="submit">Logout</button>
+        </form>
+      </th:block>
+      <a th:unless="${requestUser}" th:href="@{/account/login/}">Log-in</a>
+    </span>
+  </div>
+  <!--/* {% if messages %} … {% endif %}：消息来自 Messages 工具类（闪存属性或模型属性）。
+         th:text 会转义，所以不像书中的 {{ message|safe }} 那样有 XSS 风险 */-->
+  <ul class="messages" th:if="${messages}">
+    <li th:each="message : ${messages}" th:class="${message.level}">
+      <span th:text="${message.text}">message</span>
+      <a href="#" class="close" onclick="this.parentElement.remove(); return false;">x</a>
+    </li>
+  </ul>
+  <div id="content">
+    <div layout:fragment="content"></div>
+  </div>
+  <script>
+    // 所有页面共用：fetch 发 POST 时把它们放进请求头
+    const csrfToken = document.querySelector('meta[name="_csrf"]').content;
+    const csrfHeader = document.querySelector('meta[name="_csrf_header"]').content;
+  </script>
+  <!--/* ≈ {% block domready %}：子模板在这里放自己的脚本 */-->
+  <script layout:fragment="domready"></script>
+</body>
+</html>

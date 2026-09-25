@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Educa</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Subjects</h1>
+  <div class="module">
+    <ul><li th:each="s : ${subjects}" th:text="${s.title}">Mathematics</li></ul>
+    <p th:if="${#lists.isEmpty(subjects)}">No subjects yet. Run <code>--loaddata=subjects</code>.</p>
+  </div>
+</div>
+</body>
+</html>

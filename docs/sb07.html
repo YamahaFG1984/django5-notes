@@ -1,0 +1,630 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Spring Boot 版第 7 章 · 追踪用户行为 — Django 5 实战笔记</title>
+<link rel="stylesheet" href="assets/style.css">
+</head>
+<body data-book="spring" data-chapter="7">
+<div id="app">
+<aside id="sidebar"></aside>
+<main>
+
+<span class="chapter-eyebrow">Spring Boot 版 · 第 7 章 · 项目二：图片书签社交网站</span>
+<h1>追踪用户行为</h1>
+<p class="lede">
+  社交网站项目的最后一章：用户可以互相关注，仪表盘上出现“关注的人最近做了什么”的活动流；
+  点赞数用冗余字段维护，图片浏览数和排行榜交给 Redis。Django 版在这里用到了自关联的多对多、<code>GenericForeignKey</code>、
+  信号和 Debug Toolbar，它们在 Spring 里分别变成“中间实体”、“类型 + id”、应用事件和 SQL 日志 + Actuator。
+</p>
+
+<div class="goals">
+  <h4>本章目标</h4>
+  <ul>
+    <li>把“带额外字段的多对多”建模成中间实体，实现关注 / 取消关注</li>
+    <li>用“类型名 + id”实现 <code>GenericForeignKey</code>，并批量加载异构目标，避免 N+1</li>
+    <li>用 <code>ApplicationEventPublisher</code> + <code>@EventListener</code> 替代 Django 信号，理解同步、事务内、事务后的区别</li>
+    <li>在没有 Debug Toolbar 的情况下观察 SQL、映射表和配置</li>
+    <li>用 <code>StringRedisTemplate</code> 做计数器和有序集合排行，用 Testcontainers 测试</li>
+  </ul>
+</div>
+
+<p>对应的 Django 讲解见 <a href="ch07.html">Django 版第 7 章</a>；本章代码在 <code>springboot/Chapter07/</code>。</p>
+
+<div id="chapter-toc"></div>
+
+<h2 id="follow">关注系统：中间实体</h2>
+
+<p>Django 版定义了 <code>Contact</code> 模型，再通过 <code>add_to_class</code> 给内置的 <code>User</code> 动态加上一个 <code>following</code> 字段：</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · account/models.py</div>
+<div class="code" data-lang="py"><pre>
+class Contact(models.Model):
+    user_from = models.ForeignKey(settings.AUTH_USER_MODEL,
+        related_name='rel_from_set', on_delete=models.CASCADE)
+    user_to = models.ForeignKey(settings.AUTH_USER_MODEL,
+        related_name='rel_to_set', on_delete=models.CASCADE)
+    created = models.DateTimeField(auto_now_add=True)
+
+# 给 User 动态添加字段（猴子补丁）
+user_model = get_user_model()
+user_model.add_to_class(
+    'following',
+    models.ManyToManyField('self', through=Contact,
+        related_name='followers', symmetrical=False))
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · account/Contact.java</div>
+<div class="code" data-lang="java"><pre>
+@Entity
+@Table(name = "account_contact",
+    indexes = @Index(name = "account_contact_created_idx",
+                     columnList = "created DESC"),
+    uniqueConstraints = @UniqueConstraint(
+        name = "account_contact_from_to_uniq",
+        columnNames = {"user_from_id", "user_to_id"}))
+public class Contact {
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "user_from_id")
+    private User userFrom;
+
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "user_to_id")
+    private User userTo;
+
+    @CreationTimestamp
+    private OffsetDateTime created;
+}
+</pre></div></div>
+</div>
+
+<ul>
+  <li>多对多需要额外字段（这里是 <code>created</code>）时，JPA 的标准做法是<strong>直接把中间表建模成实体</strong>，用两个 <code>@ManyToOne</code> 连接两端。不需要 <code>add_to_class</code> 这种运行时修改类的技巧 —— <code>User</code> 本来就是我们自己的类。</li>
+  <li>加了 <code>(user_from_id, user_to_id)</code> 唯一约束：Django 版的 <code>get_or_create</code> 在并发下可能插入重复关注，数据库约束能兜底。</li>
+  <li>“我关注了谁”“谁关注了我”写成仓库查询：</li>
+</ul>
+
+<div class="code" data-lang="java" data-file="account/ContactRepository.java">
+<pre>
+boolean existsByUserFromIdAndUserToId(Long userFromId, Long userToId);
+
+long countByUserToId(Long userToId);                         // user.followers.count
+
+@Query("select c.userTo.id from Contact c where c.userFrom.id = :userId")
+List&lt;Long&gt; findFollowingIds(@Param("userId") Long userId);  // request.user.following.values_list('id', flat=True)
+
+@Modifying(flushAutomatically = true, clearAutomatically = true)
+@Query("delete from Contact c where c.userFrom.id = :fromId and c.userTo.id = :toId")
+int unfollow(@Param("fromId") Long fromId, @Param("toId") Long toId);
+</pre>
+</div>
+
+<h3>ABSOLUTE_URL_OVERRIDES</h3>
+
+<p>内置 <code>User</code> 没有 <code>get_absolute_url</code>，书中用 <code>ABSOLUTE_URL_OVERRIDES</code> 设置从外部“注入”一个。Spring 版的 <code>User</code> 是自己的类，直接加方法即可：</p>
+
+<div class="code" data-lang="java">
+<pre>
+public String getAbsoluteUrl() {
+    return "/account/users/" + username + "/";
+}
+</pre>
+</div>
+
+<h3>People 页面与关注按钮</h3>
+
+<p><code>PeopleController</code> 提供用户列表、用户详情和关注接口。关注接口和上一章的点赞接口是同一个套路（POST + JSON + 请求头里的 CSRF 令牌）：</p>
+
+<div class="code" data-lang="java" data-file="account/PeopleController.java 与 FollowService.java（节选）">
+<pre>
+/** 固定路径 /follow/ 比 /{username}/ 更具体，Spring 会优先匹配它 */
+@PostMapping("/follow/")
+@ResponseBody
+public Map&lt;String, String&gt; follow(@AuthenticationPrincipal CurrentUser me,
+                                  @RequestParam(required = false) Long id,
+                                  @RequestParam(required = false) String action) {
+    if (id != null &amp;&amp; action != null &amp;&amp; follows.follow(me.id(), id, "follow".equals(action))) {
+        return Map.of("status", "ok");
+    }
+    return Map.of("status", "error");
+}
+
+// FollowService
+public boolean follow(Long meId, Long targetId, boolean follow) {
+    if (meId.equals(targetId)) {
+        return false;                 // 书中允许关注自己，这里拦掉
+    }
+    return users.findById(targetId).filter(User::isActive).map(target -&gt; {
+        if (follow) {
+            if (!contacts.existsByUserFromIdAndUserToId(meId, targetId)) {
+                contacts.save(new Contact(users.getReferenceById(meId), target));
+            }
+            actions.create(meId, "is following", target);
+        } else {
+            contacts.unfollow(meId, targetId);
+        }
+        return true;
+    }).orElse(false);
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; URL 匹配顺序</div>
+  <p>
+    Django 按 <code>urlpatterns</code> 的书写顺序匹配，所以 <code>users/follow/</code> 必须写在 <code>users/&lt;username&gt;/</code> 前面，否则用户名为 “follow” 的请求会被错误派发。
+    Spring MVC 不看书写顺序，而是选择<strong>最具体</strong>的模式：字面量路径优先于变量。
+  </p>
+</div>
+
+<h2 id="actions">活动流：GenericForeignKey 的替代</h2>
+
+<p>
+  “alice 收藏了一张图片”“bob 关注了 alice”—— 动态的目标可能是图片，也可能是用户。
+  Django 用 contenttypes 框架的 <code>GenericForeignKey</code>：一列存“是哪个模型”（指向 <code>django_content_type</code> 表），一列存 id。
+  JPA 没有这个概念，我们用最朴素的办法：<strong>一列存类型名，一列存 id</strong>。
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · actions/models.py</div>
+<div class="code" data-lang="py"><pre>
+class Action(models.Model):
+    user = models.ForeignKey(settings.AUTH_USER_MODEL,
+        related_name='actions', on_delete=models.CASCADE)
+    verb = models.CharField(max_length=255)
+    created = models.DateTimeField(auto_now_add=True)
+    target_ct = models.ForeignKey(ContentType,
+        blank=True, null=True,
+        related_name='target_obj',
+        on_delete=models.CASCADE)
+    target_id = models.PositiveIntegerField(
+        null=True, blank=True)
+    target = GenericForeignKey('target_ct', 'target_id')
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · actions/Action.java（节选）</div>
+<div class="code" data-lang="java"><pre>
+@Entity
+@Table(name = "actions_action", indexes = {
+    @Index(name = "actions_action_created_idx",
+           columnList = "created DESC"),
+    @Index(name = "actions_action_target_idx",
+           columnList = "target_type, target_id")})
+public class Action {
+    @ManyToOne(fetch = FetchType.LAZY, optional = false)
+    @JoinColumn(name = "user_id")
+    private User user;
+
+    @Column(nullable = false, length = 255)
+    private String verb;
+
+    @Column(name = "target_type", length = 50)
+    private String targetType;     // "image" / "user"
+
+    @Column(name = "target_id")
+    private Long targetId;
+
+    public Action(User user, String verb, ActionTarget target) {
+        ...
+        if (target != null) {
+            this.targetType = target.targetType();
+            this.targetId = target.getId();
+        }
+    }
+}
+
+// 能作为目标的实体实现这个接口
+public interface ActionTarget {
+    Long getId();
+    String targetType();
+}
+</pre></div></div>
+</div>
+
+<h3>create_action：一分钟内不重复记录</h3>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · actions/utils.py</div>
+<div class="code" data-lang="py"><pre>
+def create_action(user, verb, target=None):
+    now = timezone.now()
+    last_minute = now - datetime.timedelta(seconds=60)
+    similar_actions = Action.objects.filter(
+        user_id=user.id, verb=verb,
+        created__gte=last_minute)
+    if target:
+        target_ct = ContentType.objects.get_for_model(target)
+        similar_actions = similar_actions.filter(
+            target_ct=target_ct, target_id=target.id)
+    if not similar_actions:
+        action = Action(user=user, verb=verb, target=target)
+        action.save()
+        return True
+    return False
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · ActionService / ActionRepository</div>
+<div class="code" data-lang="java"><pre>
+public boolean create(Long userId, String verb, ActionTarget target) {
+    OffsetDateTime lastMinute = OffsetDateTime.now(clock)
+            .minus(Duration.ofSeconds(60));
+    String type = target == null ? null : target.targetType();
+    Long targetId = target == null ? null : target.getId();
+    if (actions.existsSimilar(userId, verb, type, targetId, lastMinute)) {
+        return false;
+    }
+    actions.save(new Action(users.getReferenceById(userId), verb, target));
+    return true;
+}
+
+@Query("""
+    select count(a) &gt; 0 from Action a
+    where a.user.id = :userId and a.verb = :verb and a.created &gt;= :since
+      and ((:targetType is null and a.targetType is null)
+           or (a.targetType = :targetType and a.targetId = :targetId))
+    """)
+boolean existsSimilar(...);
+</pre></div></div>
+</div>
+
+<p>书中的 <code>if not similar_actions:</code> 会把整个 QuerySet 取回来再判断是否为空；这里用 <code>count(a) &gt; 0</code> 让数据库返回一个布尔值，等价于 Django 的 <code>.exists()</code>。</p>
+
+<h3>读取活动流：按类型批量加载目标</h3>
+
+<p>Django 版用 <code>select_related('user', 'user__profile').prefetch_related('target')</code>，<code>prefetch_related</code> 能识别 <code>GenericForeignKey</code>，按内容类型分组各查一次。Spring 版把这一过程手写出来：</p>
+
+<figure>
+<svg class="dgm" viewBox="0 0 760 250" role="img" aria-label="活动流的批量加载：先查最近 10 条动态连同用户，再按用户 id 查头像，再把目标按类型分组，图片一条 IN 查询、用户一条 IN 查询，最后在内存里组装成 ActionView">
+  <rect class="bx-a" x="10" y="95" width="170" height="60" rx="10"/>
+  <text class="ttl on-a" x="95" y="119" text-anchor="middle">① 最近 10 条动态</text>
+  <text class="sm" x="95" y="138" text-anchor="middle">@EntityGraph("user")</text>
+
+  <rect class="bx-b" x="250" y="10" width="220" height="56" rx="10"/>
+  <text class="ttl on-b" x="360" y="34" text-anchor="middle">② 头像</text>
+  <text class="mono sm" x="360" y="53" text-anchor="middle">profile WHERE user_id IN (…)</text>
+
+  <rect class="bx-b" x="250" y="97" width="220" height="56" rx="10"/>
+  <text class="ttl on-b" x="360" y="121" text-anchor="middle">③ 目标：图片</text>
+  <text class="mono sm" x="360" y="140" text-anchor="middle">image WHERE id IN (…)</text>
+
+  <rect class="bx-b" x="250" y="184" width="220" height="56" rx="10"/>
+  <text class="ttl on-b" x="360" y="208" text-anchor="middle">③ 目标：用户</text>
+  <text class="mono sm" x="360" y="227" text-anchor="middle">auth_user WHERE id IN (…)</text>
+
+  <rect class="bx-g" x="550" y="95" width="200" height="60" rx="10"/>
+  <text class="ttl on-g" x="650" y="119" text-anchor="middle">④ 组装 ActionView</text>
+  <text class="sm" x="650" y="138" text-anchor="middle">模板渲染时不再查库</text>
+
+  <path class="ln" d="M182 110 L246 42" marker-end="url(#ar)"/>
+  <path class="ln" d="M182 125 H246" marker-end="url(#ar)"/>
+  <path class="ln" d="M182 140 L246 208" marker-end="url(#ar)"/>
+  <path class="ln-g" d="M472 38 L546 110" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M472 125 H546" marker-end="url(#ar-g)"/>
+  <path class="ln-g" d="M472 212 L546 140" marker-end="url(#ar-g)"/>
+</svg>
+<figcaption>图 S7-1　查询次数固定：先查关注列表 1 条，再加图中 4 条；目标类型越多，③ 越多</figcaption>
+</figure>
+
+<div class="code" data-lang="java" data-file="actions/ActionService.java（节选）">
+<pre>
+@Transactional(readOnly = true)
+public List&lt;ActionView&gt; feedFor(Long userId, int count) {
+    List&lt;Long&gt; following = contacts.findFollowingIds(userId);
+    List&lt;Action&gt; latest = following.isEmpty()
+            ? actions.findByUserIdNotOrderByCreatedDesc(userId, Limit.of(count))   // 默认：除自己以外的所有人
+            : actions.findByUserIdInOrderByCreatedDesc(following, Limit.of(count)); // 关注了人：只看他们
+
+    Map&lt;Long, String&gt; photos = ...;                                               // ② 头像
+    Map&lt;Long, Image&gt; targetImages = byId(images.findAllById(idsOf(latest, Image.TARGET_TYPE)), Image::getId);
+    Map&lt;Long, User&gt; targetUsers = byId(users.findAllById(idsOf(latest, User.TARGET_TYPE)), User::getId);
+    ...                                                                          // ④ 组装
+}
+</pre>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; “类型 + id”没有外键约束</div>
+  <p>
+    这是泛型关系的通病，Django 的 <code>GenericForeignKey</code> 也一样：数据库不知道 <code>target_id</code> 指向哪张表，目标被删除时不会级联，动态里会留下悬空引用。
+    代码里用 <code>containsKey</code> 跳过找不到的目标；更完整的做法是在删除图片时同时删除相关动态，或者定期清理。
+  </p>
+</div>
+
+<h3>timesince 过滤器</h3>
+
+<p>动态上显示“2 hours, 5 minutes ago”，对应 Django 的 <code>{{ action.created|timesince }}</code>。和之前的过滤器一样，加到 <code>TextFilters</code> 里：最多显示两个相邻的单位，并注入 <code>Clock</code> 方便测试。</p>
+
+<div class="code" data-lang="th" data-file="templates/actions/action/detail.html（节选）">
+<pre>
+&lt;span class="date" th:text="|${#text.timesince(item.action.created)} ago|"&gt;1 minute ago&lt;/span&gt;
+</pre>
+</div>
+
+<h2 id="events">信号 → 应用事件</h2>
+
+<p>
+  这一章给 <code>Image</code> 加了一个冗余字段 <code>total_likes</code>，让“按热度排序”不必每次 COUNT 中间表。
+  Django 版用 <code>m2m_changed</code> 信号维护它：每当 <code>users_like</code> 变化，Django 自动发出信号，接收函数重新计数。
+</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · images/signals.py + apps.py</div>
+<div class="code" data-lang="py"><pre>
+@receiver(m2m_changed, sender=Image.users_like.through)
+def users_like_changed(sender, instance, **kwargs):
+    instance.total_likes = instance.users_like.count()
+    instance.save()
+
+# apps.py —— 必须在 ready() 里导入，接收者才会注册
+class ImagesConfig(AppConfig):
+    def ready(self):
+        import images.signals
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · 事件 + 监听器</div>
+<div class="code" data-lang="java"><pre>
+public record ImageLikesChangedEvent(Long imageId) { }
+
+// 发布方：ImageService.like()
+events.publishEvent(new ImageLikesChangedEvent(imageId));
+
+// 监听方：只要是个 Bean 就会被自动注册
+@Component
+public class ImageLikesListener {
+
+    @EventListener
+    public void onLikesChanged(ImageLikesChangedEvent event) {
+        images.findById(event.imageId()).ifPresent(image -&gt;
+            image.setTotalLikes(image.getUsersLike().size()));
+    }
+}
+</pre></div></div>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>Django 信号</th><th>Spring 应用事件</th></tr>
+  <tr><td>内置信号由框架自动发出（<code>post_save</code>、<code>m2m_changed</code>…）</td><td>业务事件要自己 <code>publishEvent</code>；框架也有内置事件（登录成功、上下文启动…）</td></tr>
+  <tr><td><code>@receiver(signal, sender=...)</code></td><td><code>@EventListener</code>，按事件<strong>类型</strong>分派</td></tr>
+  <tr><td>在 <code>AppConfig.ready()</code> 里导入模块才能注册</td><td>监听器是 Bean，组件扫描自动注册</td></tr>
+  <tr><td>同步执行，在发送者的事务里</td><td><code>@EventListener</code> 同样同步、同事务</td></tr>
+  <tr><td><code>transaction.on_commit(...)</code></td><td><code>@TransactionalEventListener(phase = AFTER_COMMIT)</code></td></tr>
+  <tr><td>异步需要 Celery</td><td>再加 <code>@Async</code> 即可在线程池里执行</td></tr>
+  <tr><td>模型级 <code>pre_save</code>/<code>post_save</code></td><td>JPA 回调 <code>@PrePersist</code>/<code>@PostPersist</code>，或 Hibernate 事件监听器</td></tr>
+</table>
+</div>
+
+<div class="box deep">
+  <div class="t">&#128270; 该用哪种监听方式</div>
+  <p>
+    维护 <code>total_likes</code> 必须和点赞在<strong>同一个事务</strong>里：要么一起成功，要么一起回滚，所以用普通的 <code>@EventListener</code>。
+    如果监听器要做的是发邮件、推消息这类“外部副作用”，就应该用 <code>@TransactionalEventListener(phase = AFTER_COMMIT)</code>：
+    否则事务回滚了，邮件却已经发出去了。Django 里对应的是把副作用放进 <code>transaction.on_commit()</code>。
+  </p>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; 显式发布 vs 自动信号</div>
+  <p>
+    Django 的 <code>m2m_changed</code> 在任何地方修改 <code>users_like</code> 都会触发（包括 admin、shell）；Spring 版只有经过 <code>ImageService.like()</code> 的修改才会发布事件。
+    这是“显式优于隐式”的取舍：调用链一目了然，但要保证所有修改都经过 service。书中也提醒过，信号会让代码的执行路径变得难以追踪。
+  </p>
+</div>
+
+<h2 id="debug">没有 Debug Toolbar 怎么调试</h2>
+
+<p>django-debug-toolbar 在页面侧边显示 SQL、模板、设置、请求头等信息。Java 生态没有一个等价的“页面内工具栏”，但这些信息都能拿到。本项目提供了一个 <code>dev</code> profile：</p>
+
+<div class="code" data-lang="yaml" data-file="application.yaml（节选）">
+<pre>
+---
+spring:
+  config:
+    activate:
+      on-profile: dev              # mvn spring-boot:run -Dspring-boot.run.profiles=dev
+  jpa:
+    properties:
+      hibernate:
+        generate_statistics: true  # 每个会话结束时打印 SQL 条数、耗时
+logging:
+  level:
+    org.hibernate.SQL: debug                 # 每条 SQL
+    org.hibernate.orm.jdbc.bind: trace       # SQL 参数
+    org.hibernate.stat: debug
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,mappings,beans,env,configprops,conditions,metrics,flyway,loggers
+</pre>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>Debug Toolbar 面板 / Django 工具</th><th>Spring 里去哪看</th></tr>
+  <tr><td>SQL 面板</td><td>日志 <code>org.hibernate.SQL</code> + 统计信息；或者 datasource-proxy / p6spy 记录带参数的完整 SQL</td></tr>
+  <tr><td>Settings 面板</td><td><code>/actuator/env</code>、<code>/actuator/configprops</code>（敏感值默认打码）</td></tr>
+  <tr><td><code>show_urls</code>（django-extensions）</td><td><code>/actuator/mappings</code>：所有 URL → 控制器方法</td></tr>
+  <tr><td>Signals 面板</td><td>没有直接对应；IDE 里对 <code>@EventListener</code> “查找用法”</td></tr>
+  <tr><td>“为什么这个组件被加载了”</td><td><code>/actuator/conditions</code>：每个自动配置生效或跳过的原因</td></tr>
+  <tr><td><code>showmigrations</code></td><td><code>/actuator/flyway</code></td></tr>
+  <tr><td>运行时改日志级别</td><td><code>POST /actuator/loggers/org.hibernate.SQL</code></td></tr>
+</table>
+</div>
+
+<div class="box warn">
+  <div class="t">&#9888; Actuator 端点必须保护</div>
+  <p>
+    <code>/actuator/env</code>、<code>/actuator/heapdump</code> 之类的端点可能泄露密钥和数据。本项目默认只暴露 <code>health</code>，
+    <code>dev</code> profile 才多开几个，并且 <code>SecurityConfig</code> 规定 <code>/actuator/**</code>（除 <code>health</code> 外）只有 <code>ROLE_ADMIN</code> 能访问 —— 测试里验证了普通用户访问 <code>/actuator/beans</code> 会得到 403。
+    Debug Toolbar 靠 <code>INTERNAL_IPS</code> 限制访问，思路相同。
+  </p>
+</div>
+
+<h2 id="redis">Redis：浏览计数与排行</h2>
+
+<p>加入 <code>spring-boot-starter-data-redis</code> 后，Spring Boot 自动配置好连接（默认 Lettuce 客户端）和一个 <code>StringRedisTemplate</code>。键名和 Django 版完全一样：</p>
+
+<div class="vs">
+  <div class="dj"><div class="h">Django · images/views.py</div>
+<div class="code" data-lang="py"><pre>
+r = redis.Redis(host=settings.REDIS_HOST,
+                port=settings.REDIS_PORT,
+                db=settings.REDIS_DB)
+
+# image_detail
+total_views = r.incr(f'image:{image.id}:views')
+r.zincrby('image_ranking', 1, image.id)
+
+# image_ranking
+image_ranking = r.zrange('image_ranking', 0, -1,
+                         desc=True)[:10]
+image_ranking_ids = [int(id) for id in image_ranking]
+most_viewed = list(Image.objects.filter(
+    id__in=image_ranking_ids))
+most_viewed.sort(
+    key=lambda x: image_ranking_ids.index(x.id))
+</pre></div></div>
+  <div class="sb"><div class="h">Spring · images/ImageViews.java + ImageService</div>
+<div class="code" data-lang="java"><pre>
+public long recordView(Long imageId) {
+    Long total = redis.opsForValue()
+            .increment("image:" + imageId + ":views");    // INCR
+    redis.opsForZSet()
+            .incrementScore(RANKING_KEY, imageId.toString(), 1);  // ZINCRBY
+    return total == null ? 0 : total;
+}
+
+public List&lt;Long&gt; topIds(int count) {
+    // ZREVRANGE image_ranking 0 9：让 Redis 只返回前 N 个
+    Set&lt;String&gt; ids = redis.opsForZSet()
+            .reverseRange(RANKING_KEY, 0, count - 1L);
+    return ids == null ? List.of()
+            : ids.stream().map(Long::valueOf).toList();
+}
+
+// ImageService：IN 查询不保证顺序，按排行重新排序
+public List&lt;Image&gt; inOrder(List&lt;Long&gt; ids) {
+    Map&lt;Long, Image&gt; byId = images.findAllById(ids).stream()
+            .collect(toMap(Image::getId, image -&gt; image));
+    return ids.stream().filter(byId::containsKey)
+            .map(byId::get).toList();
+}
+</pre></div></div>
+</div>
+
+<div class="box tip">
+  <div class="t">&#128161; 书中的一个小浪费</div>
+  <p><code>r.zrange('image_ranking', 0, -1, desc=True)[:10]</code> 先把整个有序集合取回 Python 再切片。图片多了以后应该写成 <code>r.zrange('image_ranking', 0, 9, desc=True)</code>，让 Redis 只返回前 10 个 —— Spring 版就是这么做的。</p>
+</div>
+
+<div class="tw">
+<table>
+  <tr><th>Redis 命令</th><th>redis-py</th><th>Spring Data Redis</th></tr>
+  <tr><td><code>INCR</code></td><td><code>r.incr(key)</code></td><td><code>opsForValue().increment(key)</code></td></tr>
+  <tr><td><code>ZINCRBY</code></td><td><code>r.zincrby(key, 1, member)</code></td><td><code>opsForZSet().incrementScore(key, member, 1)</code></td></tr>
+  <tr><td><code>ZREVRANGE</code></td><td><code>r.zrange(key, 0, 9, desc=True)</code></td><td><code>opsForZSet().reverseRange(key, 0, 9)</code></td></tr>
+  <tr><td><code>ZUNIONSTORE</code>（第 10 章）</td><td><code>r.zunionstore(dest, keys)</code></td><td><code>opsForZSet().unionAndStore(key, otherKeys, dest)</code></td></tr>
+</table>
+</div>
+
+<h3>开发环境与测试</h3>
+
+<p>项目根目录的 <code>compose.yaml</code> 只有一个 Redis 服务；<code>mvn spring-boot:run</code> 时 <code>spring-boot-docker-compose</code> 自动启动它，并把地址注入 <code>spring.data.redis.*</code>（对应 Django 设置里的 <code>REDIS_HOST</code>/<code>REDIS_PORT</code>）。测试用 Testcontainers：</p>
+
+<div class="code" data-lang="java" data-file="src/test/java/.../TestcontainersConfiguration.java">
+<pre>
+@TestConfiguration(proxyBeanMethods = false)
+public class TestcontainersConfiguration {
+
+    @Bean
+    @ServiceConnection(name = "redis")      // 普通容器要用 name 告诉 Boot 它是什么服务
+    GenericContainer&lt;?&gt; redis() {
+        return new GenericContainer&lt;&gt;("redis:7.2").withExposedPorts(6379);
+    }
+}
+</pre>
+</div>
+
+<div class="box note">
+  <div class="t">&#9432; Redis 不参与数据库事务</div>
+  <p>测试类上的 <code>@Transactional</code> 只会回滚数据库，Redis 里的计数会留下来，所以每个测试开始前执行一次 <code>FLUSHDB</code>。同理，业务代码里“写库 + 写 Redis”也不是原子的：事务回滚时 Redis 不会跟着回滚。浏览计数这种允许误差的数据无所谓，重要数据要小心。</p>
+</div>
+
+<h2 id="tests">测试</h2>
+
+<p>本章共 35 个测试（新增 8 个）：关注/取消关注及各种错误情况、People 页面只显示活跃用户、一分钟内的重复动态、关注前后仪表盘显示的动态、点赞事件维护 <code>total_likes</code>、Redis 浏览计数和排行顺序、Actuator 访问控制，以及 <code>timesince</code> 的单元测试。</p>
+
+<div class="code" data-lang="java" data-file="FollowAndActionsTests.java（节选）">
+<pre>
+@Test
+void likesUpdateTotalLikesThroughEvent() {
+    Image image = imageOf(alice, "Sunset");
+    imageService.like(image.getId(), bob.getId(), true);
+    imageService.like(image.getId(), carol.getId(), true);
+    entityManager.flush();
+    entityManager.clear();
+    assertThat(images.findById(image.getId()).orElseThrow().getTotalLikes()).isEqualTo(2);
+    ...
+}
+</pre>
+</div>
+
+<h2 id="review">差异点评</h2>
+
+<div class="review">
+  <div class="h">&#128269; 第 7 章 Spring 版点评 <small>springboot/Chapter07</small></div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 活动流的查询次数固定</h4>
+    <p>和 Django 的 <code>select_related</code> + <code>prefetch_related</code> 一样，查询次数不随动态数量增长；而且全部在 service 里完成，模板渲染时没有任何隐藏的 SQL。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag good">做得好</span> 关注关系有唯一约束，不能关注自己</h4>
+    <p>修正了原书的两个小问题。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> 事件只在经过 service 时发布</h4>
+    <p>如果以后有别的代码直接修改 <code>usersLike</code>，<code>total_likes</code> 就会不准。可以把点赞逻辑收进 <code>Image</code> 实体的方法里（<code>image.likeBy(user)</code>），由实体注册领域事件（Spring Data 的 <code>@DomainEvents</code>），保证“改了就一定发事件”。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag warn">注意</span> total_likes 在并发点赞时可能不准</h4>
+    <p>两个事务同时点赞，各自读到的集合大小都没包含对方。Django 版的信号有同样的问题。可以改用 <code>update Image i set i.totalLikes = (select count(...)) where i.id = :id</code> 一条 SQL 计算，或者在查询时实时统计。</p>
+  </div>
+
+  <div class="item">
+    <h4><span class="tag info">补充知识</span> 为什么不用 Hibernate 的 @Any</h4>
+    <p>Hibernate 有 <code>@Any</code> 注解可以映射“多态关联”，写法更接近 <code>GenericForeignKey</code>。但它是 Hibernate 专有特性、查询和预取都不方便。“类型 + id”两列 + 手动批量加载更直观，也更容易迁移。</p>
+  </div>
+</div>
+
+<h2 id="summary">小结</h2>
+
+<ul>
+  <li>带额外字段的多对多 → 中间实体 + 两个 <code>@ManyToOne</code>；再加唯一约束。</li>
+  <li><code>GenericForeignKey</code> → 类型名 + id 两列；读取时按类型分组批量加载。</li>
+  <li>信号 → <code>publishEvent</code> + <code>@EventListener</code>；副作用放到 <code>@TransactionalEventListener(AFTER_COMMIT)</code>。</li>
+  <li>Debug Toolbar → SQL 日志 + Hibernate 统计 + Actuator 端点（一定要保护）。</li>
+  <li>Redis → <code>StringRedisTemplate</code> 的 <code>opsForValue()</code>、<code>opsForZSet()</code>；开发用 compose，测试用 Testcontainers。</li>
+</ul>
+
+<div class="exercise">
+  <h3>动手练习</h3>
+  <ol>
+    <li>给图片列表加一个“按热度排序”的选项（<code>order by totalLikes desc</code>），确认用上了 <code>images_image_total_likes_idx</code> 索引。</li>
+    <li>把“发布动态”改成监听事件：<code>ImageService</code> 发布 <code>ImageBookmarkedEvent</code>，由 <code>ActionService</code> 监听并记录。思考它该用 <code>@EventListener</code> 还是 <code>@TransactionalEventListener</code>。</li>
+    <li>删除图片时，同时删除以它为目标的动态（提示：在 <code>ActionRepository</code> 加一个 <code>deleteByTargetTypeAndTargetId</code>）。</li>
+    <li>引入 datasource-proxy，在日志里打印每个请求执行的 SQL 条数，找出仪表盘页面一共发了几条 SQL。</li>
+  </ol>
+</div>
+
+<div id="pager"></div>
+</main>
+</div>
+<script src="assets/site.js"></script>
+</body>
+</html>

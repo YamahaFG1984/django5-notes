@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Logged out</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Logged out</h1>
+  <div class="module">
+    <p>You have been successfully logged out. You can <a th:href="@{/accounts/login/}">log-in again</a>.</p>
+  </div>
+</div>
+</body>
+</html>

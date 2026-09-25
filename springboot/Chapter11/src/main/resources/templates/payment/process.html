@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{shop/base}">
+<head><title th:text="#{payment.title}">Pay your order</title></head>
+<body>
+<div layout:fragment="content">
+  <h1 th:text="#{payment.summary}">Order summary</h1>
+  <table class="cart">
+    <thead>
+      <tr><th th:text="#{cart.image}">Image</th><th th:text="#{cart.product}">Product</th><th th:text="#{cart.price}">Price</th>
+          <th th:text="#{quantity}">Quantity</th><th th:text="#{cart.total}">Total</th></tr>
+    </thead>
+    <tbody>
+      <tr th:each="item, stat : ${order.items}" th:class="${stat.odd} ? 'row1' : 'row2'">
+        <td><img th:src="@{${item.product.imageUrl}}"></td>
+        <td th:text="${item.product.name}">name</td>
+        <td class="num" th:text="${#fmt.money(item.price)}">$0</td>
+        <td class="num" th:text="${item.quantity}">1</td>
+        <td class="num" th:text="${#fmt.money(item.cost)}">$0</td>
+      </tr>
+      <th:block th:replace="~{fragments/money :: discountRows(${order.totalCostBeforeDiscount}, ${order.coupon}, ${order.discount}, ${order.discountAmount}, 3)}"></th:block>
+      <tr class="total">
+        <td colspan="4" th:text="#{cart.total}">Total</td>
+        <td class="num" th:text="${#fmt.money(order.totalCost)}">$0</td>
+      </tr>
+    </tbody>
+  </table>
+  <form th:action="@{/payment/process/}" method="post">
+    <input type="submit" th:value="#{payment.pay-now}" value="Pay now">
+  </form>
+</div>
+</body>
+</html>

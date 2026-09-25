@@ -1,0 +1,17 @@
+# 开发用 PostgreSQL。用 mvn spring-boot:run 启动应用时，spring-boot-docker-compose 会自动执行 docker compose up，
+# 并把连接信息注入 spring.datasource.*；直接 java -jar 运行时需要先手动 docker compose up -d。
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: blog
+      POSTGRES_USER: blog
+      POSTGRES_PASSWORD: blog
+    ports:
+      - "${DB_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data   # 命名卷：数据保存在 Docker 管理的目录里，不会在项目里生成 root 属主的文件
+
+volumes:
+  pgdata:

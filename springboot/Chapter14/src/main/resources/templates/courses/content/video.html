@@ -1,0 +1,7 @@
+<!--/* ≈ {% video item.url "small" %}（django-embed-video）。认不出的网站就显示一个链接 */-->
+<th:block th:fragment="item(item)">
+  <iframe th:if="${item.embedUrl}" th:src="${item.embedUrl}" width="480" height="360"
+          frameborder="0" allowfullscreen
+          allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"></iframe>
+  <p th:unless="${item.embedUrl}"><a th:href="${item.url}" th:text="${item.url}" rel="noopener" target="_blank">video</a></p>
+</th:block>

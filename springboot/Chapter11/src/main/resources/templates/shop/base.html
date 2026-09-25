@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<!--/* #{key} 从 MessageSource 取当前语言的文本（≈ {% translate "..." %}），不需要 {% load i18n %}。 */-->
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      th:lang="${currentLanguage}">
+<head>
+  <meta charset="utf-8">
+  <title layout:title-pattern="$CONTENT_TITLE" th:text="#{site.title}">My shop</title>
+  <link th:href="@{/static/css/base.css}" rel="stylesheet">
+</head>
+<body>
+  <div id="header">
+    <!--/* @{/} 会自动带上语言前缀：/en/ 或 /es/ */-->
+    <a th:href="@{/}" class="logo" th:text="#{site.title}">My shop</a>
+    <div class="languages">
+      <p th:text="|#{language}:|">Language:</p>
+      <ul class="languages">
+        <li th:each="language : ${languages}">
+          <a th:href="|/${language.code}/|" th:classappend="${language.code == currentLanguage} ? 'selected'"
+             th:text="${language.nameLocal}">English</a>
+        </li>
+      </ul>
+    </div>
+  </div>
+  <div id="subheader">
+    <div class="cart" th:with="totalItems=${cartSummary.totalItems}">
+      <th:block th:if="${totalItems > 0}">
+        <th:block th:text="|#{cart.yours}:|">Your cart:</th:block>
+        <!--/* 带参数和复数的翻译：#{key(参数...)}；复数规则写在 messages 里的 choice 格式中 */-->
+        <a th:href="@{/cart/}" th:text="#{cart.summary(${totalItems}, ${#fmt.money(cartSummary.totalPrice)})}">1 item, $10</a>
+      </th:block>
+      <th:block th:if="${totalItems == 0 and order == null}" th:text="#{cart.empty}">Your cart is empty.</th:block>
+    </div>
+  </div>
+  <div id="content">
+    <div layout:fragment="content"></div>
+  </div>
+</body>
+</html>

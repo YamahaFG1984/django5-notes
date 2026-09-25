@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org"
+      xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout"
+      layout:decorate="~{admin/layout}">
+<head>
+  <title>Select comment to change</title>
+</head>
+<body>
+<div layout:fragment="content">
+  <h1>Select comment to change</h1>
+  <form method="get" class="search">
+    <input type="search" name="q" th:value="${q}" placeholder="Search name, email or body">
+    <input th:if="${active != null}" type="hidden" name="active" th:value="${active}">
+    <button type="submit">Search</button>
+  </form>
+  <div class="layout">
+    <table>
+      <thead>
+        <tr><th>Name</th><th>Email</th><th>Post</th><th>Created</th><th>Active</th><th></th></tr>
+      </thead>
+      <tbody>
+        <tr th:each="c : ${page.content}">
+          <td th:text="${c.name}">name</td>
+          <td th:text="${c.email}">email</td>
+          <td th:text="${c.post}">post</td>
+          <td th:text="${#temporals.format(c.created, 'yyyy-MM-dd HH:mm')}">created</td>
+          <td th:text="${c.active} ? '✔' : '✘'">✔</td>
+          <td>
+            <form th:action="@{/admin/blog/comment/{id}/toggle/(id=${c.id})}" method="post">
+              <button type="submit" th:text="${c.active} ? 'Hide' : 'Activate'">Hide</button>
+            </form>
+          </td>
+        </tr>
+        <tr th:if="${page.empty}"><td colspan="6">0 comments</td></tr>
+      </tbody>
+    </table>
+    <aside class="filter">
+      <h3>By active</h3>
+      <ul>
+        <li th:classappend="${active == null} ? 'selected'"><a th:href="@{/admin/blog/comment/(q=${q})}">All</a></li>
+        <li th:classappend="${active == true} ? 'selected'"><a th:href="@{/admin/blog/comment/(q=${q},active=true)}">Yes ([[${activeCount}]])</a></li>
+        <li th:classappend="${active == false} ? 'selected'"><a th:href="@{/admin/blog/comment/(q=${q},active=false)}">No ([[${inactiveCount}]])</a></li>
+      </ul>
+    </aside>
+  </div>
+  <p class="paginator" th:text="|${page.totalElements} comments|">0 comments</p>
+</div>
+</body>
+</html>

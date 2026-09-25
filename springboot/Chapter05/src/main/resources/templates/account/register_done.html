@@ -1,0 +1,13 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:layout="http://www.ultraq.net.nz/thymeleaf/layout" layout:decorate="~{base}">
+<head><title>Welcome</title></head>
+<body>
+<div layout:fragment="content">
+  <h1>Welcome <span th:text="${newUser.firstName}">name</span>!</h1>
+  <p>
+    Your account has been successfully created.
+    Now you can <a th:href="@{/account/login/}">log in</a>.
+  </p>
+</div>
+</body>
+</html>
